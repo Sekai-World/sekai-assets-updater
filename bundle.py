@@ -170,8 +170,14 @@ async def extract_asset_bundle(
                         )
                 case _:
                     logger.warning(
-                        "Skipping %s of type %s", unityfs_path, unityfs_obj.type.name
+                        "Unknowen type %s of %s, extracting typetree",
+                        unityfs_obj.type.name,
+                        unityfs_path,
                     )
+                    tree = unityfs_obj.read_typetree()
+                    async with await open_file(save_path, "wb") as f:
+                        await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
+                    exported_files.append(save_path)
         except (ValueError, TypeError, AttributeError, OSError) as e:
             logger.error("Failed to extract %s: %s", unityfs_path, e)
             continue
