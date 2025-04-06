@@ -246,32 +246,40 @@ async def upload_to_storage(
     extracted_save_path: Path,
     remote_base: str,
     upload_cmd: str,
+    max_concurrent_uploads: int = 5,
 ):
-    """Upload the extracted assets to remote storage"""
+    """Upload the extracted assets to remote storage with concurrency"""
 
-    for file_path in exported_list:
-        # Construct the remote path
-        remote_path = Path(remote_base) / file_path.relative_to(extracted_save_path)
+    semaphore = asyncio.Semaphore(max_concurrent_uploads)
 
-        # Construct the upload command
-        split_command = upload_cmd.format(src=file_path, dst=remote_path).split(" ")
-        cmd = split_command[0]
-        args = split_command[1:]
-        logger.debug(
-            "Uploading %s to %s using command: %s %s",
-            file_path,
-            remote_path,
-            cmd,
-            " ".join(args),
-        )
+    async def upload_file(file_path: Path):
+        """Upload a single file to remote storage"""
+        async with semaphore:
+            # Construct the remote path
+            remote_path = Path(remote_base) / file_path.relative_to(extracted_save_path)
 
-        # Execute the command
-        upload_process = await asyncio.create_subprocess_exec(cmd, *args)
-        await upload_process.wait()
-        if upload_process.returncode != 0:
-            logger.error("Failed to upload %s to %s", file_path, remote_path)
-            raise RuntimeError(
-                f"Failed to upload {file_path} to {remote_path} using command: {cmd} {' '.join(args)}"
+            # Construct the upload command
+            split_command = upload_cmd.format(src=file_path, dst=remote_path).split(" ")
+            cmd = split_command[0]
+            args = split_command[1:]
+            logger.debug(
+                "Uploading %s to %s using command: %s %s",
+                file_path,
+                remote_path,
+                cmd,
+                " ".join(args),
             )
-        else:
-            logger.info("Successfully uploaded %s to %s", file_path, remote_path)
+
+            # Execute the command
+            upload_process = await asyncio.create_subprocess_exec(cmd, *args)
+            await upload_process.wait()
+            if upload_process.returncode != 0:
+                logger.error("Failed to upload %s to %s", file_path, remote_path)
+                raise RuntimeError(
+                    f"Failed to upload {file_path} to {remote_path} using command: {cmd} {' '.join(args)}"
+                )
+            else:
+                logger.info("Successfully uploaded %s to %s", file_path, remote_path)
+
+    # Run uploads concurrently
+    await asyncio.gather(*(upload_file(file_path) for file_path in exported_list))
