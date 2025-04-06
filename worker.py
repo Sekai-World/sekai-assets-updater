@@ -87,6 +87,7 @@ async def worker(
                             extracted_save_path,
                             storage["base"],
                             storage["cmd"],
+                            max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
                         )
         finally:
             # Clean up the temporary bundle file

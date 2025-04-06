@@ -18,6 +18,8 @@ USER_AGENT = None
 
 # Concurrency settings, default to the number of CPU cores
 MAX_CONCURRENCY = os.cpu_count()
+# Maximum number of concurrent uploads
+MAX_CONCURRENCY_UPLOADS = 10
 
 # Crypto settings
 AES_KEY = bytes("AES_KEY")
