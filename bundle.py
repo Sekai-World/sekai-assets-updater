@@ -253,6 +253,7 @@ async def extract_asset_bundle(
                 # remove the acb file
                 await acb_output_path.unlink()
                 logger.debug("Removed %s", acb_output_path)
+                exported_files.remove(acb_output_path)
 
                 if not config.EXTERNAL_VGMSTREAM_CLI:
                     raise RuntimeError(
