@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import logging
 import re
 import time
@@ -9,6 +8,7 @@ from queue import SimpleQueue
 from typing import Dict, List, Tuple
 
 import aiohttp
+import orjson as json
 from anyio import Path, open_file
 
 logger = logging.getLogger("asset_updater")
@@ -183,15 +183,15 @@ async def get_download_list(
     # Cache the download list
     if download_list:
         async with await open_file(config.DL_LIST_CACHE_PATH, "w") as f:
-            await f.write(json.dumps(download_list, ensure_ascii=False, indent=4))
+            await f.write(json.dumps(download_list, option=json.OPT_INDENT_2))
 
     # Cache the asset bundle info
     async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "w") as f:
-        await f.write(json.dumps(asset_bundle_info, ensure_ascii=False, indent=4))
+        await f.write(json.dumps(asset_bundle_info, option=json.OPT_INDENT_2))
 
     # Cache the game version json
     async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH, "w") as f:
-        await f.write(json.dumps(game_version_json, ensure_ascii=False, indent=4))
+        await f.write(json.dumps(game_version_json, option=json.OPT_INDENT_2))
 
     return download_list
 

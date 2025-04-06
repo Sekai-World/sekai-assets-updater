@@ -1,7 +1,7 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
 import asyncio
-import json
+import orjson as json
 import logging
 import re
 from io import BytesIO
@@ -18,7 +18,7 @@ from helpers import deobfuscate
 from utils.acb import extract_acb
 from utils.usm import extract_usm
 
-logger = logging.getLogger("asset_updater")
+logger = logging.getLogger("live2d")
 
 
 async def download_deobfuscate_bundle(
@@ -99,8 +99,8 @@ async def extract_asset_bundle(
                         "Saving MonoBehaviour %s to %s", unityfs_path, save_path
                     )
                     # Save the typetree to a json file
-                    async with await open_file(save_path, "w", encoding="utf-8") as f:
-                        await f.write(json.dumps(tree, indent=4, ensure_ascii=False))
+                    async with await open_file(save_path, "wb") as f:
+                        await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
 
                     if "acbFiles" in tree:
@@ -115,6 +115,8 @@ async def extract_asset_bundle(
                 case "TextAsset":
                     data = unityfs_obj.read()
                     if isinstance(data, UnityPy.classes.TextAsset):
+                        if save_path.suffix == ".bytes":
+                            save_path = save_path.with_suffix("")
                         async with await open_file(save_path, "wb") as f:
                             await f.write(
                                 data.m_Script.encode("utf-8", "surrogateescape")
@@ -193,19 +195,14 @@ async def extract_asset_bundle(
                 acb_textasset_filename: str = acb_file["assetBundleFileName"]
 
                 logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
-                acb_textasset_path = save_dir / acb_textasset_filename
-                if await acb_textasset_path.exists():
-                    # rename the file
-                    await acb_textasset_path.rename(acb_output_path)
-                    logger.debug(
-                        "Renamed %s to %s", acb_textasset_path, acb_output_path
-                    )
-                    # remove the file from exported files
-                    exported_files.remove(acb_textasset_path)
-                else:
-                    logger.warning(
-                        "%s not found in %s", acb_textasset_filename, save_dir
-                    )
+                acb_textasset_path = save_dir / acb_textasset_filename.removesuffix(
+                    ".bytes"
+                )
+                assert (
+                    acb_textasset_path == acb_output_path
+                ), f"Path mismatch: {acb_textasset_path} != {acb_output_path}"
+                if not await acb_textasset_path.exists():
+                    logger.error("%s not found in %s", acb_textasset_filename, save_dir)
             else:
                 # split files
                 patter = re.compile(r"{(\d)\:D(\d)}")
@@ -218,7 +215,7 @@ async def extract_asset_bundle(
 
                 # find and merge the files
                 acb_textasset_paths = [
-                    save_dir / acb_textasset_filename
+                    save_dir / acb_textasset_filename.removesuffix(".bytes")
                     for acb_textasset_filename in acb_textasset_filenames
                 ]
                 if all([await path.exists() for path in acb_textasset_paths]):
@@ -238,7 +235,7 @@ async def extract_asset_bundle(
                         acb_cue_sheet_name,
                     )
                 else:
-                    logger.warning(
+                    logger.error(
                         "%s not found in %s", acb_textasset_filenames, save_dir
                     )
 
@@ -248,7 +245,9 @@ async def extract_asset_bundle(
                 async with await open_file(acb_output_path, "rb") as f:
                     acb_data = await f.read()
                     extracted_audio_files = extract_acb(
-                        BytesIO(acb_data), save_dir.as_posix(), acb_output_path.as_posix()
+                        BytesIO(acb_data),
+                        save_dir.as_posix(),
+                        acb_output_path.as_posix(),
                     )
 
                 # remove the acb file
@@ -329,7 +328,8 @@ async def extract_asset_bundle(
         usm_output_path = save_dir / usm_output_name
         usm_split_filenames: List[str] = [x["usmFileName"] for x in movie_bundles]
         usm_split_paths = [
-            save_dir / usm_split_filename for usm_split_filename in usm_split_filenames
+            save_dir / usm_split_filename.removesuffix(".bytes")
+            for usm_split_filename in usm_split_filenames
         ]
 
         # merge split usm files to one
@@ -345,7 +345,9 @@ async def extract_asset_bundle(
         if await usm_output_path.exists():
             async with await open_file(usm_output_path, "rb") as f:
                 usm_data = await f.read()
-                extracted_movie_files = extract_usm(BytesIO(usm_data), save_dir.as_posix())
+                extracted_movie_files = extract_usm(
+                    BytesIO(usm_data), save_dir.as_posix()
+                )
 
             # remove the usm file
             await usm_output_path.unlink()

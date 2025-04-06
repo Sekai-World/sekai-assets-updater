@@ -9,6 +9,7 @@ unitypy = "*"
 u-msgpack-python = "*"
 pycryptodome = "*"
 anyio = "*"
+orjson = "*"
 
 [dev-packages]
 
