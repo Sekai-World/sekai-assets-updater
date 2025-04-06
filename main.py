@@ -1,9 +1,9 @@
 import asyncio
-import orjson as json
 import logging
 from typing import Dict, List, Tuple
 
 import aiohttp
+import orjson as json
 from anyio import open_file
 
 from crypto import unpack
@@ -19,30 +19,22 @@ logger = logging.getLogger("asset_updater")
 
 
 async def do_download(dl_list: List[Tuple], config, headers, cookie):
-    # Create a queue to store workload items
-    queue: asyncio.Queue[List[Tuple]] = asyncio.Queue()
+    # Create a semaphore to limit concurrency
+    semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
 
-    # Add the download tasks to the queue
-    for url, bundle_name in dl_list:
-        await queue.put((url, bundle_name))
-
-    # Create a list to store the download workers
-    # try:
-    async with asyncio.TaskGroup() as tg:
-        logger.debug("Starting %d download workers", config.MAX_CONCURRENCY)
-        # Create the download workers
-        for i in range(config.MAX_CONCURRENCY):
-            tg.create_task(
-                worker(f"download_worker-{i}", queue, config, headers, cookie=cookie)
+    async def download_task(url, bundle):
+        async with semaphore:
+            await worker(
+                f"download_worker-{url}",
+                (url, bundle),
+                config,
+                headers,
+                cookie=cookie,
             )
-        # Wait until the queue is fully processed
-        await queue.join()
-    # except:
-    #     logger.exception("Error in download workers")
-    #     # Collect all remaining tasks in the queue
-    #     remaining_tasks = []
-    #     while not queue.empty():
-    #         remaining_tasks.append(queue.get_nowait())
+
+    # Create and gather download tasks
+    tasks = [download_task(url, bundle) for url, bundle in dl_list]
+    await asyncio.gather(*tasks)
 
 
 async def main():
@@ -77,9 +69,7 @@ async def main():
         # Load the dl_list from the cache and start downloading
         async with await open_file(config.DL_LIST_CACHE_PATH, "r") as f:
             dl_list = json.loads(await f.read())
-            logger.info(
-                "%d items to download", len(dl_list)
-            )
+            logger.info("%d items to download", len(dl_list))
             await do_download(dl_list, config=config, headers=headers, cookie=cookie)
 
         # remove the cache file
