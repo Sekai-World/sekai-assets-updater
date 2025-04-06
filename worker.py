@@ -75,7 +75,7 @@ async def worker(
                 unity_version=config.UNITY_VERSION,
                 config=config,
             )
-            logger.debug("Extracted %s to %s", bundle['bundleName'], exported_list)
+            logger.debug("Extracted %s to %s", bundle["bundleName"], exported_list)
 
             # Upload the bundle to remote storage
             if config.ASSET_REMOTE_STORAGE:
@@ -95,5 +95,5 @@ async def worker(
             # Clean up the temporary extracted directory
             if tmp_extracted_save_dir:
                 tmp_extracted_save_dir.cleanup()
-                
+
         queue.task_done()
