@@ -37,6 +37,12 @@ async def download_deobfuscate_bundle(
                 async with await open_file(bundle_save_path, "wb") as f:
                     await f.write(deobfuscated_data)
             else:
+                logger.debug(
+                    "Failed to download %s: %s, response: %s",
+                    url,
+                    response.status,
+                    await response.text(),
+                )
                 raise aiohttp.ClientError(f"Failed to download {url}")
 
 
@@ -183,6 +189,13 @@ async def extract_asset_bundle(
         except (ValueError, TypeError, AttributeError, OSError) as e:
             logger.error("Failed to extract %s: %s", unityfs_path, e)
             continue
+
+    logger.debug(
+        "Extracted %d files from %s, list: %s",
+        len(exported_files),
+        bundle_save_path,
+        exported_files,
+    )
 
     # Post-process acb files
     for save_dir, acb_files in post_process_acb_files:
@@ -421,5 +434,13 @@ async def extract_asset_bundle(
                     len(extracted_movie_files),
                     extracted_movie_files,
                 )
+
+    # Final cleanup of exported files, all files ending with
+    # ".bytes", ".acb", ".usm" will be removed
+    for file in exported_files[:]:  # Iterate over a copy of the list
+        if file.suffix in [".bytes", ".acb", ".usm"]:
+            await file.unlink()
+            logger.debug("Removed %s in cleanup stage", file)
+            exported_files.remove(file)
 
     return exported_files
