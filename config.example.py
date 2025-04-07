@@ -44,10 +44,10 @@ ASSET_BUNDLE_INFO_CACHE_PATH = Path("cache", "jp", "json", "asset_bundle_info.js
 GAME_VERSION_JSON_CACHE_PATH = Path("cache", "jp", "json", "version.json")
 
 # Download filters, these are regex patterns matched against the bundle name
-DL_INCLUDE_LIST = None # Example: [r"^music/.*"]
-DL_EXCLUDE_LIST = None # Example: [r"^live_pv/.*"]
+DL_INCLUDE_LIST = None  # Example: [r"^music/.*"]
+DL_EXCLUDE_LIST = None  # Example: [r"^live_pv/.*"]
 # Sorting download list by priority
-DL_PRIORITY_LIST = None # Example: [r"^music/.*", r"^character/member.*"]
+DL_PRIORITY_LIST = None  # Example: [r"^music/.*", r"^character/member.*"]
 
 # Local asset directories
 ASSET_LOCAL_EXTRACTED_DIR = None  # Example: Path("cache", "jp", "extracted")
@@ -58,7 +58,8 @@ ASSET_REMOTE_STORAGE = [
     {
         "type": "normal",
         "base": "remote:example-assets/",
-        "cmd": "rclone copyto {src} {dst}",
+        "program": "rclone",
+        "args": ["copy", "src", "dst"],
     },
 ]
 

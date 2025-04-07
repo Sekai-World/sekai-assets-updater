@@ -84,7 +84,8 @@ async def worker(
                         exported_list,
                         extracted_save_path,
                         storage["base"],
-                        storage["cmd"],
+                        storage["program"],
+                        storage["args"],
                         max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
                     )
     finally:

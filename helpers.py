@@ -245,7 +245,8 @@ async def upload_to_storage(
     exported_list: List[Path],
     extracted_save_path: Path,
     remote_base: str,
-    upload_cmd: str,
+    upload_program: str,
+    upload_args: List[str],
     max_concurrent_uploads: int = 5,
 ):
     """Upload the extracted assets to remote storage with concurrency"""
@@ -259,24 +260,25 @@ async def upload_to_storage(
             remote_path = Path(remote_base) / file_path.relative_to(extracted_save_path)
 
             # Construct the upload command
-            split_command = upload_cmd.format(src=file_path, dst=remote_path).split(" ")
-            cmd = split_command[0]
-            args = split_command[1:]
+            program: str = upload_program
+            args: list[str] = upload_args
+            args[args.index("src")] = str(file_path)
+            args[args.index("dst")] = str(remote_path)
             logger.debug(
                 "Uploading %s to %s using command: %s %s",
                 file_path,
                 remote_path,
-                cmd,
+                program,
                 " ".join(args),
             )
 
             # Execute the command
-            upload_process = await asyncio.create_subprocess_exec(cmd, *args)
+            upload_process = await asyncio.create_subprocess_exec(program, *args)
             await upload_process.wait()
             if upload_process.returncode != 0:
                 logger.error("Failed to upload %s to %s", file_path, remote_path)
                 raise RuntimeError(
-                    f"Failed to upload {file_path} to {remote_path} using command: {cmd} {' '.join(args)}"
+                    f"Failed to upload {file_path} to {remote_path} using command: {program} {' '.join(args)}"
                 )
             else:
                 logger.info("Successfully uploaded %s to %s", file_path, remote_path)
