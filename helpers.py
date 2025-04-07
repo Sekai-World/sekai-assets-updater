@@ -261,7 +261,7 @@ async def upload_to_storage(
 
             # Construct the upload command
             program: str = upload_program
-            args: list[str] = upload_args
+            args: list[str] = upload_args[:]
             args[args.index("src")] = str(file_path)
             args[args.index("dst")] = str(remote_path)
             logger.debug(
