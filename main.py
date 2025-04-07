@@ -26,6 +26,7 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie):
     failed_tasks = []
 
     async def download_task(url, bundle):
+        nonlocal failed_tasks
         async with semaphore:
             try:
                 await worker(
