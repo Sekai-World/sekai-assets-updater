@@ -22,19 +22,34 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie):
     # Create a semaphore to limit concurrency
     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
 
+    # List to track failed tasks
+    failed_tasks = []
+
     async def download_task(url, bundle):
         async with semaphore:
-            await worker(
-                f"download_worker-{url}",
-                (url, bundle),
-                config,
-                headers,
-                cookie=cookie,
-            )
+            try:
+                await worker(
+                    f"download_worker-{url}",
+                    (url, bundle),
+                    config,
+                    headers,
+                    cookie=cookie,
+                )
+            except Exception as e:
+                # Log the error and add the task to failed_tasks
+                logger.error("Failed to download %s: %s", url, e)
+                failed_tasks.append((url, bundle))
 
     # Create and gather download tasks
     tasks = [download_task(url, bundle) for url, bundle in dl_list]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Replace the original download list with the failed tasks
+    if failed_tasks:
+        failed_path = config.DL_LIST_CACHE_PATH
+        async with await open_file(failed_path, "wb") as f:
+            await f.write(json.dumps(failed_tasks))
+        logger.info("Failed tasks saved to %s", failed_path)
 
 
 async def main():
