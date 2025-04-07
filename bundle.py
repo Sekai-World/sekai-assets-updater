@@ -88,6 +88,8 @@ async def extract_asset_bundle(
     for unityfs_path, unityfs_obj in _unity_file.container.items():
         relpath = Path(unityfs_path).relative_to(UNITY_FS_CONTAINER_BASE)
         save_path = extracted_save_path / relpath.relative_to(*relpath.parts[:1])
+        # trim whitespace from the path
+        save_path = save_path.with_name(save_path.name.strip())
         save_dir = save_path.parent
         # Create the directory if it doesn't exist
         await save_dir.mkdir(parents=True, exist_ok=True)
