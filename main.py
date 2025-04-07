@@ -37,7 +37,7 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie):
                 )
             except Exception as e:
                 # Log the error and add the task to failed_tasks
-                logger.error("Failed to download %s: %s", url, e)
+                logger.exception("Failed to download %s: %s", url, e)
                 failed_tasks.append((url, bundle))
 
     # Create and gather download tasks
