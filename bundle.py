@@ -314,10 +314,13 @@ async def extract_asset_bundle(
 
                     # wav -> mp3
                     wav2mp3_process = await asyncio.create_subprocess_exec(
-                        config.EXTERNAL_VGMSTREAM_CLI,
-                        "-o",
-                        extracted_audio_file_path.with_suffix(".mp3").as_posix(),
+                        "ffmpeg",
+                        "-loglevel",
+                        "panic",
+                        "-y",
+                        "-i",
                         extracted_audio_file_path.with_suffix(".wav").as_posix(),
+                        extracted_audio_file_path.with_suffix(".mp3").as_posix(),
                     )
                     await wav2mp3_process.wait()
                     if wav2mp3_process.returncode != 0:
