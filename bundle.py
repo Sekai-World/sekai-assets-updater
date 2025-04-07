@@ -330,11 +330,36 @@ async def extract_asset_bundle(
                         )
                     else:
                         logger.debug(
-                            "Converted %s to mp3 and removed the original file",
+                            "Converted %s to mp3",
                             extracted_audio_file_path.with_suffix(".wav"),
                         )
                         exported_files.append(
                             extracted_audio_file_path.with_suffix(".mp3")
+                        )
+                        
+                    # wav -> flac
+                    wav2flac_process = await asyncio.create_subprocess_exec(
+                        "ffmpeg",
+                        "-loglevel",
+                        "panic",
+                        "-y",
+                        "-i",
+                        extracted_audio_file_path.with_suffix(".wav").as_posix(),
+                        extracted_audio_file_path.with_suffix(".flac").as_posix(),
+                    )
+                    await wav2flac_process.wait()
+                    if wav2flac_process.returncode != 0:
+                        logger.warning(
+                            "Failed to convert %s to flac",
+                            extracted_audio_file_path.with_suffix(".wav"),
+                        )
+                    else:
+                        logger.debug(
+                            "Converted %s to flac",
+                            extracted_audio_file_path.with_suffix(".wav"),
+                        )
+                        exported_files.append(
+                            extracted_audio_file_path.with_suffix(".flac")
                         )
             else:
                 logger.warning("%s not found in %s", acb_output_path, save_dir)
