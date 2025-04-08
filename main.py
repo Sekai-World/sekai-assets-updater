@@ -18,7 +18,13 @@ from worker import worker
 logger = logging.getLogger("asset_updater")
 
 
-async def do_download(dl_list: List[Tuple], config, headers, cookie):
+async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
+    """
+    Download the files in the download list using asyncio and aiohttp.
+    The download list is a list of tuples containing the url and the bundle name.
+    The function will limit the number of concurrent downloads using a semaphore.
+    """
+    logger.info("Starting download...")
     # Create a semaphore to limit concurrency
     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
 
@@ -51,6 +57,11 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie):
         async with await open_file(failed_path, "wb") as f:
             await f.write(json.dumps(failed_tasks))
         logger.info("Failed tasks saved to %s", failed_path)
+        
+        return False
+    else:
+        logger.info("All tasks completed successfully")
+        return True
 
 
 async def main():
@@ -82,14 +93,16 @@ async def main():
         logger.info(
             "Cache file %s exists, loading from cache", config.DL_LIST_CACHE_PATH
         )
+        is_success = False
         # Load the dl_list from the cache and start downloading
         async with await open_file(config.DL_LIST_CACHE_PATH, "r") as f:
             dl_list = json.loads(await f.read())
             logger.info("%d items to download", len(dl_list))
-            await do_download(dl_list, config=config, headers=headers, cookie=cookie)
+            is_success = await do_download(dl_list, config=config, headers=headers, cookie=cookie)
 
         # remove the cache file
-        await config.DL_LIST_CACHE_PATH.unlink()
+        if is_success:
+            await config.DL_LIST_CACHE_PATH.unlink()
         return
 
     game_version_json = None
@@ -185,10 +198,10 @@ async def main():
     )
     logger.info(f"Download list generated, {len(download_list)} items to download")
 
-    await do_download(download_list, config=config, headers=headers, cookie=cookie)
+    is_success = await do_download(download_list, config=config, headers=headers, cookie=cookie)
 
     # remove the cached download list
-    if await config.DL_LIST_CACHE_PATH.exists():
+    if is_success:
         await config.DL_LIST_CACHE_PATH.unlink()
 
 
