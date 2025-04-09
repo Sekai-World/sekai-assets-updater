@@ -13,7 +13,7 @@ import UnityPy.classes
 import UnityPy.config
 from anyio import Path, open_file
 
-from constants import UNITY_FS_CONTAINER_BASE
+from constants import UNITY_FS_CONTAINER_BASE, UNITY_FS_BUILT_IN_CONTAINER_BASE
 from helpers import deobfuscate
 from utils.acb import extract_acb
 from utils.usm import extract_usm
@@ -86,8 +86,15 @@ async def extract_asset_bundle(
     post_process_acb_files: List[Tuple[Path, List[Dict]]] = []
     post_process_movie_bundles: List[Tuple[Path, List[Dict]]] = []
     for unityfs_path, unityfs_obj in _unity_file.container.items():
-        relpath = Path(unityfs_path).relative_to(UNITY_FS_CONTAINER_BASE)
-        save_path = extracted_save_path / relpath.relative_to(*relpath.parts[:1])
+        try:
+            relpath = Path(unityfs_path).relative_to(UNITY_FS_CONTAINER_BASE)
+            save_path = extracted_save_path / relpath.relative_to(*relpath.parts[:1])
+        except ValueError:
+            relpath = Path(unityfs_path).relative_to(UNITY_FS_BUILT_IN_CONTAINER_BASE)
+            save_path = extracted_save_path / relpath
+        except Exception as e:
+            logger.exception("Failed to get relative path for %s", unityfs_path)
+            raise e
         # trim whitespace from the path
         save_path = save_path.with_name(save_path.name.strip())
         save_dir = save_path.parent
@@ -178,6 +185,12 @@ async def extract_asset_bundle(
                         raise TypeError(
                             f"Expected AudioClip, got {type(data)} for {unityfs_path}"
                         )
+                case "Mesh":
+                    # Mesh data is not supported yet
+                    logger.warning(
+                        "Mesh data is not supported yet, skipping %s", unityfs_path
+                    )
+                    continue
                 case _:
                     logger.warning(
                         "Unknowen type %s of %s, extracting typetree",
@@ -189,8 +202,8 @@ async def extract_asset_bundle(
                         await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
         except (ValueError, TypeError, AttributeError, OSError) as e:
-            logger.error("Failed to extract %s: %s", unityfs_path, e)
-            continue
+            logger.exception("Failed to extract %s: %s", unityfs_path, e)
+            raise e
 
     logger.debug(
         "Extracted %d files from %s, list: %s",
@@ -338,29 +351,31 @@ async def extract_asset_bundle(
                         )
                         
                     # wav -> flac
-                    wav2flac_process = await asyncio.create_subprocess_exec(
-                        "ffmpeg",
-                        "-loglevel",
-                        "panic",
-                        "-y",
-                        "-i",
-                        extracted_audio_file_path.with_suffix(".wav").as_posix(),
-                        extracted_audio_file_path.with_suffix(".flac").as_posix(),
-                    )
-                    await wav2flac_process.wait()
-                    if wav2flac_process.returncode != 0:
-                        logger.warning(
-                            "Failed to convert %s to flac",
-                            extracted_audio_file_path.with_suffix(".wav"),
+                    # only for music files
+                    if "music" in save_dir.parts:
+                        wav2flac_process = await asyncio.create_subprocess_exec(
+                            "ffmpeg",
+                            "-loglevel",
+                            "panic",
+                            "-y",
+                            "-i",
+                            extracted_audio_file_path.with_suffix(".wav").as_posix(),
+                            extracted_audio_file_path.with_suffix(".flac").as_posix(),
                         )
-                    else:
-                        logger.debug(
-                            "Converted %s to flac",
-                            extracted_audio_file_path.with_suffix(".wav"),
-                        )
-                        exported_files.append(
-                            extracted_audio_file_path.with_suffix(".flac")
-                        )
+                        await wav2flac_process.wait()
+                        if wav2flac_process.returncode != 0:
+                            logger.warning(
+                                "Failed to convert %s to flac",
+                                extracted_audio_file_path.with_suffix(".wav"),
+                            )
+                        else:
+                            logger.debug(
+                                "Converted %s to flac",
+                                extracted_audio_file_path.with_suffix(".wav"),
+                            )
+                            exported_files.append(
+                                extracted_audio_file_path.with_suffix(".flac")
+                            )
             else:
                 logger.warning("%s not found in %s", acb_output_path, save_dir)
 
