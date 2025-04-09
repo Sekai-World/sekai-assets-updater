@@ -169,6 +169,12 @@ async def get_download_list(
                     for test_name in exclude_list
                 )
             ]
+            
+        # Sort the download list alphabetically by bundle name
+        download_list = sorted(
+            download_list,
+            key=lambda item: item[1].get("bundleName"),
+        )
 
         if priority_list:
             download_list = sorted(
