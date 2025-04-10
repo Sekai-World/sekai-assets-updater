@@ -22,21 +22,26 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
     """
     Download the files in the download list using asyncio and aiohttp.
     The download list is a list of tuples containing the url and the bundle name.
-    The function will limit the number of concurrent downloads using a semaphore.
+    The function will use a queue to manage the download tasks.
     """
     logger.info("Starting download...")
-    # Create a semaphore to limit concurrency
-    semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY)
+    # Create a queue to manage tasks
+    queue = asyncio.Queue()
+
+    # Populate the queue with download tasks
+    for url, bundle in dl_list:
+        await queue.put((url, bundle))
 
     # List to track failed tasks
     failed_tasks = []
 
-    async def download_task(url, bundle):
+    async def worker_task(worker_id):
         nonlocal failed_tasks
-        async with semaphore:
+        while not queue.empty():
+            url, bundle = await queue.get()
             try:
                 await worker(
-                    f"download_worker-{url}",
+                    f"download_worker-{worker_id}",
                     (url, bundle),
                     config,
                     headers,
@@ -46,10 +51,18 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
                 # Log the error and add the task to failed_tasks
                 logger.exception("Failed to download %s: %s", url, e)
                 failed_tasks.append((url, bundle))
+            finally:
+                queue.task_done()
 
-    # Create and gather download tasks
-    tasks = [download_task(url, bundle) for url, bundle in dl_list]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    # Create and run worker tasks
+    workers = [
+        asyncio.create_task(worker_task(worker_id))
+        for worker_id in range(config.MAX_CONCURRENCY)
+    ]
+    await queue.join()
+
+    # Wait for all workers to finish
+    await asyncio.gather(*workers, return_exceptions=True)
 
     # Replace the original download list with the failed tasks
     if failed_tasks:
