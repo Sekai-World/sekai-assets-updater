@@ -131,17 +131,20 @@ async def main():
                         or "appVersion" not in game_version_json
                         or "appHash" not in game_version_json
                     ):
-                        raise Exception(
-                            f"Invalid json from {config.GAME_VERSION_JSON_URL}"
+                        raise ValueError(
+                            f"Invalid JSON from {globals()['config'].GAME_VERSION_JSON_URL}"
                         )
                 else:
-                    raise Exception(
-                        f"Failed to fetch game version json from {config.GAME_VERSION_JSON_URL}"
+                    raise RuntimeError(
+                        f"Failed to fetch game version json from {globals()['config'].GAME_VERSION_JSON_URL}"
                     )
     else:
-        raise Exception("GAME_VERSION_JSON_URL is not set in the config")
+        raise ValueError("GAME_VERSION_JSON_URL is not set in the config")
     logger.debug(
-        f"Current appVersion: {game_version_json['appVersion']}, dataVersion: {game_version_json['dataVersion']}, assetVersion: {game_version_json['assetVersion']}"
+        "Current appVersion: %s, dataVersion: %s, assetVersion: %s",
+        game_version_json["appVersion"],
+        game_version_json["dataVersion"],
+        game_version_json["assetVersion"],
     )
 
     assetbundle_host_hash = None
@@ -162,16 +165,18 @@ async def main():
                         not isinstance(json_result, dict)
                         or "assetbundleHostHash" not in json_result
                     ):
-                        raise Exception(f"Invalid result from {game_version_url}")
+                        raise ValueError(f"Invalid result from {game_version_url}")
                     assetbundle_host_hash = json_result["assetbundleHostHash"]
                 else:
-                    raise Exception(
+                    raise RuntimeError(
                         f"Failed to fetch assetbundle host hash from {game_version_url}"
                     )
     else:
-        raise Exception("GAME_VERSION_URL is not set in the config")
+        raise ValueError("GAME_VERSION_URL is not set in the config")
     logger.debug(
-        f"Current assetbundleHostHash: {assetbundle_host_hash}, assetHash: {game_version_json['assetHash']}"
+        "Current assetbundleHostHash: %s, assetHash: %s",
+        assetbundle_host_hash,
+        game_version_json["assetHash"],
     )
 
     asset_bundle_info = None
@@ -188,15 +193,17 @@ async def main():
                     asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
                     # Check if the json is valid
                     if not isinstance(asset_bundle_info, dict):
-                        raise Exception(f"Invalid json from {asset_bundle_info_url}")
+                        raise ValueError(f"Invalid json from {asset_bundle_info_url}")
                 else:
-                    raise Exception(
+                    raise RuntimeError(
                         f"Failed to fetch asset bundle info from {asset_bundle_info_url}"
                     )
     else:
-        raise Exception("ASSET_BUNDLE_INFO_URL is not set in the config")
+        raise ValueError("ASSET_BUNDLE_INFO_URL is not set in the config")
     logger.debug(
-        f"Current assetBundleInfoVersion: {asset_bundle_info['version']}, bundles length: {len(asset_bundle_info['bundles'])}"
+        "Current assetBundleInfoVersion: %s, bundles length: %d",
+        asset_bundle_info['version'],
+        len(asset_bundle_info['bundles']),
     )
 
     # Generate the download list
@@ -209,7 +216,7 @@ async def main():
         exclude_list=config.DL_EXCLUDE_LIST,
         priority_list=config.DL_PRIORITY_LIST,
     )
-    logger.info(f"Download list generated, {len(download_list)} items to download")
+    logger.info("Download list generated, %d items to download", len(download_list))
 
     is_success = await do_download(download_list, config=config, headers=headers, cookie=cookie)
 
@@ -250,9 +257,9 @@ def cli():
 
     # Set the logging level
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
     else:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     setup_logging_queue()
 
