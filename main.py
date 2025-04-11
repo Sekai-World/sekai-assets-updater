@@ -70,7 +70,7 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
         async with await open_file(failed_path, "wb") as f:
             await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
         logger.info("Failed tasks saved to %s", failed_path)
-        
+
         return False
     else:
         logger.info("All tasks completed successfully")
@@ -111,7 +111,9 @@ async def main():
         async with await open_file(config.DL_LIST_CACHE_PATH, "r") as f:
             dl_list = json.loads(await f.read())
             logger.info("%d items to download", len(dl_list))
-            is_success = await do_download(dl_list, config=config, headers=headers, cookie=cookie)
+            is_success = await do_download(
+                dl_list, config=config, headers=headers, cookie=cookie
+            )
 
         # remove the cache file
         if is_success:
@@ -171,13 +173,15 @@ async def main():
                     raise RuntimeError(
                         f"Failed to fetch assetbundle host hash from {game_version_url}"
                     )
+            logger.debug(
+                "Current assetbundleHostHash: %s, assetHash: %s",
+                assetbundle_host_hash,
+                game_version_json["assetHash"],
+            )
     else:
-        raise ValueError("GAME_VERSION_URL is not set in the config")
-    logger.debug(
-        "Current assetbundleHostHash: %s, assetHash: %s",
-        assetbundle_host_hash,
-        game_version_json["assetHash"],
-    )
+        logger.warning(
+            "GAME_VERSION_URL is not set in the config, assuming that the assetbundleHostHash is not needed"
+        )
 
     asset_bundle_info = None
     # Format ASSET_BUNDLE_INFO_URL using the information above
@@ -202,8 +206,8 @@ async def main():
         raise ValueError("ASSET_BUNDLE_INFO_URL is not set in the config")
     logger.debug(
         "Current assetBundleInfoVersion: %s, bundles length: %d",
-        asset_bundle_info['version'],
-        len(asset_bundle_info['bundles']),
+        asset_bundle_info["version"],
+        len(asset_bundle_info["bundles"]),
     )
 
     # Generate the download list
@@ -218,7 +222,9 @@ async def main():
     )
     logger.info("Download list generated, %d items to download", len(download_list))
 
-    is_success = await do_download(download_list, config=config, headers=headers, cookie=cookie)
+    is_success = await do_download(
+        download_list, config=config, headers=headers, cookie=cookie
+    )
 
     # remove the cached download list
     if is_success:
@@ -257,9 +263,13 @@ def cli():
 
     # Set the logging level
     if args.verbose:
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+        logging.basicConfig(
+            level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
+        )
     else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+        )
 
     setup_logging_queue()
 

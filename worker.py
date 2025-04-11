@@ -21,7 +21,8 @@ async def worker(
 
     logger.debug("worker %s processing %s", name, bundle.get("bundleName", url))
 
-    headers, cookie = await refresh_cookie(config, headers, cookie)
+    if cookie:
+        headers, cookie = await refresh_cookie(config, headers, cookie)
 
     bundle_save_path: Union[Path, None] = None
     tmp_bundle_save_file = None
