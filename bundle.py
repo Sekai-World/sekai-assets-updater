@@ -127,6 +127,11 @@ async def extract_asset_bundle(
                         post_process_movie_bundles.append(
                             (save_dir, tree["movieBundleDatas"])
                         )
+                        logger.debug(
+                            "Found movieBundleDatas in %s: %s",
+                            unityfs_path,
+                            tree["movieBundleDatas"],
+                        )
                 case "TextAsset":
                     data = unityfs_obj.read()
                     if isinstance(data, UnityPy.classes.TextAsset):
@@ -381,25 +386,31 @@ async def extract_asset_bundle(
 
     # Post-process movie bundles
     for save_dir, movie_bundles in post_process_movie_bundles:
-        # in most cases, the movie bundle consists of multiple files
-        pattern = re.compile(r"-\d{3}.usm.bytes")
-        usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
-        usm_output_path = save_dir / usm_output_name
-        usm_split_filenames: List[str] = [x["usmFileName"] for x in movie_bundles]
-        usm_split_paths = [
-            save_dir / usm_split_filename.removesuffix(".bytes")
-            for usm_split_filename in usm_split_filenames
-        ]
+        if len(movie_bundles) == 1:
+            # the movie bundle consists of a single file
+            movie_bundle = movie_bundles[0]
+            usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
+            usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
+        elif len(movie_bundles) > 1:
+            # the movie bundle consists of multiple files
+            pattern = re.compile(r"-\d{3}.usm.bytes")
+            usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
+            usm_output_path = save_dir / usm_output_name
+            usm_split_filenames: List[str] = [x["usmFileName"] for x in movie_bundles]
+            usm_split_paths = [
+                save_dir / usm_split_filename.removesuffix(".bytes")
+                for usm_split_filename in usm_split_filenames
+            ]
 
-        # merge split usm files to one
-        async with await open_file(usm_output_path, "wb") as outfile:
-            for usm_split_path in usm_split_paths:
-                async with await open_file(usm_split_path, "rb") as infile:
-                    await outfile.write(await infile.read())
-                exported_files.remove(usm_split_path)
-                await usm_split_path.unlink()
+            # merge split usm files to one
+            async with await open_file(usm_output_path, "wb") as outfile:
+                for usm_split_path in usm_split_paths:
+                    async with await open_file(usm_split_path, "rb") as infile:
+                        await outfile.write(await infile.read())
+                    exported_files.remove(usm_split_path)
+                    await usm_split_path.unlink()
 
-            logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
+                logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
 
         if await usm_output_path.exists():
             async with await open_file(usm_output_path, "rb") as f:
@@ -410,6 +421,14 @@ async def extract_asset_bundle(
 
             # remove the usm file
             await usm_output_path.unlink()
+            try:
+                exported_files.remove(usm_output_path)
+            except ValueError:
+                # remove with lowercase filename
+                usm_output_path_lower = usm_output_path.with_name(
+                    usm_output_path.name.lower()
+                )
+                exported_files.remove(usm_output_path_lower)
             logger.debug("Removed %s", usm_output_path)
 
             if len(extracted_movie_files) == 1:
