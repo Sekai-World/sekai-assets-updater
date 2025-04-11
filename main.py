@@ -68,7 +68,7 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
     if failed_tasks:
         failed_path = config.DL_LIST_CACHE_PATH
         async with await open_file(failed_path, "wb") as f:
-            await f.write(json.dumps(failed_tasks))
+            await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
         logger.info("Failed tasks saved to %s", failed_path)
         
         return False
