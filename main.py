@@ -6,6 +6,7 @@ import aiohttp
 import orjson as json
 from anyio import open_file
 
+from constants import NUVERSE_REGIONS
 from crypto import unpack
 from helpers import (
     ensure_dir_exists,
@@ -182,14 +183,39 @@ async def main():
         logger.warning(
             "GAME_VERSION_URL is not set in the config, assuming that the assetbundleHostHash is not needed"
         )
+        
+    asset_ver = None
+    # Format ASSET_VER_URL using the appVersion from the game version json
+    if config.REGION in NUVERSE_REGIONS:
+        if config.ASSET_VER_URL:
+            asset_ver_url = config.ASSET_VER_URL.format(
+                appVersion=(config.APP_VERSION_OVERRIDE or game_version_json["appVersion"])
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.get(asset_ver_url, headers=headers) as response:
+                    if response.status == 200:
+                        result = await response.read()
+                        asset_ver = result.decode()
+                    else:
+                        raise RuntimeError(
+                            f"Failed to fetch asset version from {asset_ver_url}"
+                        )
+        else:
+            raise ValueError("ASSET_VER_URL is not set in the config")
 
     asset_bundle_info = None
     # Format ASSET_BUNDLE_INFO_URL using the information above
     if config.ASSET_BUNDLE_INFO_URL:
-        asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
-            assetbundleHostHash=assetbundle_host_hash,
-            assetVersion=game_version_json["assetVersion"],
-        )
+        if config.REGION in NUVERSE_REGIONS:
+            asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
+                appVersion=(config.APP_VERSION_OVERRIDE or game_version_json["appVersion"]),
+                assetVer=asset_ver,
+            )
+        else:
+            asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
+                assetbundleHostHash=assetbundle_host_hash,
+                assetVersion=game_version_json["assetVersion"],
+            )
         async with aiohttp.ClientSession() as session:
             async with session.get(asset_bundle_info_url, headers=headers) as response:
                 if response.status == 200:
@@ -215,6 +241,7 @@ async def main():
         asset_bundle_info,
         game_version_json,
         config=config,
+        assetver=asset_ver,
         assetbundle_host_hash=assetbundle_host_hash,
         include_list=config.DL_INCLUDE_LIST,
         exclude_list=config.DL_EXCLUDE_LIST,
