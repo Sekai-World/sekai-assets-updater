@@ -172,6 +172,24 @@ async def extract_asset_bundle(
                         raise TypeError(
                             f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
                         )
+                case "Texture2DArray":
+                    data = unityfs_obj.read()
+                    if isinstance(data, UnityPy.classes.Texture2DArray):
+                        for i, image in enumerate(data.images):
+                            _save_path = save_path.with_name(
+                                save_path.stem + f"_{i}"
+                            ).with_suffix(".png")
+                            logger.debug(
+                                "Saving texture %s to %s",
+                                unityfs_path,
+                                _save_path,
+                            )
+                            image.save(_save_path)
+                            exported_files.append(_save_path)
+                    else:
+                        raise TypeError(
+                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
+                        )
                 case "AudioClip":
                     data = unityfs_obj.read()
                     if isinstance(data, UnityPy.classes.AudioClip):
@@ -196,6 +214,12 @@ async def extract_asset_bundle(
                         "Mesh data is not supported yet, skipping %s", unityfs_path
                     )
                     continue
+                case "Cubemap":
+                    # Cubemap data is not supported yet
+                    logger.warning(
+                        "Cubemap data is not supported yet, skipping %s", unityfs_path
+                    )
+                    continue
                 case _:
                     logger.warning(
                         "Unknowen type %s of %s, extracting typetree",
@@ -203,6 +227,12 @@ async def extract_asset_bundle(
                         unityfs_path,
                     )
                     tree = unityfs_obj.read_typetree()
+                    try:
+                        json.dumps(tree)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Failed to serialize %s, skipping", tree
+                        )
                     async with await open_file(save_path, "wb") as f:
                         await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
