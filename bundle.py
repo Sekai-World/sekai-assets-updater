@@ -223,9 +223,9 @@ async def extract_asset_bundle(
                 acb_textasset_filename: str = acb_file["assetBundleFileName"]
 
                 logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
-                acb_textasset_path = save_dir / acb_textasset_filename.removesuffix(
+                acb_textasset_path = (save_dir / acb_textasset_filename.removesuffix(
                     ".bytes"
-                )
+                )).with_suffix(".acb")
                 assert (
                     acb_textasset_path == acb_output_path
                 ), f"Path mismatch: {acb_textasset_path} != {acb_output_path}"
