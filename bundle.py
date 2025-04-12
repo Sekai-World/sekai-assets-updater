@@ -421,6 +421,21 @@ async def extract_asset_bundle(
             movie_bundle = movie_bundles[0]
             usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
             usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
+            
+            if not await usm_output_path.exists():
+                # maybe case-sensitive filesystem issue
+                usm_output_path_lower = usm_output_path.with_name(
+                    usm_output_path.name.lower()
+                )
+                if await usm_output_path_lower.exists():
+                    usm_output_path = usm_output_path_lower
+                    logger.debug(
+                        "Found %s instead of %s", usm_output_path, usm_output_name
+                    )
+                else:
+                    raise FileNotFoundError(
+                        f"{usm_output_path} not found in {save_dir}"
+                    )
         elif len(movie_bundles) > 1:
             # the movie bundle consists of multiple files
             pattern = re.compile(r"-\d{3}.usm.bytes")
@@ -435,16 +450,23 @@ async def extract_asset_bundle(
             # merge split usm files to one
             async with await open_file(usm_output_path, "wb") as outfile:
                 for usm_split_path in usm_split_paths:
-                    async with await open_file(usm_split_path, "rb") as infile:
-                        await outfile.write(await infile.read())
-                    try:
-                        exported_files.remove(usm_split_path)
-                    except ValueError:
-                        # remove with lowercase filename
+                    if not await usm_split_path.exists():
+                        # maybe case-sensitive filesystem issue
                         usm_split_path_lower = usm_split_path.with_name(
                             usm_split_path.name.lower()
                         )
-                        exported_files.remove(usm_split_path_lower)
+                        if await usm_split_path_lower.exists():
+                            usm_split_path = usm_split_path_lower
+                            logger.debug(
+                                "Found %s instead of %s", usm_split_path, usm_split_paths
+                            )
+                        else:
+                            raise FileNotFoundError(
+                                f"{usm_split_path} not found in {save_dir}"
+                            )
+                    async with await open_file(usm_split_path, "rb") as infile:
+                        await outfile.write(await infile.read())
+                    exported_files.remove(usm_split_path)
                     await usm_split_path.unlink()
 
                 logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
@@ -459,14 +481,7 @@ async def extract_asset_bundle(
 
             # remove the usm file
             await usm_output_path.unlink()
-            try:
-                exported_files.remove(usm_output_path)
-            except ValueError:
-                # remove with lowercase filename
-                usm_output_path_lower = usm_output_path.with_name(
-                    usm_output_path.name.lower()
-                )
-                exported_files.remove(usm_output_path_lower)
+            exported_files.remove(usm_output_path)
             logger.debug("Removed %s", usm_output_path)
 
             if len(extracted_movie_files) == 1:
