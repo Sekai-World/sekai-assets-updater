@@ -254,7 +254,7 @@ async def main():
     )
 
     # remove the cached download list
-    if is_success:
+    if is_success and len(download_list) > 0:
         await config.DL_LIST_CACHE_PATH.unlink()
 
 
