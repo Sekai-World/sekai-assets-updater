@@ -94,7 +94,7 @@ async def get_download_list(
         async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH) as f:
             cached_game_version_json = json.loads(await f.read())
 
-    download_list = None
+    download_list = []
     if cached_asset_bundle_info and cached_game_version_json:
         if assetver:
             cached_assetver = cached_game_version_json.get("assetver", None)
