@@ -104,21 +104,11 @@ async def get_download_list(
                 cached_bundles: Dict = cached_asset_bundle_info.get("bundles")
                 current_bundles: Dict = asset_bundle_info.get("bundles")
 
-                # compare md5Hash or hash of each bundle, if not equal, it should be included in the download list
-                # it also includes the new bundles
                 changed_bundles = [
                     bundle
                     for bundle in current_bundles.values()
-                    if (
-                        bundle.get("md5Hash") is not None
-                        and bundle.get("md5Hash")
-                        != cached_bundles.get(bundle.get("bundleName"), {}).get("md5Hash")
-                    )
-                    or (
-                        bundle.get("md5Hash") is None
-                        and bundle.get("hash")
-                        != cached_bundles.get(bundle.get("bundleName"), {}).get("hash")
-                    )
+                    if bundle.get("hash")
+                    != cached_bundles.get(bundle.get("bundleName"), {}).get("hash")
                 ]
 
                 # Generate the download list from changed bundles
