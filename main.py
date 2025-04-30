@@ -175,9 +175,10 @@ async def main():
                         f"Failed to fetch assetbundle host hash from {game_version_url}"
                     )
             logger.debug(
-                "Current assetbundleHostHash: %s, assetHash: %s",
+                "Current assetbundleHostHash: %s, assetHash: %s, game version url: %s",
                 assetbundle_host_hash,
                 game_version_json["assetHash"],
+                game_version_url,
             )
     else:
         logger.warning(
@@ -215,6 +216,7 @@ async def main():
             asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
                 assetbundleHostHash=assetbundle_host_hash,
                 assetVersion=game_version_json["assetVersion"],
+                assetHash=game_version_json["assetHash"],
             )
         async with aiohttp.ClientSession() as session:
             async with session.get(asset_bundle_info_url, headers=headers) as response:
