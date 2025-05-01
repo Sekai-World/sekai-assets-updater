@@ -5,11 +5,11 @@ name = "pypi"
 
 [packages]
 aiohttp = "*"
-unitypy = "*"
 u-msgpack-python = "*"
 pycryptodome = "*"
 anyio = "*"
 orjson = "*"
+unitypy = "*"
 
 [dev-packages]
 
