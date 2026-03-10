@@ -17,6 +17,7 @@ from constants import UNITY_FS_CONTAINER_BASE, UNITY_FS_BUILT_IN_CONTAINER_BASE
 from helpers import deobfuscate
 from utils.acb import extract_acb
 from utils.usm import extract_usm
+from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
 
@@ -113,6 +114,10 @@ async def extract_asset_bundle(
                     logger.debug(
                         "Saving MonoBehaviour %s to %s", unityfs_path, save_path
                     )
+    
+                    if unityfs_path.endswith(".playable"):
+                        tree = extract_playable(_unity_file, unityfs_path)
+
                     # Save the typetree to a json file
                     async with await open_file(save_path, "wb") as f:
                         await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
