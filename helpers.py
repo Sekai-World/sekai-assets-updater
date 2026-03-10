@@ -60,6 +60,40 @@ async def ensure_dir_exists(dir_path: Path):
         )
 
 
+def get_bundle_checksum(bundle: Dict) -> Tuple[str | None, str]:
+    """Return the best available checksum field for a bundle.
+
+    Colorful Palette servers currently expose `hash`, while tc/cn/kr may leave
+    `hash` empty and require `crc` for change detection.
+    """
+    bundle_hash = bundle.get("hash")
+    if bundle_hash:
+        return "hash", str(bundle_hash)
+
+    bundle_crc = bundle.get("crc")
+    if bundle_crc not in (None, ""):
+        return "crc", str(bundle_crc)
+
+    return None, ""
+
+
+def bundle_has_changed(bundle: Dict, cached_bundle: Dict | None) -> bool:
+    """Compare two bundle records using the checksum fields they actually expose."""
+    cached_bundle = cached_bundle or {}
+
+    bundle_hash = bundle.get("hash")
+    cached_hash = cached_bundle.get("hash")
+    if bundle_hash and cached_hash:
+        return str(bundle_hash) != str(cached_hash)
+
+    bundle_crc = bundle.get("crc")
+    cached_crc = cached_bundle.get("crc")
+    if bundle_crc not in (None, "") and cached_crc not in (None, ""):
+        return str(bundle_crc) != str(cached_crc)
+
+    return get_bundle_checksum(bundle) != get_bundle_checksum(cached_bundle)
+
+
 async def get_download_list(
     asset_bundle_info: Dict,
     game_version_json: Dict,
@@ -114,15 +148,17 @@ async def get_download_list(
             if cached_assetver != assetver:
                 game_version_json["assetver"] = assetver
 
-                cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get(
-                    "bundles"
+                cached_bundles: Dict[str, Dict] = (
+                    cached_asset_bundle_info.get("bundles") or {}
                 )
 
                 changed_bundles = [
                     bundle
                     for bundle in current_bundles.values()
-                    if bundle.get("hash", "")
-                    != cached_bundles.get(bundle.get("bundleName", ""), {}).get("hash", "")
+                    if bundle_has_changed(
+                        bundle,
+                        cached_bundles.get(bundle.get("bundleName", ""), {}),
+                    )
                 ]
 
                 # Generate the download list from changed bundles
@@ -147,15 +183,18 @@ async def get_download_list(
                 ]
         else:
             # Colorful Palette servers
-            cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles")
+            cached_bundles: Dict[str, Dict] = (
+                cached_asset_bundle_info.get("bundles") or {}
+            )
 
-            # compare hash of each bundle, if not equal, it should be included in the download list
-            # it also includes the new bundles
+            # Compare each bundle checksum and include new bundles as well.
             changed_bundles = [
                 bundle
                 for bundle in current_bundles.values()
-                if bundle.get("hash", "")
-                != cached_bundles.get(bundle.get("bundleName", ""), {}).get("hash", "")
+                if bundle_has_changed(
+                    bundle,
+                    cached_bundles.get(bundle.get("bundleName", ""), {}),
+                )
             ]
 
             # Generate the download list from changed bundles
