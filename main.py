@@ -10,6 +10,7 @@ from constants import NUVERSE_REGIONS
 from crypto import unpack
 from helpers import (
     ensure_dir_exists,
+    filter_bundles,
     get_download_list,
     refresh_cookie,
     setup_logging_queue,
@@ -78,7 +79,7 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
         return True
 
 
-async def main():
+async def main(update_asset_bundle_info_only: bool = False):
     # Check if the config module is loaded
     if "config" not in globals():
         raise ImportError(
@@ -99,11 +100,12 @@ async def main():
     }
 
     cookie = None
+
     # Cookie must be filled if GAME_COOKIE_URL is set in the config
     if config.GAME_COOKIE_URL:
         headers, cookie = await refresh_cookie(config, headers)
 
-    if await config.DL_LIST_CACHE_PATH.exists():
+    if (not update_asset_bundle_info_only) and await config.DL_LIST_CACHE_PATH.exists():
         logger.info(
             "Cache file %s exists, loading from cache", config.DL_LIST_CACHE_PATH
         )
@@ -227,6 +229,10 @@ async def main():
                     if not isinstance(asset_bundle_info, dict):
                         raise ValueError(f"Invalid json from {asset_bundle_info_url}")
                 else:
+                    result = await response.read()
+                    logger.error(
+                        f"Failed to fetch asset bundle info from {asset_bundle_info_url}, status: {response.status}, response: {result.decode()}, request headers: {headers}"
+                    )
                     raise RuntimeError(
                         f"Failed to fetch asset bundle info from {asset_bundle_info_url}"
                     )
@@ -237,6 +243,36 @@ async def main():
         asset_bundle_info["version"],
         len(asset_bundle_info["bundles"]),
     )
+
+    if update_asset_bundle_info_only:
+        current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
+        if not current_bundles:
+            raise ValueError("bundles must be set in asset bundle info")
+
+        current_bundles = await filter_bundles(
+            current_bundles,
+            include_list=config.DL_INCLUDE_LIST,
+            exclude_list=config.DL_EXCLUDE_LIST,
+        )
+        if not current_bundles:
+            raise ValueError("No bundles found after filtering")
+
+        async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
+            await f.write(
+                json.dumps(
+                    {
+                        "version": asset_bundle_info.get("version", ""),
+                        "os": asset_bundle_info.get("os", ""),
+                        "bundles": current_bundles,
+                    },
+                    option=json.OPT_INDENT_2,
+                )
+            )
+        logger.info(
+            "Updated asset bundle info cache only: %s",
+            config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        )
+        return
 
     # Generate the download list
     download_list = await get_download_list(
@@ -277,6 +313,14 @@ def cli():
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
     )
+    parser.add_argument(
+        "--update-asset-bundle-info-only",
+        action="store_true",
+        help=(
+            "Fetch and update asset_bundle_info.json only; do not generate dl_list.json "
+            "and do not start download tasks."
+        ),
+    )
     args = parser.parse_args()
 
     # Load the config python file as dynamic module
@@ -303,7 +347,9 @@ def cli():
     setup_logging_queue()
 
     # Run the main function
-    asyncio.run(main())
+    asyncio.run(
+        main(update_asset_bundle_info_only=args.update_asset_bundle_info_only)
+    )
 
 
 if __name__ == "__main__":
