@@ -16,7 +16,6 @@ from anyio import Path, open_file
 from constants import UNITY_FS_CONTAINER_BASE, UNITY_FS_BUILT_IN_CONTAINER_BASE
 from helpers import deobfuscate
 from utils.acb import extract_acb
-from utils.usm import extract_usm
 from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
@@ -484,86 +483,42 @@ async def extract_asset_bundle(
 
                 logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
                 exported_files.append(usm_output_path)
+        else:
+            logger.warning("Empty movieBundleDatas in %s", save_dir)
+            continue
 
         if await usm_output_path.exists():
-            async with await open_file(usm_output_path, "rb") as f:
-                usm_data = await f.read()
-                extracted_movie_files = extract_usm(
-                    BytesIO(usm_data), save_dir.as_posix(), usm_output_name.encode()
-                )
-
-            # remove the usm file
-            await usm_output_path.unlink()
-            exported_files.remove(usm_output_path)
-            logger.debug("Removed %s", usm_output_path)
-
-            if len(extracted_movie_files) == 1:
-                # video only
-                # call ffmpeg to convert the video to mp4
-                video_output_path = Path(extracted_movie_files[0]).with_suffix(".mp4")
-                ffmpeg_process = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-loglevel",
-                    "panic",
-                    "-y",
-                    "-i",
-                    extracted_movie_files[0],
-                    "-tune",
-                    "animation",
-                    video_output_path.as_posix(),
-                )
-                await ffmpeg_process.wait()
-                if ffmpeg_process.returncode != 0:
-                    logger.warning(
-                        "Failed to convert %s to mp4", extracted_movie_files[0]
-                    )
-                else:
-                    logger.debug(
-                        "Converted %s to mp4 and removed the original file",
-                        extracted_movie_files[0],
-                    )
-                    exported_files.append(video_output_path)
-                    await Path(extracted_movie_files[0]).unlink()
-
-            elif len(extracted_movie_files) == 2:
-                # video + audio
-                # call ffmpeg to merge them to one mp4 file
-                video_output_path = Path(extracted_movie_files[0]).with_suffix(".mp4")
-                ffmpeg_process = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-loglevel",
-                    "panic",
-                    "-y",
-                    "-i",
-                    extracted_movie_files[0],
-                    "-i",
-                    extracted_movie_files[1],
-                    "-tune",
-                    "animation",
-                    video_output_path.as_posix(),
-                )
-                await ffmpeg_process.wait()
-                if ffmpeg_process.returncode != 0:
-                    logger.warning(
-                        "Failed to convert %s and %s to mp4",
-                        extracted_movie_files[0],
-                        extracted_movie_files[1],
-                    )
-                else:
-                    logger.debug(
-                        "Converted %s and %s to mp4 and removed the original files",
-                        extracted_movie_files[0],
-                        extracted_movie_files[1],
-                    )
-                    exported_files.append(video_output_path)
-                    await Path(extracted_movie_files[0]).unlink()
-                    await Path(extracted_movie_files[1]).unlink()
+            # ffmpeg already supports usm; convert directly to mp4.
+            video_output_path = usm_output_path.with_suffix(".mp4")
+            ffmpeg_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-loglevel",
+                "panic",
+                "-y",
+                "-i",
+                usm_output_path.as_posix(),
+                "-tune",
+                "animation",
+                video_output_path.as_posix(),
+            )
+            await ffmpeg_process.wait()
+            if ffmpeg_process.returncode != 0:
+                logger.warning("Failed to convert %s to mp4", usm_output_path)
             else:
-                logger.warning(
-                    "Unexpected extracted movie files count: %d, elements: %s",
-                    len(extracted_movie_files),
-                    extracted_movie_files,
+                logger.debug("Converted %s to mp4", usm_output_path)
+                exported_files.append(video_output_path)
+
+            await usm_output_path.unlink()
+            logger.debug("Removed %s", usm_output_path)
+            try:
+                exported_files.remove(usm_output_path)
+            except ValueError:
+                # maybe case-sensitive issue
+                usm_output_path_lower = usm_output_path.with_name(
+                    usm_output_path.name.lower()
                 )
+                if usm_output_path_lower in exported_files:
+                    exported_files.remove(usm_output_path_lower)
 
     # Final cleanup of exported files, all files ending with
     # ".bytes", ".acb", ".usm" will be removed
