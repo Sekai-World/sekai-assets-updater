@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 import aiohttp
 import orjson as json
@@ -20,6 +20,8 @@ from worker import worker
 
 logger = logging.getLogger("asset_updater")
 
+DownloadItem = Tuple[str, Dict[str, Any]]
+
 
 config: Optional[ConfigLike] = None
 
@@ -33,7 +35,10 @@ def require_config() -> ConfigLike:
 
 
 async def do_download(
-    dl_list: List[Tuple], config: ConfigLike, headers: Dict[str, str], cookie
+    dl_list: List[DownloadItem],
+    config: ConfigLike,
+    headers: Dict[str, str],
+    cookie,
 ) -> bool:
     """
     Download the files in the download list using asyncio and aiohttp.
@@ -121,7 +126,7 @@ async def main(update_asset_bundle_info_only: bool = False):
         is_success = False
         # Load the dl_list from the cache and start downloading
         async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-            dl_list = json.loads(await f.read())
+            dl_list: List[DownloadItem] = json.loads(await f.read())
             logger.info("%d items to download", len(dl_list))
             is_success = await do_download(
                 dl_list, config=cfg, headers=headers, cookie=cookie
@@ -282,7 +287,7 @@ async def main(update_asset_bundle_info_only: bool = False):
         return
 
     # Generate the download list
-    download_list = await get_download_list(
+    download_list: List[DownloadItem] = await get_download_list(
         asset_bundle_info,
         game_version_json,
         config=cfg,

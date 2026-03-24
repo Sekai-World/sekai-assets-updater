@@ -16,6 +16,7 @@ class ConfigLike(Protocol):
     GAME_VERSION_URL: Optional[str]
     ASSET_VER_URL: Optional[str]
     ASSET_BUNDLE_INFO_URL: Optional[str]
+    ASSET_BUNDLE_URL: str
     APP_VERSION_OVERRIDE: Optional[str]
     REGION: Any
     DL_LIST_CACHE_PATH: Path
