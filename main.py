@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple, cast
 
 import aiohttp
 import orjson as json
@@ -15,12 +15,26 @@ from helpers import (
     refresh_cookie,
     setup_logging_queue,
 )
+from model import ConfigLike
 from worker import worker
 
 logger = logging.getLogger("asset_updater")
 
 
-async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
+config: Optional[ConfigLike] = None
+
+
+def require_config() -> ConfigLike:
+    if config is None:
+        raise ImportError(
+            "Config module not loaded. Please run the script with the config argument."
+        )
+    return config
+
+
+async def do_download(
+    dl_list: List[Tuple], config: ConfigLike, headers: Dict[str, str], cookie
+) -> bool:
     """
     Download the files in the download list using asyncio and aiohttp.
     The download list is a list of tuples containing the url and the bundle name.
@@ -80,54 +94,49 @@ async def do_download(dl_list: List[Tuple], config, headers, cookie) -> bool:
 
 
 async def main(update_asset_bundle_info_only: bool = False):
-    # Check if the config module is loaded
-    if "config" not in globals():
-        raise ImportError(
-            "Config module not loaded. Please run the script with the config argument."
-        )
-    # load the config module
-    global config
+    cfg = require_config()
 
     # ensure required directories exist
-    await ensure_dir_exists(config.DL_LIST_CACHE_PATH.parent)
-    await ensure_dir_exists(config.ASSET_BUNDLE_INFO_CACHE_PATH.parent)
-    await ensure_dir_exists(config.GAME_VERSION_JSON_CACHE_PATH.parent)
+    await ensure_dir_exists(cfg.DL_LIST_CACHE_PATH.parent)
+    await ensure_dir_exists(cfg.ASSET_BUNDLE_INFO_CACHE_PATH.parent)
+    await ensure_dir_exists(cfg.GAME_VERSION_JSON_CACHE_PATH.parent)
 
     headers: Dict[str, str] = {
         "Accept": "*/*",
-        "User-Agent": config.USER_AGENT,
-        "X-Unity-Version": config.UNITY_VERSION,
+        "X-Unity-Version": cfg.UNITY_VERSION,
     }
+    if cfg.USER_AGENT:
+        headers["User-Agent"] = cfg.USER_AGENT
 
     cookie = None
 
     # Cookie must be filled if GAME_COOKIE_URL is set in the config
-    if config.GAME_COOKIE_URL:
-        headers, cookie = await refresh_cookie(config, headers)
+    if cfg.GAME_COOKIE_URL:
+        headers, cookie = await refresh_cookie(cfg, headers)
 
-    if (not update_asset_bundle_info_only) and await config.DL_LIST_CACHE_PATH.exists():
+    if (not update_asset_bundle_info_only) and await cfg.DL_LIST_CACHE_PATH.exists():
         logger.info(
-            "Cache file %s exists, loading from cache", config.DL_LIST_CACHE_PATH
+            "Cache file %s exists, loading from cache", cfg.DL_LIST_CACHE_PATH
         )
         is_success = False
         # Load the dl_list from the cache and start downloading
-        async with await open_file(config.DL_LIST_CACHE_PATH, "r") as f:
+        async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
             dl_list = json.loads(await f.read())
             logger.info("%d items to download", len(dl_list))
             is_success = await do_download(
-                dl_list, config=config, headers=headers, cookie=cookie
+                dl_list, config=cfg, headers=headers, cookie=cookie
             )
 
         # remove the cache file
         if is_success:
-            await config.DL_LIST_CACHE_PATH.unlink()
+            await cfg.DL_LIST_CACHE_PATH.unlink()
         return
 
     game_version_json = None
     # Download, parse and cache the game version json from GAME_VERSION_JSON_URL
-    if config.GAME_VERSION_JSON_URL:
+    if cfg.GAME_VERSION_JSON_URL:
         async with aiohttp.ClientSession() as session:
-            async with session.get(config.GAME_VERSION_JSON_URL) as response:
+            async with session.get(cfg.GAME_VERSION_JSON_URL) as response:
                 if response.status == 200:
                     game_version_json = await response.json(content_type="text/plain")
                     # Check if the json is valid
@@ -136,12 +145,10 @@ async def main(update_asset_bundle_info_only: bool = False):
                         or "appVersion" not in game_version_json
                         or "appHash" not in game_version_json
                     ):
-                        raise ValueError(
-                            f"Invalid JSON from {globals()['config'].GAME_VERSION_JSON_URL}"
-                        )
+                        raise ValueError(f"Invalid JSON from {cfg.GAME_VERSION_JSON_URL}")
                 else:
                     raise RuntimeError(
-                        f"Failed to fetch game version json from {globals()['config'].GAME_VERSION_JSON_URL}"
+                        f"Failed to fetch game version json from {cfg.GAME_VERSION_JSON_URL}"
                     )
     else:
         raise ValueError("GAME_VERSION_JSON_URL is not set in the config")
@@ -154,17 +161,17 @@ async def main(update_asset_bundle_info_only: bool = False):
 
     assetbundle_host_hash = None
     # Format GAME_VERSION_URL using the appVersion and appHash from the game version json
-    if config.GAME_VERSION_URL:
-        game_version_url = config.GAME_VERSION_URL.format(
+    if cfg.GAME_VERSION_URL:
+        game_version_url = cfg.GAME_VERSION_URL.format(
             appVersion=game_version_json["appVersion"],
             appHash=game_version_json["appHash"],
         )
         # This request needs to be proxied
-        async with aiohttp.ClientSession(proxy=config.PROXY_URL) as session:
+        async with aiohttp.ClientSession(proxy=cfg.PROXY_URL) as session:
             async with session.get(game_version_url, headers=headers) as response:
                 if response.status == 200:
                     result = await response.read()
-                    json_result = unpack(config.AES_KEY, config.AES_IV, result)
+                    json_result = unpack(cfg.AES_KEY, cfg.AES_IV, result)
                     # Check if the json is valid
                     if (
                         not isinstance(json_result, dict)
@@ -189,10 +196,10 @@ async def main(update_asset_bundle_info_only: bool = False):
         
     asset_ver = None
     # Format ASSET_VER_URL using the appVersion from the game version json
-    if config.REGION in NUVERSE_REGIONS:
-        if config.ASSET_VER_URL:
-            asset_ver_url = config.ASSET_VER_URL.format(
-                appVersion=(config.APP_VERSION_OVERRIDE or game_version_json["appVersion"])
+    if cfg.REGION in NUVERSE_REGIONS:
+        if cfg.ASSET_VER_URL:
+            asset_ver_url = cfg.ASSET_VER_URL.format(
+                appVersion=(cfg.APP_VERSION_OVERRIDE or game_version_json["appVersion"])
             )
             async with aiohttp.ClientSession() as session:
                 async with session.get(asset_ver_url, headers=headers) as response:
@@ -208,14 +215,14 @@ async def main(update_asset_bundle_info_only: bool = False):
 
     asset_bundle_info = None
     # Format ASSET_BUNDLE_INFO_URL using the information above
-    if config.ASSET_BUNDLE_INFO_URL:
-        if config.REGION in NUVERSE_REGIONS:
-            asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
-                appVersion=(config.APP_VERSION_OVERRIDE or game_version_json["appVersion"]),
+    if cfg.ASSET_BUNDLE_INFO_URL:
+        if cfg.REGION in NUVERSE_REGIONS:
+            asset_bundle_info_url = cfg.ASSET_BUNDLE_INFO_URL.format(
+                appVersion=(cfg.APP_VERSION_OVERRIDE or game_version_json["appVersion"]),
                 assetVer=asset_ver,
             )
         else:
-            asset_bundle_info_url = config.ASSET_BUNDLE_INFO_URL.format(
+            asset_bundle_info_url = cfg.ASSET_BUNDLE_INFO_URL.format(
                 assetbundleHostHash=assetbundle_host_hash,
                 assetVersion=game_version_json["assetVersion"],
                 assetHash=game_version_json["assetHash"],
@@ -224,7 +231,7 @@ async def main(update_asset_bundle_info_only: bool = False):
             async with session.get(asset_bundle_info_url, headers=headers) as response:
                 if response.status == 200:
                     result = await response.read()
-                    asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
+                    asset_bundle_info = unpack(cfg.AES_KEY, cfg.AES_IV, result)
                     # Check if the json is valid
                     if not isinstance(asset_bundle_info, dict):
                         raise ValueError(f"Invalid json from {asset_bundle_info_url}")
@@ -251,13 +258,13 @@ async def main(update_asset_bundle_info_only: bool = False):
 
         current_bundles = await filter_bundles(
             current_bundles,
-            include_list=config.DL_INCLUDE_LIST,
-            exclude_list=config.DL_EXCLUDE_LIST,
+            include_list=cfg.DL_INCLUDE_LIST,
+            exclude_list=cfg.DL_EXCLUDE_LIST,
         )
         if not current_bundles:
             raise ValueError("No bundles found after filtering")
 
-        async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
+        async with await open_file(cfg.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
             await f.write(
                 json.dumps(
                     {
@@ -270,7 +277,7 @@ async def main(update_asset_bundle_info_only: bool = False):
             )
         logger.info(
             "Updated asset bundle info cache only: %s",
-            config.ASSET_BUNDLE_INFO_CACHE_PATH,
+            cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
         )
         return
 
@@ -278,22 +285,22 @@ async def main(update_asset_bundle_info_only: bool = False):
     download_list = await get_download_list(
         asset_bundle_info,
         game_version_json,
-        config=config,
+        config=cfg,
         assetver=asset_ver,
         assetbundle_host_hash=assetbundle_host_hash,
-        include_list=config.DL_INCLUDE_LIST,
-        exclude_list=config.DL_EXCLUDE_LIST,
-        priority_list=config.DL_PRIORITY_LIST,
+        include_list=cfg.DL_INCLUDE_LIST,
+        exclude_list=cfg.DL_EXCLUDE_LIST,
+        priority_list=cfg.DL_PRIORITY_LIST,
     )
     logger.info("Download list generated, %d items to download", len(download_list))
 
     is_success = await do_download(
-        download_list, config=config, headers=headers, cookie=cookie
+        download_list, config=cfg, headers=headers, cookie=cookie
     )
 
     # remove the cached download list
     if is_success and len(download_list) > 0:
-        await config.DL_LIST_CACHE_PATH.unlink()
+        await cfg.DL_LIST_CACHE_PATH.unlink()
 
 
 def cli():
@@ -327,12 +334,16 @@ def cli():
     import importlib.util
     import sys
 
+    global config
+
     spec = importlib.util.spec_from_file_location("config", args.config)
-    config = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(config)
-    sys.modules["config"] = config
-    # Set the config as a global variable
-    globals()["config"] = config
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load config module from {args.config}")
+
+    loaded_config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded_config)
+    sys.modules["config"] = loaded_config
+    config = cast(ConfigLike, loaded_config)
 
     # Set the logging level
     if args.verbose:
