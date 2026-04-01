@@ -11,6 +11,9 @@ import aiohttp
 import UnityPy
 import UnityPy.classes
 import UnityPy.config
+from PIL import Image
+from UnityPy.enums import ClassIDType, SpritePackingRotation
+from UnityPy.export.SpriteHelper import SpriteSettings, get_image
 from anyio import Path, open_file
 
 from constants import UNITY_FS_CONTAINER_BASE, UNITY_FS_BUILT_IN_CONTAINER_BASE
@@ -19,6 +22,79 @@ from utils.acb import extract_acb
 from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
+
+
+def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
+    """Render a sprite, falling back to its texture rect when tight mesh export fails."""
+    try:
+        return data.image
+    except ValueError as exc:
+        if "Coordinate 'lower' is less than 'upper'" not in str(exc):
+            raise
+
+    atlas = None
+    if data.m_SpriteAtlas:
+        atlas = data.m_SpriteAtlas.read()
+    elif data.m_AtlasTags:
+        for obj in data.assets_file.objects.values():
+            if obj.type != ClassIDType.SpriteAtlas:
+                continue
+            atlas = obj.read()
+            if atlas.m_Name == data.m_AtlasTags[0]:
+                break
+            atlas = None
+
+    if atlas:
+        sprite_atlas_data = next(
+            value for key, value in atlas.m_RenderDataMap if key == data.m_RenderDataKey
+        )
+    else:
+        sprite_atlas_data = data.m_RD
+
+    texture_rect = sprite_atlas_data.textureRect
+    if texture_rect.width <= 0 or texture_rect.height <= 0:
+        raise ValueError(
+            f"Invalid sprite texture rect {texture_rect} for {data.m_Name or data.path_id}"
+        )
+
+    image = get_image(
+        data,
+        sprite_atlas_data.texture,
+        sprite_atlas_data.alphaTexture,
+    ).crop(
+        (
+            texture_rect.x,
+            texture_rect.y,
+            texture_rect.x + texture_rect.width,
+            texture_rect.y + texture_rect.height,
+        )
+    )
+
+    settings = SpriteSettings(sprite_atlas_data.settingsRaw)
+    if settings.packed == 1:
+        rotation = settings.packingRotation
+        if rotation == SpritePackingRotation.kSPRFlipHorizontal:
+            image = image.transpose(Image.FLIP_LEFT_RIGHT)
+        elif rotation == SpritePackingRotation.kSPRFlipVertical:
+            image = image.transpose(Image.FLIP_TOP_BOTTOM)
+        elif rotation == SpritePackingRotation.kSPRRotate180:
+            image = image.transpose(Image.ROTATE_180)
+        elif rotation == SpritePackingRotation.kSPRRotate90:
+            image = image.transpose(Image.ROTATE_270)
+
+    logger.warning(
+        "Falling back to texture rect export for sprite %s due to invalid mesh crop",
+        data.m_Name or data.path_id,
+    )
+    return image.transpose(Image.FLIP_TOP_BOTTOM)
+
+
+def _render_image_asset(
+    data: UnityPy.classes.Texture2D | UnityPy.classes.Sprite,
+) -> Image.Image:
+    if isinstance(data, UnityPy.classes.Sprite):
+        return _render_sprite_with_fallback(data)
+    return data.image
 
 
 async def download_deobfuscate_bundle(
@@ -155,13 +231,14 @@ async def extract_asset_bundle(
                     if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
                         data, UnityPy.classes.Sprite
                     ):
+                        image = _render_image_asset(data)
                         # save as png
                         logger.debug(
                             "Saving texture %s to %s",
                             unityfs_path,
                             save_path.with_suffix(".png"),
                         )
-                        data.image.save(save_path.with_suffix(".png"))
+                        image.save(save_path.with_suffix(".png"))
                         exported_files.append(save_path.with_suffix(".png"))
 
                         # save as webp
@@ -170,7 +247,7 @@ async def extract_asset_bundle(
                             unityfs_path,
                             save_path.with_suffix(".png"),
                         )
-                        data.image.save(save_path.with_suffix(".webp"))
+                        image.save(save_path.with_suffix(".webp"))
                         exported_files.append(save_path.with_suffix(".webp"))
                     else:
                         raise TypeError(
