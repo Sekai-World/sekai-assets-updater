@@ -24,14 +24,15 @@ from utils.playable import extract_playable
 logger = logging.getLogger("live2d")
 
 
-def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
-    """Render a sprite, falling back to its texture rect when tight mesh export fails."""
-    try:
-        return data.image
-    except ValueError as exc:
-        if "Coordinate 'lower' is less than 'upper'" not in str(exc):
-            raise
+def _should_fallback_sprite_render(exc: Exception) -> bool:
+    if isinstance(exc, ValueError):
+        return "Coordinate 'lower' is less than 'upper'" in str(exc)
+    if isinstance(exc, StopIteration):
+        return True
+    return isinstance(exc, RuntimeError) and isinstance(exc.__cause__, StopIteration)
 
+
+def _get_sprite_atlas_data(data: UnityPy.classes.Sprite):
     atlas = None
     if data.m_SpriteAtlas:
         atlas = data.m_SpriteAtlas.read()
@@ -44,12 +45,31 @@ def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
                 break
             atlas = None
 
-    if atlas:
-        sprite_atlas_data = next(
-            value for key, value in atlas.m_RenderDataMap if key == data.m_RenderDataKey
+    if not atlas:
+        return data.m_RD
+
+    sprite_atlas_data = next(
+        (value for key, value in atlas.m_RenderDataMap if key == data.m_RenderDataKey),
+        None,
+    )
+    if sprite_atlas_data is None:
+        logger.warning(
+            "Sprite atlas render data missing for %s, falling back to embedded render data",
+            data.m_Name or data.path_id,
         )
-    else:
-        sprite_atlas_data = data.m_RD
+        return data.m_RD
+    return sprite_atlas_data
+
+
+def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
+    """Render a sprite, falling back to its texture rect when tight mesh export fails."""
+    try:
+        return data.image
+    except (ValueError, RuntimeError, StopIteration) as exc:
+        if not _should_fallback_sprite_render(exc):
+            raise
+
+    sprite_atlas_data = _get_sprite_atlas_data(data)
 
     texture_rect = sprite_atlas_data.textureRect
     if texture_rect.width <= 0 or texture_rect.height <= 0:
@@ -83,7 +103,7 @@ def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
             image = image.transpose(Image.ROTATE_270)
 
     logger.warning(
-        "Falling back to texture rect export for sprite %s due to invalid mesh crop",
+        "Falling back to texture rect export for sprite %s",
         data.m_Name or data.path_id,
     )
     return image.transpose(Image.FLIP_TOP_BOTTOM)
