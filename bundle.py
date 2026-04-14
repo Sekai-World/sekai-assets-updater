@@ -4,6 +4,7 @@ import asyncio
 import orjson as json
 import logging
 import re
+import sys
 from io import BytesIO
 from typing import Dict, List, Tuple
 
@@ -22,6 +23,209 @@ from utils.acb import extract_acb
 from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
+
+_ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
+
+
+def _get_audio_transcode_concurrency(config) -> int:
+    concurrency = getattr(
+        config,
+        "MAX_CONCURRENCY_AUDIO_TRANSCODES",
+        getattr(config, "MAX_CONCURRENCY", 1),
+    )
+    try:
+        return max(1, int(concurrency))
+    except (TypeError, ValueError):
+        return 1
+
+
+async def _get_ffmpeg_video_encoder() -> tuple[str | None, list[str]]:
+    """Detect a usable hardware H.264 encoder for the current platform."""
+    global _ffmpeg_video_encoder_cache
+
+    if _ffmpeg_video_encoder_cache is not None:
+        return _ffmpeg_video_encoder_cache
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-hide_banner",
+            "-encoders",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        _ffmpeg_video_encoder_cache = (None, [])
+        return _ffmpeg_video_encoder_cache
+
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        logger.warning(
+            "Failed to inspect ffmpeg encoders, falling back to software encoding: %s",
+            stderr.decode(errors="ignore").strip(),
+        )
+        _ffmpeg_video_encoder_cache = (None, [])
+        return _ffmpeg_video_encoder_cache
+
+    available_encoders = stdout.decode(errors="ignore")
+    candidates: list[tuple[str, list[str]]] = []
+
+    if sys.platform == "darwin":
+        candidates.append(("h264_videotoolbox", ["-c:v", "h264_videotoolbox"]))
+    elif sys.platform.startswith("linux"):
+        if await Path("/dev/nvidia0").exists() or await Path("/dev/nvidiactl").exists():
+            candidates.append(("h264_nvenc", ["-c:v", "h264_nvenc"]))
+        if await Path("/dev/dri/renderD128").exists():
+            candidates.append(
+                (
+                    "h264_vaapi",
+                    [
+                        "-vaapi_device",
+                        "/dev/dri/renderD128",
+                        "-vf",
+                        "format=nv12,hwupload",
+                        "-c:v",
+                        "h264_vaapi",
+                    ],
+                )
+            )
+    elif sys.platform == "win32":
+        candidates.extend(
+            [
+                ("h264_nvenc", ["-c:v", "h264_nvenc"]),
+                ("h264_amf", ["-c:v", "h264_amf"]),
+            ]
+        )
+
+    for encoder_name, encoder_args in candidates:
+        if encoder_name in available_encoders:
+            logger.info("Using ffmpeg hardware video encoder: %s", encoder_name)
+            _ffmpeg_video_encoder_cache = (encoder_name, encoder_args)
+            return _ffmpeg_video_encoder_cache
+
+    logger.info("No usable ffmpeg hardware video encoder detected, using software encoding")
+    _ffmpeg_video_encoder_cache = (None, [])
+    return _ffmpeg_video_encoder_cache
+
+
+def _disable_ffmpeg_video_encoder() -> None:
+    global _ffmpeg_video_encoder_cache
+    _ffmpeg_video_encoder_cache = (None, [])
+
+
+async def _run_ffmpeg_usm_to_mp4(
+    input_path: Path,
+    output_path: Path,
+) -> tuple[asyncio.subprocess.Process, str | None]:
+    encoder_name, encoder_args = await _get_ffmpeg_video_encoder()
+    command = [
+        "ffmpeg",
+        "-loglevel",
+        "panic",
+        "-y",
+        "-i",
+        input_path.as_posix(),
+    ]
+
+    if encoder_args:
+        command.extend(encoder_args)
+    else:
+        command.extend(["-tune", "animation"])
+
+    command.append(output_path.as_posix())
+    process = await asyncio.create_subprocess_exec(*command)
+    return process, encoder_name
+
+
+async def _process_extracted_audio_file(
+    extracted_audio_file: str,
+    save_dir: Path,
+    config,
+    semaphore: asyncio.Semaphore,
+) -> list[Path]:
+    async with semaphore:
+        extracted_audio_file_path = Path(extracted_audio_file)
+        exported_audio_files: list[Path] = []
+
+        try:
+            if not await extracted_audio_file_path.exists():
+                logger.warning(
+                    "%s not found in %s", extracted_audio_file_path, save_dir
+                )
+                return exported_audio_files
+
+            if (await extracted_audio_file_path.stat()).st_size == 0:
+                logger.warning("%s is empty, skipping", extracted_audio_file_path)
+                return exported_audio_files
+
+            wav_path = extracted_audio_file_path.with_suffix(".wav")
+
+            # hca -> wav
+            hca2wav_process = await asyncio.create_subprocess_exec(
+                config.EXTERNAL_VGMSTREAM_CLI,
+                "-o",
+                wav_path.as_posix(),
+                extracted_audio_file_path.as_posix(),
+            )
+            await hca2wav_process.wait()
+            if hca2wav_process.returncode != 0:
+                logger.warning("Failed to convert %s to wav", extracted_audio_file_path)
+                return exported_audio_files
+
+            await extracted_audio_file_path.unlink()
+            logger.debug(
+                "Converted %s to wav and removed the original file",
+                extracted_audio_file_path,
+            )
+            exported_audio_files.append(wav_path)
+
+            # wav -> mp3
+            wav2mp3_process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-loglevel",
+                "panic",
+                "-y",
+                "-i",
+                wav_path.as_posix(),
+                extracted_audio_file_path.with_suffix(".mp3").as_posix(),
+            )
+            await wav2mp3_process.wait()
+            if wav2mp3_process.returncode != 0:
+                logger.warning("Failed to convert %s to mp3", wav_path)
+            else:
+                logger.debug("Converted %s to mp3", wav_path)
+                exported_audio_files.append(
+                    extracted_audio_file_path.with_suffix(".mp3")
+                )
+
+            # wav -> flac
+            # only for music files
+            if "music" in save_dir.parts:
+                wav2flac_process = await asyncio.create_subprocess_exec(
+                    "ffmpeg",
+                    "-loglevel",
+                    "panic",
+                    "-y",
+                    "-i",
+                    wav_path.as_posix(),
+                    extracted_audio_file_path.with_suffix(".flac").as_posix(),
+                )
+                await wav2flac_process.wait()
+                if wav2flac_process.returncode != 0:
+                    logger.warning("Failed to convert %s to flac", wav_path)
+                else:
+                    logger.debug("Converted %s to flac", wav_path)
+                    exported_audio_files.append(
+                        extracted_audio_file_path.with_suffix(".flac")
+                    )
+        except Exception as exc:
+            logger.exception(
+                "Failed processing extracted audio %s: %s",
+                extracted_audio_file_path,
+                exc,
+            )
+
+        return exported_audio_files
 
 
 def _should_fallback_sprite_render(exc: Exception) -> bool:
@@ -349,6 +553,9 @@ async def extract_asset_bundle(
     )
 
     # Post-process acb files
+    audio_transcode_semaphore = asyncio.Semaphore(
+        _get_audio_transcode_concurrency(config)
+    )
     for save_dir, acb_files in post_process_acb_files:
         for acb_file in acb_files:
             acb_cue_sheet_name: str = acb_file["cueSheetName"]
@@ -423,95 +630,20 @@ async def extract_asset_bundle(
                     raise RuntimeError(
                         "External vgmstream cli not found, please set the path in config"
                     )
-                for extracted_audio_file in extracted_audio_files:
-                    extracted_audio_file_path = Path(extracted_audio_file)
-
-                    if not await extracted_audio_file_path.exists():
-                        logger.warning(
-                            "%s not found in %s", extracted_audio_file_path, save_dir
+                audio_tasks = [
+                    asyncio.create_task(
+                        _process_extracted_audio_file(
+                            extracted_audio_file,
+                            save_dir,
+                            config,
+                            audio_transcode_semaphore,
                         )
-                        continue
-
-                    if (await extracted_audio_file_path.stat()).st_size == 0:
-                        logger.warning(
-                            "%s is empty, skipping", extracted_audio_file_path
-                        )
-                        continue
-
-                    # hca -> wav
-                    hca2wav_process = await asyncio.create_subprocess_exec(
-                        config.EXTERNAL_VGMSTREAM_CLI,
-                        "-o",
-                        extracted_audio_file_path.with_suffix(".wav").as_posix(),
-                        extracted_audio_file_path.as_posix(),
                     )
-                    await hca2wav_process.wait()
-                    if hca2wav_process.returncode != 0:
-                        logger.warning(
-                            "Failed to convert %s to wav", extracted_audio_file_path
-                        )
-                    else:
-                        # remove the hca file
-                        await extracted_audio_file_path.unlink()
-                        logger.debug(
-                            "Converted %s to wav and removed the original file",
-                            extracted_audio_file_path,
-                        )
-                        exported_files.append(
-                            extracted_audio_file_path.with_suffix(".wav")
-                        )
-
-                    # wav -> mp3
-                    wav2mp3_process = await asyncio.create_subprocess_exec(
-                        "ffmpeg",
-                        "-loglevel",
-                        "panic",
-                        "-y",
-                        "-i",
-                        extracted_audio_file_path.with_suffix(".wav").as_posix(),
-                        extracted_audio_file_path.with_suffix(".mp3").as_posix(),
-                    )
-                    await wav2mp3_process.wait()
-                    if wav2mp3_process.returncode != 0:
-                        logger.warning(
-                            "Failed to convert %s to mp3",
-                            extracted_audio_file_path.with_suffix(".wav"),
-                        )
-                    else:
-                        logger.debug(
-                            "Converted %s to mp3",
-                            extracted_audio_file_path.with_suffix(".wav"),
-                        )
-                        exported_files.append(
-                            extracted_audio_file_path.with_suffix(".mp3")
-                        )
-                        
-                    # wav -> flac
-                    # only for music files
-                    if "music" in save_dir.parts:
-                        wav2flac_process = await asyncio.create_subprocess_exec(
-                            "ffmpeg",
-                            "-loglevel",
-                            "panic",
-                            "-y",
-                            "-i",
-                            extracted_audio_file_path.with_suffix(".wav").as_posix(),
-                            extracted_audio_file_path.with_suffix(".flac").as_posix(),
-                        )
-                        await wav2flac_process.wait()
-                        if wav2flac_process.returncode != 0:
-                            logger.warning(
-                                "Failed to convert %s to flac",
-                                extracted_audio_file_path.with_suffix(".wav"),
-                            )
-                        else:
-                            logger.debug(
-                                "Converted %s to flac",
-                                extracted_audio_file_path.with_suffix(".wav"),
-                            )
-                            exported_files.append(
-                                extracted_audio_file_path.with_suffix(".flac")
-                            )
+                    for extracted_audio_file in extracted_audio_files
+                ]
+                audio_results = await asyncio.gather(*audio_tasks)
+                for audio_files in audio_results:
+                    exported_files.extend(audio_files)
             else:
                 logger.warning("%s not found in %s", acb_output_path, save_dir)
 
@@ -587,18 +719,23 @@ async def extract_asset_bundle(
         if await usm_output_path.exists():
             # ffmpeg already supports usm; convert directly to mp4.
             video_output_path = usm_output_path.with_suffix(".mp4")
-            ffmpeg_process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-loglevel",
-                "panic",
-                "-y",
-                "-i",
-                usm_output_path.as_posix(),
-                "-tune",
-                "animation",
-                video_output_path.as_posix(),
+            ffmpeg_process, encoder_name = await _run_ffmpeg_usm_to_mp4(
+                usm_output_path, video_output_path
             )
             await ffmpeg_process.wait()
+
+            if ffmpeg_process.returncode != 0 and encoder_name:
+                logger.warning(
+                    "Failed to convert %s to mp4 with %s, falling back to software encoding",
+                    usm_output_path,
+                    encoder_name,
+                )
+                _disable_ffmpeg_video_encoder()
+                ffmpeg_process, _ = await _run_ffmpeg_usm_to_mp4(
+                    usm_output_path, video_output_path
+                )
+                await ffmpeg_process.wait()
+
             if ffmpeg_process.returncode != 0:
                 logger.warning("Failed to convert %s to mp4", usm_output_path)
             else:
