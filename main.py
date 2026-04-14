@@ -11,6 +11,7 @@ from crypto import unpack
 from helpers import (
     ensure_dir_exists,
     filter_bundles,
+    format_url_template,
     get_download_list,
     refresh_cookie,
     setup_logging_queue,
@@ -148,7 +149,6 @@ async def main(update_asset_bundle_info_only: bool = False):
                     if (
                         not isinstance(game_version_json, dict)
                         or "appVersion" not in game_version_json
-                        or "appHash" not in game_version_json
                     ):
                         raise ValueError(f"Invalid JSON from {cfg.GAME_VERSION_JSON_URL}")
                 else:
@@ -167,9 +167,13 @@ async def main(update_asset_bundle_info_only: bool = False):
     assetbundle_host_hash = None
     # Format GAME_VERSION_URL using the appVersion and appHash from the game version json
     if cfg.GAME_VERSION_URL:
-        game_version_url = cfg.GAME_VERSION_URL.format(
+        app_hash = game_version_json.get("appHash")
+        if not app_hash:
+            raise ValueError("appHash must be set in game version json")
+        game_version_url = format_url_template(
+            cfg.GAME_VERSION_URL,
             appVersion=game_version_json["appVersion"],
-            appHash=game_version_json["appHash"],
+            appHash=app_hash,
         )
         # This request needs to be proxied
         async with aiohttp.ClientSession(proxy=cfg.PROXY_URL) as session:
@@ -191,7 +195,7 @@ async def main(update_asset_bundle_info_only: bool = False):
             logger.debug(
                 "Current assetbundleHostHash: %s, assetHash: %s, game version url: %s",
                 assetbundle_host_hash,
-                game_version_json["assetHash"],
+                game_version_json.get("assetHash"),
                 game_version_url,
             )
     else:
@@ -227,10 +231,16 @@ async def main(update_asset_bundle_info_only: bool = False):
                 assetVer=asset_ver,
             )
         else:
-            asset_bundle_info_url = cfg.ASSET_BUNDLE_INFO_URL.format(
-                assetbundleHostHash=assetbundle_host_hash,
-                assetVersion=game_version_json["assetVersion"],
-                assetHash=game_version_json["assetHash"],
+            asset_bundle_info_url_args = {
+                "assetbundleHostHash": assetbundle_host_hash,
+                "assetVersion": game_version_json["assetVersion"],
+            }
+            asset_hash = game_version_json.get("assetHash")
+            if asset_hash:
+                asset_bundle_info_url_args["assetHash"] = asset_hash
+            asset_bundle_info_url = format_url_template(
+                cfg.ASSET_BUNDLE_INFO_URL,
+                **asset_bundle_info_url_args,
             )
         async with aiohttp.ClientSession() as session:
             async with session.get(asset_bundle_info_url, headers=headers) as response:

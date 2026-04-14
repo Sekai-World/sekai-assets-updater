@@ -3,8 +3,10 @@ import base64
 import logging
 import re
 import time
+from http.cookies import SimpleCookie
 from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
+from string import Formatter
 from typing import Dict, List, Tuple
 
 import aiohttp
@@ -92,6 +94,26 @@ def bundle_has_changed(bundle: Dict, cached_bundle: Dict | None) -> bool:
         return str(bundle_crc) != str(cached_crc)
 
     return get_bundle_checksum(bundle) != get_bundle_checksum(cached_bundle)
+
+
+def get_template_placeholders(template: str) -> set[str]:
+    return {
+        field_name.split(".", 1)[0].split("[", 1)[0]
+        for _, field_name, _, _ in Formatter().parse(template)
+        if field_name
+    }
+
+
+def format_url_template(template: str, **values: str) -> str:
+    placeholders = get_template_placeholders(template)
+    missing_placeholders = [
+        name for name in placeholders if name not in values or values[name] is None
+    ]
+    if missing_placeholders:
+        missing_fields = ", ".join(sorted(missing_placeholders))
+        raise ValueError(f"Missing format values for {missing_fields}: {template}")
+
+    return template.format(**{name: values[name] for name in placeholders})
 
 
 async def get_download_list(
@@ -201,13 +223,17 @@ async def get_download_list(
             version = asset_bundle_info.get("version")
             assert version, "Version must be set in asset bundle info"
             asset_hash: str = game_version_json.get("assetHash", "")
-            assert asset_hash, "Asset hash must be set in game version json"
+            asset_bundle_url_args = {
+                "assetbundleHostHash": assetbundle_host_hash,
+                "version": version,
+            }
+            if asset_hash:
+                asset_bundle_url_args["assetHash"] = asset_hash
             download_list = [
                 (
-                    config.ASSET_BUNDLE_URL.format(
-                        assetbundleHostHash=assetbundle_host_hash,
-                        version=version,
-                        assetHash=asset_hash,
+                    format_url_template(
+                        config.ASSET_BUNDLE_URL,
+                        **asset_bundle_url_args,
                         bundleName=bundle.get("bundleName"),
                     ),
                     bundle,
@@ -223,17 +249,21 @@ async def get_download_list(
         version = asset_bundle_info.get("version", "")
         assert version, "Version must be set in asset bundle info"
         asset_hash: str = game_version_json.get("assetHash", "")
-        assert asset_hash, "Asset hash must be set in game version json"
         app_version: str = getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
         assert app_version, "App version must be set in game version json or config"
+        asset_bundle_url_args = {
+            "assetbundleHostHash": assetbundle_host_hash,
+            "version": version,
+            "appVersion": app_version,
+        }
+        if asset_hash:
+            asset_bundle_url_args["assetHash"] = asset_hash
 
         download_list = [
             (
-                config.ASSET_BUNDLE_URL.format(
-                    assetbundleHostHash=assetbundle_host_hash,
-                    version=version,
-                    assetHash=asset_hash,
-                    appVersion=app_version,
+                format_url_template(
+                    config.ASSET_BUNDLE_URL,
+                    **asset_bundle_url_args,
                     bundleName=bundle.get("bundleName"),
                     downloadPath=bundle.get("downloadPath"),
                 ),
@@ -321,17 +351,64 @@ async def sort_download_list(
     return download_list
 
 
+def build_cookie_header(set_cookie_headers: List[str]) -> str:
+    """Convert Set-Cookie headers to a request Cookie header."""
+    cookie = SimpleCookie()
+    for header in set_cookie_headers:
+        cookie.load(header)
+
+    return "; ".join(
+        f"{key}={morsel.value}" for key, morsel in cookie.items() if morsel.value
+    )
+
+
+def get_cookie_value(cookie_header: str, cookie_name: str) -> str | None:
+    prefix = f"{cookie_name}="
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if part.startswith(prefix):
+            return part[len(prefix) :]
+    return None
+
+
+def get_cookie_expire_time(cookie_header: str) -> int | None:
+    """Extract the CloudFront policy expiry from a Cookie header."""
+    policy_value = get_cookie_value(cookie_header, "CloudFront-Policy")
+    if not policy_value:
+        return None
+
+    padded_value = policy_value.rstrip("_")
+    padded_value += "=" * (-len(padded_value) % 4)
+    try:
+        decoded_policy = base64.urlsafe_b64decode(padded_value).decode("utf-8")
+        policy_json = json.loads(decoded_policy)
+    except Exception:
+        logger.warning("Failed to parse CloudFront-Policy cookie, forcing refresh")
+        return None
+
+    statements = policy_json.get("Statement") or []
+    if not statements:
+        return None
+
+    return (
+        statements[0]
+        .get("Condition", {})
+        .get("DateLessThan", {})
+        .get("AWS:EpochTime")
+    )
+
+
 async def refresh_cookie(
     config, headers: Dict[str, str], cookie: str | None = None
 ) -> Tuple[Dict[str, str], str]:
     """Refresh the cookie using the GAME_COOKIE_URL."""
     if cookie:
-        # Extract the expire time from the cookie
-        cookie_expire_time = json.loads(
-            base64.b64decode(cookie.split(";")[0].split("=")[1] + "=").decode("utf-8")
-        )["Statement"][0]["Condition"]["DateLessThan"]["AWS:EpochTime"]
-        # Check if the cookie is expired
-        if cookie_expire_time > int(time.time()) + 3600:
+        cookie_expire_time = get_cookie_expire_time(cookie)
+        if (
+            isinstance(cookie_expire_time, int)
+            and cookie_expire_time > int(time.time()) + 3600
+        ):
+            headers["Cookie"] = cookie
             return headers, cookie
 
     # If the cookie is expired or not set, fetch a new one
@@ -341,7 +418,9 @@ async def refresh_cookie(
                 config.GAME_COOKIE_URL, headers=headers
             ) as response:
                 if response.status == 200:
-                    cookie = response.headers.get("Set-Cookie")
+                    cookie = build_cookie_header(
+                        response.headers.getall("Set-Cookie", [])
+                    )
                     assert cookie, "Cookie is empty"
                     headers["Cookie"] = cookie
                 else:

@@ -25,7 +25,7 @@ MAX_CONCURRENCY_UPLOADS = 10
 AES_KEY = bytes("AES_KEY")
 AES_IV = bytes("AES_IV")
 
-# JSON URL for fetching game version information
+# JSON URL for fetching game version information, can be set to a specific version json manually
 GAME_VERSION_JSON_URL = None
 # URL for fetching game cookies
 GAME_COOKIE_URL = None
