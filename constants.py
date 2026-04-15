@@ -6,5 +6,6 @@ UNITY_FS_CONTAINER_BASE = Path("assets/sekai/assetbundle/resources/")
 UNITY_FS_BUILT_IN_CONTAINER_BASE = Path(
     "assets/sekai/builtinassets/assetbundle/resources/"
 )
+UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE = Path("assets/sekai/builtinassets/resources/")
 
 NUVERSE_REGIONS = [SekaiServerRegion.TW, SekaiServerRegion.KR, SekaiServerRegion.CN]

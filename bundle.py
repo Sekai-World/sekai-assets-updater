@@ -17,7 +17,11 @@ from UnityPy.enums import ClassIDType, SpritePackingRotation
 from UnityPy.export.SpriteHelper import SpriteSettings, get_image
 from anyio import Path, open_file
 
-from constants import UNITY_FS_CONTAINER_BASE, UNITY_FS_BUILT_IN_CONTAINER_BASE
+from constants import (
+    UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
+    UNITY_FS_BUILT_IN_CONTAINER_BASE,
+    UNITY_FS_CONTAINER_BASE,
+)
 from helpers import deobfuscate
 from utils.acb import extract_acb
 from utils.playable import extract_playable
@@ -37,6 +41,44 @@ def _get_audio_transcode_concurrency(config) -> int:
         return max(1, int(concurrency))
     except (TypeError, ValueError):
         return 1
+
+
+def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
+    try:
+        exported_files.remove(file_path)
+        return
+    except ValueError:
+        pass
+
+    file_path_lower = file_path.with_name(file_path.name.lower())
+    try:
+        exported_files.remove(file_path_lower)
+    except ValueError:
+        logger.debug("%s not tracked in exported_files, skip removal", file_path)
+
+
+async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Path:
+    if await expected_path.exists():
+        return expected_path
+
+    expected_path_lower = expected_path.with_name(expected_path.name.lower())
+    if await expected_path_lower.exists():
+        logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
+        return expected_path_lower
+
+    candidate_paths = [
+        path async for path in save_dir.iterdir() if path.suffix.lower() == ".usm"
+    ]
+    if len(candidate_paths) == 1:
+        logger.warning(
+            "Expected %s in %s, falling back to discovered usm %s",
+            expected_path.name,
+            save_dir,
+            candidate_paths[0].name,
+        )
+        return candidate_paths[0]
+
+    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
 
 async def _get_ffmpeg_video_encoder() -> tuple[str | None, list[str]]:
@@ -137,6 +179,40 @@ async def _run_ffmpeg_usm_to_mp4(
     return process, encoder_name
 
 
+async def _run_hca_to_wav(
+    input_path: Path,
+    output_path: Path,
+    config,
+) -> bool:
+    if getattr(config, "EXTERNAL_VGMSTREAM_CLI", None):
+        hca2wav_process = await asyncio.create_subprocess_exec(
+            config.EXTERNAL_VGMSTREAM_CLI,
+            "-o",
+            output_path.as_posix(),
+            input_path.as_posix(),
+        )
+        await hca2wav_process.wait()
+        if hca2wav_process.returncode == 0:
+            return True
+
+        logger.warning(
+            "vgmstream failed converting %s to wav, falling back to ffmpeg",
+            input_path,
+        )
+
+    hca2wav_process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-loglevel",
+        "panic",
+        "-y",
+        "-i",
+        input_path.as_posix(),
+        output_path.as_posix(),
+    )
+    await hca2wav_process.wait()
+    return hca2wav_process.returncode == 0
+
+
 async def _process_extracted_audio_file(
     extracted_audio_file: str,
     save_dir: Path,
@@ -161,14 +237,7 @@ async def _process_extracted_audio_file(
             wav_path = extracted_audio_file_path.with_suffix(".wav")
 
             # hca -> wav
-            hca2wav_process = await asyncio.create_subprocess_exec(
-                config.EXTERNAL_VGMSTREAM_CLI,
-                "-o",
-                wav_path.as_posix(),
-                extracted_audio_file_path.as_posix(),
-            )
-            await hca2wav_process.wait()
-            if hca2wav_process.returncode != 0:
+            if not await _run_hca_to_wav(extracted_audio_file_path, wav_path, config):
                 logger.warning("Failed to convert %s to wav", extracted_audio_file_path)
                 return exported_audio_files
 
@@ -390,7 +459,12 @@ async def extract_asset_bundle(
             relpath = Path(unityfs_path).relative_to(UNITY_FS_CONTAINER_BASE)
             save_path = extracted_save_path / relpath.relative_to(*relpath.parts[:1])
         except ValueError:
-            relpath = Path(unityfs_path).relative_to(UNITY_FS_BUILT_IN_CONTAINER_BASE)
+            try:
+                relpath = Path(unityfs_path).relative_to(UNITY_FS_BUILT_IN_CONTAINER_BASE)
+            except ValueError:
+                relpath = Path(unityfs_path).relative_to(
+                    UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE
+                )
             save_path = extracted_save_path / relpath
         except Exception as e:
             logger.exception("Failed to get relative path for %s", unityfs_path)
@@ -597,7 +671,7 @@ async def extract_asset_bundle(
                                 acb_textasset_path, "rb"
                             ) as infile:
                                 await outfile.write(await infile.read())
-                            exported_files.remove(acb_textasset_path)
+                            _discard_exported_file(exported_files, acb_textasset_path)
                             await acb_textasset_path.unlink()
 
                     logger.debug(
@@ -624,12 +698,8 @@ async def extract_asset_bundle(
                 # remove the acb file
                 await acb_output_path.unlink()
                 logger.debug("Removed %s", acb_output_path)
-                exported_files.remove(acb_output_path)
+                _discard_exported_file(exported_files, acb_output_path)
 
-                if not config.EXTERNAL_VGMSTREAM_CLI:
-                    raise RuntimeError(
-                        "External vgmstream cli not found, please set the path in config"
-                    )
                 audio_tasks = [
                     asyncio.create_task(
                         _process_extracted_audio_file(
@@ -654,21 +724,9 @@ async def extract_asset_bundle(
             movie_bundle = movie_bundles[0]
             usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
             usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
-            
-            if not await usm_output_path.exists():
-                # maybe case-sensitive filesystem issue
-                usm_output_path_lower = usm_output_path.with_name(
-                    usm_output_path.name.lower()
-                )
-                if await usm_output_path_lower.exists():
-                    usm_output_path = usm_output_path_lower
-                    logger.debug(
-                        "Found %s instead of %s", usm_output_path, usm_output_name
-                    )
-                else:
-                    raise FileNotFoundError(
-                        f"{usm_output_path} not found in {save_dir}"
-                    )
+            usm_output_path = await _resolve_existing_usm_path(
+                usm_output_path, save_dir
+            )
         elif len(movie_bundles) > 1:
             # the movie bundle consists of multiple files
             pattern = re.compile(r"-\d{3}.usm.bytes")
@@ -699,16 +757,8 @@ async def extract_asset_bundle(
                             )
                     async with await open_file(usm_split_path, "rb") as infile:
                         await outfile.write(await infile.read())
-                    try:
-                        exported_files.remove(usm_split_path)
-                        await usm_split_path.unlink()
-                    except ValueError:
-                        # maybe case-sensitive issue
-                        usm_split_path_lower = usm_split_path.with_name(
-                            usm_split_path.name.lower()
-                        )
-                        exported_files.remove(usm_split_path_lower)
-                        await usm_split_path_lower.unlink()
+                    _discard_exported_file(exported_files, usm_split_path)
+                    await usm_split_path.unlink()
 
                 logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
                 exported_files.append(usm_output_path)
@@ -744,15 +794,7 @@ async def extract_asset_bundle(
 
             await usm_output_path.unlink()
             logger.debug("Removed %s", usm_output_path)
-            try:
-                exported_files.remove(usm_output_path)
-            except ValueError:
-                # maybe case-sensitive issue
-                usm_output_path_lower = usm_output_path.with_name(
-                    usm_output_path.name.lower()
-                )
-                if usm_output_path_lower in exported_files:
-                    exported_files.remove(usm_output_path_lower)
+            _discard_exported_file(exported_files, usm_output_path)
 
     # Final cleanup of exported files, all files ending with
     # ".bytes", ".acb", ".usm" will be removed
