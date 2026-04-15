@@ -1,5 +1,4 @@
 import os
-import platform
 
 from anyio import Path
 
@@ -64,8 +63,3 @@ ASSET_REMOTE_STORAGE = [
         "args": ["copy", "src", "dst"],
     },
 ]
-
-# External tools
-EXTERNAL_VGMSTREAM_CLI = (
-    Path(__file__).parent / "externals" / f"vgmstream-cli-{platform.system().lower()}"
-)

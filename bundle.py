@@ -182,24 +182,7 @@ async def _run_ffmpeg_usm_to_mp4(
 async def _run_hca_to_wav(
     input_path: Path,
     output_path: Path,
-    config,
 ) -> bool:
-    if getattr(config, "EXTERNAL_VGMSTREAM_CLI", None):
-        hca2wav_process = await asyncio.create_subprocess_exec(
-            config.EXTERNAL_VGMSTREAM_CLI,
-            "-o",
-            output_path.as_posix(),
-            input_path.as_posix(),
-        )
-        await hca2wav_process.wait()
-        if hca2wav_process.returncode == 0:
-            return True
-
-        logger.warning(
-            "vgmstream failed converting %s to wav, falling back to ffmpeg",
-            input_path,
-        )
-
     hca2wav_process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-loglevel",
@@ -237,7 +220,7 @@ async def _process_extracted_audio_file(
             wav_path = extracted_audio_file_path.with_suffix(".wav")
 
             # hca -> wav
-            if not await _run_hca_to_wav(extracted_audio_file_path, wav_path, config):
+            if not await _run_hca_to_wav(extracted_audio_file_path, wav_path):
                 logger.warning("Failed to convert %s to wav", extracted_audio_file_path)
                 return exported_audio_files
 
