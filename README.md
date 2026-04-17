@@ -79,23 +79,29 @@ Verbose mode:
 uv run python main.py -c config.py -v
 ```
 
+Quiet mode:
+
+```bash
+uv run python main.py -c config.py -q
+```
+
 Only refresh filtered `asset_bundle_info.json` and stop before generating downloads:
 
 ```bash
 uv run python main.py -c config.py --update-asset-bundle-info-only
 ```
 
-Compare two configs and report bundles that exist in config1 but are missing in config2:
+Force a full rebuild of `dl_list.json` and redownload everything matched by the filters, ignoring cached json metadata and any existing cached `dl_list.json`:
 
 ```bash
-uv run python compare_asset_bundle_info.py config.old.py config.new.py
+uv run python main.py -c config.py --force-full-download
 ```
-
-This compares the post-filter bundle sets, so each config's `DL_INCLUDE_LIST` and `DL_EXCLUDE_LIST` are applied before diffing.
 
 ## Resume Behavior
 
 If `DL_LIST_CACHE_PATH` exists, `main.py` will load it and resume from that cached download list instead of rebuilding the list.
+
+With `--force-full-download`, `main.py` skips that resume behavior, ignores cached metadata json, rewrites `DL_LIST_CACHE_PATH` with a fresh full download list, and then processes it.
 
 When all tasks succeed, the cached download list is removed automatically.
 

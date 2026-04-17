@@ -95,7 +95,10 @@ async def do_download(
         return True
 
 
-async def main(update_asset_bundle_info_only: bool = False):
+async def main(
+    update_asset_bundle_info_only: bool = False,
+    force_full_download: bool = False,
+):
     cfg = require_config()
 
     # ensure required directories exist
@@ -104,7 +107,16 @@ async def main(update_asset_bundle_info_only: bool = False):
     await ensure_dir_exists(cfg.GAME_VERSION_JSON_CACHE_PATH.parent)
     headers, cookie = await build_request_headers(cfg)
 
-    if (not update_asset_bundle_info_only) and await cfg.DL_LIST_CACHE_PATH.exists():
+    if force_full_download:
+        logger.info(
+            "Force full download enabled, ignoring cached json metadata and cached dl_list"
+        )
+
+    if (
+        (not update_asset_bundle_info_only)
+        and (not force_full_download)
+        and await cfg.DL_LIST_CACHE_PATH.exists()
+    ):
         logger.info(
             "Cache file %s exists, loading from cache", cfg.DL_LIST_CACHE_PATH
         )
@@ -170,6 +182,7 @@ async def main(update_asset_bundle_info_only: bool = False):
         include_list=cfg.DL_INCLUDE_LIST,
         exclude_list=cfg.DL_EXCLUDE_LIST,
         priority_list=cfg.DL_PRIORITY_LIST,
+        force_full_download=force_full_download,
     )
     logger.info("Download list generated, %d items to download", len(download_list))
 
@@ -200,11 +213,25 @@ def cli():
         "-v", "--verbose", action="store_true", help="Enable verbose logging."
     )
     parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Only output warnings and errors.",
+    )
+    parser.add_argument(
         "--update-asset-bundle-info-only",
         action="store_true",
         help=(
             "Fetch and update asset_bundle_info.json only; do not generate dl_list.json "
             "and do not start download tasks."
+        ),
+    )
+    parser.add_argument(
+        "--force-full-download",
+        action="store_true",
+        help=(
+            "Ignore cached json metadata and cached dl_list.json, rebuild a full "
+            "dl_list.json from current metadata, then download/process all matched bundles."
         ),
     )
     args = parser.parse_args()
@@ -225,20 +252,25 @@ def cli():
     config = cast(ConfigLike, loaded_config)
 
     # Set the logging level
-    if args.verbose:
-        logging.basicConfig(
-            level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s"
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-        )
+    log_level = logging.INFO
+    if args.quiet:
+        log_level = logging.WARNING
+    elif args.verbose:
+        log_level = logging.DEBUG
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+    )
 
     setup_logging_queue()
 
     # Run the main function
     asyncio.run(
-        main(update_asset_bundle_info_only=args.update_asset_bundle_info_only)
+        main(
+            update_asset_bundle_info_only=args.update_asset_bundle_info_only,
+            force_full_download=args.force_full_download,
+        )
     )
 
 

@@ -125,6 +125,7 @@ async def get_download_list(
     include_list: List[str] | None = None,
     exclude_list: List[str] | None = None,
     priority_list: List[str] | None = None,
+    force_full_download: bool = False,
 ) -> List[Tuple[str, Dict]]:
     """Generate the download list for the asset bundles.
 
@@ -148,10 +149,10 @@ async def get_download_list(
     assert config.GAME_VERSION_JSON_CACHE_PATH, (
         "GAME_VERSION_JSON_CACHE_PATH must be set in config"
     )
-    if await config.ASSET_BUNDLE_INFO_CACHE_PATH.exists():
+    if (not force_full_download) and await config.ASSET_BUNDLE_INFO_CACHE_PATH.exists():
         async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH) as f:
             cached_asset_bundle_info = json.loads(await f.read())
-    if await config.GAME_VERSION_JSON_CACHE_PATH.exists():
+    if (not force_full_download) and await config.GAME_VERSION_JSON_CACHE_PATH.exists():
         async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH) as f:
             cached_game_version_json = json.loads(await f.read())
 
@@ -488,5 +489,13 @@ async def upload_to_storage(
             else:
                 logger.info("Successfully uploaded %s to %s", file_path, remote_path)
 
-    # Run uploads concurrently
-    await asyncio.gather(*(upload_file(file_path) for file_path in exported_list), return_exceptions=True)
+    # Run uploads concurrently and fail the worker if any upload fails.
+    results = await asyncio.gather(
+        *(upload_file(file_path) for file_path in exported_list),
+        return_exceptions=True,
+    )
+    errors = [result for result in results if isinstance(result, Exception)]
+    if errors:
+        raise RuntimeError(
+            f"{len(errors)} upload(s) failed; first error: {errors[0]}"
+        ) from errors[0]
