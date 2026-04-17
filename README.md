@@ -11,7 +11,7 @@ Update and extract Project Sekai asset bundles.
 
 `ffmpeg` is required for:
 
-- `hca -> wav/mp3/flac`
+- `wav -> mp3/flac`
 - `usm -> mp4`
 
 On macOS and supported Linux/Windows environments, video conversion will try to use hardware encoding automatically and fall back to software encoding when unavailable.
@@ -85,6 +85,14 @@ Only refresh filtered `asset_bundle_info.json` and stop before generating downlo
 uv run python main.py -c config.py --update-asset-bundle-info-only
 ```
 
+Compare two configs and report bundles that exist in config1 but are missing in config2:
+
+```bash
+uv run python compare_asset_bundle_info.py config.old.py config.new.py
+```
+
+This compares the post-filter bundle sets, so each config's `DL_INCLUDE_LIST` and `DL_EXCLUDE_LIST` are applied before diffing.
+
 ## Resume Behavior
 
 If `DL_LIST_CACHE_PATH` exists, `main.py` will load it and resume from that cached download list instead of rebuilding the list.
@@ -131,7 +139,7 @@ Common outputs:
 Audio pipeline:
 
 - `acb` is unpacked by the local parser in [`utils/acb.py`](./utils/acb.py)
-- extracted `hca` files are transcoded by `ffmpeg`
+- extracted `hca` files are decoded by the local Python decoder in [`utils/hca.py`](./utils/hca.py)
 
 Video pipeline:
 
@@ -141,5 +149,4 @@ Video pipeline:
 ## Notes
 
 - Some configs rely on cached metadata produced by earlier runs.
-- `ffmpeg` must support `hca` decoding for audio conversion to work.
 - If you only want local extraction, set `ASSET_REMOTE_STORAGE = []`.

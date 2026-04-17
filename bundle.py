@@ -1,12 +1,13 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
 import asyncio
-import orjson as json
 import logging
 import re
 import sys
 from io import BytesIO
 from typing import Dict, List, Tuple
+
+import orjson as json
 
 import aiohttp
 import UnityPy
@@ -24,6 +25,7 @@ from constants import (
 )
 from helpers import deobfuscate
 from utils.acb import extract_acb
+from utils.hca import decode_hca_file
 from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
@@ -183,17 +185,16 @@ async def _run_hca_to_wav(
     input_path: Path,
     output_path: Path,
 ) -> bool:
-    hca2wav_process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
-        "-loglevel",
-        "panic",
-        "-y",
-        "-i",
-        input_path.as_posix(),
-        output_path.as_posix(),
-    )
-    await hca2wav_process.wait()
-    return hca2wav_process.returncode == 0
+    try:
+        await asyncio.to_thread(
+            decode_hca_file,
+            input_path.as_posix(),
+            output_path.as_posix(),
+        )
+    except Exception:
+        logger.exception("Failed to decode %s with the Python HCA decoder", input_path)
+        return False
+    return True
 
 
 async def _process_extracted_audio_file(
