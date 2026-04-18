@@ -159,6 +159,7 @@ async def get_download_list(
     download_list = []
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
+    asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
     current_bundles = await filter_bundles(
         current_bundles,
         include_list=include_list,
@@ -221,13 +222,14 @@ async def get_download_list(
             ]
 
             # Generate the download list from changed bundles
-            version = asset_bundle_info.get("version")
-            assert version, "Version must be set in asset bundle info"
             asset_hash: str = game_version_json.get("assetHash", "")
             asset_bundle_url_args = {
                 "assetbundleHostHash": assetbundle_host_hash,
-                "version": version,
             }
+            if "version" in asset_bundle_url_placeholders:
+                version = asset_bundle_info.get("version")
+                assert version, "Version must be set in asset bundle info"
+                asset_bundle_url_args["version"] = version
             if asset_hash:
                 asset_bundle_url_args["assetHash"] = asset_hash
             download_list = [
@@ -247,16 +249,17 @@ async def get_download_list(
             game_version_json["assetver"] = assetver
 
         # Get the download list for a full download
-        version = asset_bundle_info.get("version", "")
-        assert version, "Version must be set in asset bundle info"
         asset_hash: str = game_version_json.get("assetHash", "")
         app_version: str = getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
         assert app_version, "App version must be set in game version json or config"
         asset_bundle_url_args = {
             "assetbundleHostHash": assetbundle_host_hash,
-            "version": version,
             "appVersion": app_version,
         }
+        if "version" in asset_bundle_url_placeholders:
+            version = asset_bundle_info.get("version")
+            assert version, "Version must be set in asset bundle info"
+            asset_bundle_url_args["version"] = version
         if asset_hash:
             asset_bundle_url_args["assetHash"] = asset_hash
 
