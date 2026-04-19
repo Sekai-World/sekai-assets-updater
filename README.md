@@ -7,6 +7,7 @@ Update and extract Project Sekai asset bundles.
 - Python `3.12`
 - `uv`
 - `ffmpeg`
+- `vgmstream-cli` for faster HCA decoding (optional)
 - `rclone` if you use remote uploads
 
 `ffmpeg` is required for:
@@ -44,7 +45,11 @@ Important fields:
 Concurrency:
 
 - `MAX_CONCURRENCY`: download/extract worker count
-- `MAX_CONCURRENCY_AUDIO_TRANSCODES`: concurrent audio transcodes
+- `MAX_CONCURRENT_AUDIO_FILES`: concurrent audio file pipelines
+- `MAX_CONCURRENCY_HCA_DECODES`: concurrent HCA decodes
+- `MAX_CONCURRENCY_AUDIO_ENCODERS`: concurrent `ffmpeg` audio encodes
+- `MAX_CONCURRENCY_AUDIO_TRANSCODES`: legacy fallback for the three audio settings above
+- `HCA_DECODE_BACKEND`: `auto`, `vgmstream`, or `python`
 - `MAX_CONCURRENCY_VIDEO_TRANSCODES`: concurrent video transcodes
 - `MAX_CONCURRENCY_UPLOADS`: concurrent remote uploads
 
@@ -146,7 +151,9 @@ Common outputs:
 Audio pipeline:
 
 - `acb` is unpacked by the local parser in [`utils/acb.py`](./utils/acb.py)
-- extracted `hca` files are decoded by the local Python decoder in [`utils/hca.py`](./utils/hca.py)
+- extracted `hca` files are decoded by `vgmstream-cli` when available, otherwise by the local Python decoder in [`utils/hca.py`](./utils/hca.py)
+- audio file concurrency, HCA decode concurrency, and `ffmpeg` audio encode concurrency are configured separately
+- the Python decoder runs in a process pool to use multiple CPU cores better
 
 Video pipeline:
 

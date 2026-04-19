@@ -1,9 +1,13 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
+import atexit
 import asyncio
 import logging
+import os
 import re
+import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from io import BytesIO
 from typing import Dict, List, Tuple
 
@@ -31,47 +35,116 @@ from utils.playable import extract_playable
 logger = logging.getLogger("live2d")
 
 _ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
-_audio_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_audio_file_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_hca_decode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_audio_encoder_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
 _video_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_audio_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
+_vgmstream_cli_cache: str | None = None
+_vgmstream_cli_checked = False
+_hca_decoder_reported: str | None = None
 
 
-def _get_audio_transcode_concurrency(config) -> int:
-    concurrency = getattr(
-        config,
-        "MAX_CONCURRENCY_AUDIO_TRANSCODES",
-        getattr(config, "MAX_CONCURRENCY", 1),
-    )
+def _sanitize_concurrency(value) -> int:
     try:
-        return max(1, int(concurrency))
+        return max(1, int(value))
     except (TypeError, ValueError):
         return 1
+
+
+def _get_legacy_audio_transcode_concurrency(config) -> int:
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENCY_AUDIO_TRANSCODES",
+            getattr(config, "MAX_CONCURRENCY", 1),
+        )
+    )
+
+
+def _get_max_concurrent_audio_files(config) -> int:
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENT_AUDIO_FILES",
+            _get_legacy_audio_transcode_concurrency(config),
+        )
+    )
+
+
+def _get_hca_decode_concurrency(config) -> int:
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENCY_HCA_DECODES",
+            _get_legacy_audio_transcode_concurrency(config),
+        )
+    )
+
+
+def _get_audio_encoder_concurrency(config) -> int:
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENCY_AUDIO_ENCODERS",
+            _get_legacy_audio_transcode_concurrency(config),
+        )
+    )
 
 
 def _get_video_transcode_concurrency(config) -> int:
-    concurrency = getattr(
-        config,
-        "MAX_CONCURRENCY_VIDEO_TRANSCODES",
-        getattr(config, "MAX_CONCURRENCY", 1),
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENCY_VIDEO_TRANSCODES",
+            getattr(config, "MAX_CONCURRENCY", 1),
+        )
     )
-    try:
-        return max(1, int(concurrency))
-    except (TypeError, ValueError):
-        return 1
 
 
-def _get_shared_audio_transcode_semaphore(config) -> asyncio.Semaphore:
-    global _audio_transcode_semaphore_cache
+def _get_shared_audio_file_semaphore(config) -> asyncio.Semaphore:
+    global _audio_file_semaphore_cache
 
-    concurrency = _get_audio_transcode_concurrency(config)
+    concurrency = _get_max_concurrent_audio_files(config)
     if (
-        _audio_transcode_semaphore_cache is None
-        or _audio_transcode_semaphore_cache[0] != concurrency
+        _audio_file_semaphore_cache is None
+        or _audio_file_semaphore_cache[0] != concurrency
     ):
-        _audio_transcode_semaphore_cache = (
+        _audio_file_semaphore_cache = (
             concurrency,
             asyncio.Semaphore(concurrency),
         )
-    return _audio_transcode_semaphore_cache[1]
+    return _audio_file_semaphore_cache[1]
+
+
+def _get_shared_hca_decode_semaphore(config) -> asyncio.Semaphore:
+    global _hca_decode_semaphore_cache
+
+    concurrency = _get_hca_decode_concurrency(config)
+    if (
+        _hca_decode_semaphore_cache is None
+        or _hca_decode_semaphore_cache[0] != concurrency
+    ):
+        _hca_decode_semaphore_cache = (
+            concurrency,
+            asyncio.Semaphore(concurrency),
+        )
+    return _hca_decode_semaphore_cache[1]
+
+
+def _get_shared_audio_encoder_semaphore(config) -> asyncio.Semaphore:
+    global _audio_encoder_semaphore_cache
+
+    concurrency = _get_audio_encoder_concurrency(config)
+    if (
+        _audio_encoder_semaphore_cache is None
+        or _audio_encoder_semaphore_cache[0] != concurrency
+    ):
+        _audio_encoder_semaphore_cache = (
+            concurrency,
+            asyncio.Semaphore(concurrency),
+        )
+    return _audio_encoder_semaphore_cache[1]
 
 
 def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
@@ -87,6 +160,83 @@ def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
             asyncio.Semaphore(concurrency),
         )
     return _video_transcode_semaphore_cache[1]
+
+
+def _shutdown_audio_process_pool() -> None:
+    global _audio_process_pool_cache
+
+    if _audio_process_pool_cache is None:
+        return
+
+    _, executor = _audio_process_pool_cache
+    _audio_process_pool_cache = None
+    executor.shutdown(wait=False, cancel_futures=False)
+
+
+atexit.register(_shutdown_audio_process_pool)
+
+
+def _get_shared_audio_process_pool(config) -> ProcessPoolExecutor:
+    global _audio_process_pool_cache
+
+    concurrency = _get_hca_decode_concurrency(config)
+    if (
+        _audio_process_pool_cache is None
+        or _audio_process_pool_cache[0] != concurrency
+    ):
+        if _audio_process_pool_cache is not None:
+            _audio_process_pool_cache[1].shutdown(wait=False, cancel_futures=False)
+        _audio_process_pool_cache = (
+            concurrency,
+            ProcessPoolExecutor(max_workers=concurrency),
+        )
+    return _audio_process_pool_cache[1]
+
+
+def _get_hca_decode_backend(config) -> str:
+    backend = str(getattr(config, "HCA_DECODE_BACKEND", "auto")).strip().lower()
+    if backend in {"auto", "python", "vgmstream"}:
+        return backend
+
+    logger.warning("Unknown HCA_DECODE_BACKEND=%r, falling back to auto", backend)
+    return "auto"
+
+
+def _get_vgmstream_cli() -> str | None:
+    global _vgmstream_cli_cache, _vgmstream_cli_checked
+
+    if _vgmstream_cli_checked:
+        return _vgmstream_cli_cache
+
+    candidates: list[str] = []
+    env_candidate = os.environ.get("VGMSTREAM_CLI")
+    if env_candidate:
+        candidates.append(env_candidate)
+    candidates.append("vgmstream-cli")
+
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            _vgmstream_cli_cache = resolved
+            _vgmstream_cli_checked = True
+            return _vgmstream_cli_cache
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            _vgmstream_cli_cache = candidate
+            _vgmstream_cli_checked = True
+            return _vgmstream_cli_cache
+
+    _vgmstream_cli_checked = True
+    return None
+
+
+def _report_hca_decoder(message: str) -> None:
+    global _hca_decoder_reported
+
+    if _hca_decoder_reported == message:
+        return
+
+    _hca_decoder_reported = message
+    logger.info(message)
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -225,12 +375,19 @@ async def _run_ffmpeg_usm_to_mp4(
     return process, encoder_name
 
 
-async def _run_hca_to_wav(
+async def _run_hca_to_wav_with_python(
     input_path: Path,
     output_path: Path,
+    config,
 ) -> bool:
     try:
-        await asyncio.to_thread(
+        _report_hca_decoder(
+            "Using Python HCA decoder via process pool "
+            f"({_get_hca_decode_concurrency(config)} workers)"
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            _get_shared_audio_process_pool(config),
             decode_hca_file,
             input_path.as_posix(),
             output_path.as_posix(),
@@ -241,13 +398,94 @@ async def _run_hca_to_wav(
     return True
 
 
+async def _run_hca_to_wav_with_vgmstream(
+    input_path: Path,
+    output_path: Path,
+) -> bool:
+    vgmstream_cli = _get_vgmstream_cli()
+    if vgmstream_cli is None:
+        return False
+
+    _report_hca_decoder(f"Using vgmstream-cli for HCA decoding: {vgmstream_cli}")
+
+    try:
+        if await output_path.exists():
+            await output_path.unlink()
+
+        process = await asyncio.create_subprocess_exec(
+            vgmstream_cli,
+            "-i",
+            "-o",
+            output_path.as_posix(),
+            input_path.as_posix(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except Exception:
+        logger.exception("Failed to decode %s with vgmstream-cli", input_path)
+        return False
+
+    if process.returncode != 0 or not await output_path.exists():
+        error_output = stderr.decode(errors="ignore").strip() or stdout.decode(
+            errors="ignore"
+        ).strip()
+        logger.warning(
+            "vgmstream-cli failed to decode %s: %s",
+            input_path,
+            error_output or f"exit code {process.returncode}",
+        )
+        return False
+
+    return True
+
+
+async def _run_hca_to_wav(
+    input_path: Path,
+    output_path: Path,
+    config,
+) -> bool:
+    async with _get_shared_hca_decode_semaphore(config):
+        backend = _get_hca_decode_backend(config)
+
+        if backend in {"auto", "vgmstream"}:
+            if await _run_hca_to_wav_with_vgmstream(input_path, output_path):
+                return True
+            if backend == "vgmstream":
+                logger.warning(
+                    "Falling back to the Python HCA decoder for %s after vgmstream failure",
+                    input_path,
+                )
+
+        return await _run_hca_to_wav_with_python(input_path, output_path, config)
+
+
+async def _run_ffmpeg_audio_encode(
+    input_path: Path,
+    output_path: Path,
+    config,
+) -> bool:
+    async with _get_shared_audio_encoder_semaphore(config):
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-loglevel",
+            "panic",
+            "-y",
+            "-i",
+            input_path.as_posix(),
+            output_path.as_posix(),
+        )
+        await process.wait()
+        return process.returncode == 0
+
+
 async def _process_extracted_audio_file(
     extracted_audio_file: str,
     save_dir: Path,
     config,
-    semaphore: asyncio.Semaphore,
+    file_semaphore: asyncio.Semaphore,
 ) -> list[Path]:
-    async with semaphore:
+    async with file_semaphore:
         extracted_audio_file_path = Path(extracted_audio_file)
         exported_audio_files: list[Path] = []
 
@@ -265,7 +503,7 @@ async def _process_extracted_audio_file(
             wav_path = extracted_audio_file_path.with_suffix(".wav")
 
             # hca -> wav
-            if not await _run_hca_to_wav(extracted_audio_file_path, wav_path):
+            if not await _run_hca_to_wav(extracted_audio_file_path, wav_path, config):
                 logger.warning("Failed to convert %s to wav", extracted_audio_file_path)
                 return exported_audio_files
 
@@ -277,44 +515,22 @@ async def _process_extracted_audio_file(
             exported_audio_files.append(wav_path)
 
             # wav -> mp3
-            wav2mp3_process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-loglevel",
-                "panic",
-                "-y",
-                "-i",
-                wav_path.as_posix(),
-                extracted_audio_file_path.with_suffix(".mp3").as_posix(),
-            )
-            await wav2mp3_process.wait()
-            if wav2mp3_process.returncode != 0:
+            mp3_path = extracted_audio_file_path.with_suffix(".mp3")
+            if not await _run_ffmpeg_audio_encode(wav_path, mp3_path, config):
                 logger.warning("Failed to convert %s to mp3", wav_path)
             else:
                 logger.debug("Converted %s to mp3", wav_path)
-                exported_audio_files.append(
-                    extracted_audio_file_path.with_suffix(".mp3")
-                )
+                exported_audio_files.append(mp3_path)
 
             # wav -> flac
             # only for music files
             if "music" in save_dir.parts:
-                wav2flac_process = await asyncio.create_subprocess_exec(
-                    "ffmpeg",
-                    "-loglevel",
-                    "panic",
-                    "-y",
-                    "-i",
-                    wav_path.as_posix(),
-                    extracted_audio_file_path.with_suffix(".flac").as_posix(),
-                )
-                await wav2flac_process.wait()
-                if wav2flac_process.returncode != 0:
+                flac_path = extracted_audio_file_path.with_suffix(".flac")
+                if not await _run_ffmpeg_audio_encode(wav_path, flac_path, config):
                     logger.warning("Failed to convert %s to flac", wav_path)
                 else:
                     logger.debug("Converted %s to flac", wav_path)
-                    exported_audio_files.append(
-                        extracted_audio_file_path.with_suffix(".flac")
-                    )
+                    exported_audio_files.append(flac_path)
         except Exception as exc:
             logger.exception(
                 "Failed processing extracted audio %s: %s",
@@ -655,7 +871,7 @@ async def extract_asset_bundle(
     )
 
     # Post-process acb files
-    audio_transcode_semaphore = _get_shared_audio_transcode_semaphore(config)
+    audio_file_semaphore = _get_shared_audio_file_semaphore(config)
     for save_dir, acb_files in post_process_acb_files:
         for acb_file in acb_files:
             acb_cue_sheet_name: str = acb_file["cueSheetName"]
@@ -732,7 +948,7 @@ async def extract_asset_bundle(
                             extracted_audio_file,
                             save_dir,
                             config,
-                            audio_transcode_semaphore,
+                            audio_file_semaphore,
                         )
                     )
                     for extracted_audio_file in extracted_audio_files

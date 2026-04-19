@@ -6,7 +6,11 @@ from anyio import Path
 
 class ConfigLike(Protocol):
     MAX_CONCURRENCY: int
+    MAX_CONCURRENT_AUDIO_FILES: int
+    MAX_CONCURRENCY_HCA_DECODES: int
+    MAX_CONCURRENCY_AUDIO_ENCODERS: int
     MAX_CONCURRENCY_AUDIO_TRANSCODES: int
+    HCA_DECODE_BACKEND: str
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]

@@ -17,8 +17,16 @@ USER_AGENT = None
 
 # Concurrency settings, default to the number of CPU cores
 MAX_CONCURRENCY = os.cpu_count()
-# Maximum number of concurrent audio transcodes, defaults to MAX_CONCURRENCY if unset
+# Maximum number of audio files processed concurrently
+MAX_CONCURRENT_AUDIO_FILES = MAX_CONCURRENCY
+# Maximum number of concurrent HCA decode tasks
+MAX_CONCURRENCY_HCA_DECODES = MAX_CONCURRENCY
+# Maximum number of concurrent audio encoder tasks (mp3/flac)
+MAX_CONCURRENCY_AUDIO_ENCODERS = MAX_CONCURRENCY
+# Legacy combined audio concurrency fallback used when the new knobs are unset
 MAX_CONCURRENCY_AUDIO_TRANSCODES = MAX_CONCURRENCY
+# HCA decoder backend: "auto" prefers vgmstream-cli, falls back to the Python decoder
+HCA_DECODE_BACKEND = "auto"
 # Maximum number of concurrent video transcodes, defaults to half the CPU cores
 MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 # Maximum number of concurrent uploads
