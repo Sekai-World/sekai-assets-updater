@@ -166,6 +166,8 @@ async def main(
                     option=json.OPT_INDENT_2,
                 )
             )
+        async with await open_file(cfg.GAME_VERSION_JSON_CACHE_PATH, "wb") as f:
+            await f.write(json.dumps(game_version_json, option=json.OPT_INDENT_2))
         logger.info(
             "Updated asset bundle info cache only: %s",
             cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
