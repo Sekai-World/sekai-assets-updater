@@ -45,6 +45,7 @@ Concurrency:
 
 - `MAX_CONCURRENCY`: download/extract worker count
 - `MAX_CONCURRENCY_AUDIO_TRANSCODES`: concurrent audio transcodes
+- `MAX_CONCURRENCY_VIDEO_TRANSCODES`: concurrent video transcodes
 - `MAX_CONCURRENCY_UPLOADS`: concurrent remote uploads
 
 Filters:

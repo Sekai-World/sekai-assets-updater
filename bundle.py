@@ -31,6 +31,8 @@ from utils.playable import extract_playable
 logger = logging.getLogger("live2d")
 
 _ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
+_audio_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_video_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
 
 
 def _get_audio_transcode_concurrency(config) -> int:
@@ -43,6 +45,48 @@ def _get_audio_transcode_concurrency(config) -> int:
         return max(1, int(concurrency))
     except (TypeError, ValueError):
         return 1
+
+
+def _get_video_transcode_concurrency(config) -> int:
+    concurrency = getattr(
+        config,
+        "MAX_CONCURRENCY_VIDEO_TRANSCODES",
+        getattr(config, "MAX_CONCURRENCY", 1),
+    )
+    try:
+        return max(1, int(concurrency))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _get_shared_audio_transcode_semaphore(config) -> asyncio.Semaphore:
+    global _audio_transcode_semaphore_cache
+
+    concurrency = _get_audio_transcode_concurrency(config)
+    if (
+        _audio_transcode_semaphore_cache is None
+        or _audio_transcode_semaphore_cache[0] != concurrency
+    ):
+        _audio_transcode_semaphore_cache = (
+            concurrency,
+            asyncio.Semaphore(concurrency),
+        )
+    return _audio_transcode_semaphore_cache[1]
+
+
+def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
+    global _video_transcode_semaphore_cache
+
+    concurrency = _get_video_transcode_concurrency(config)
+    if (
+        _video_transcode_semaphore_cache is None
+        or _video_transcode_semaphore_cache[0] != concurrency
+    ):
+        _video_transcode_semaphore_cache = (
+            concurrency,
+            asyncio.Semaphore(concurrency),
+        )
+    return _video_transcode_semaphore_cache[1]
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -611,9 +655,7 @@ async def extract_asset_bundle(
     )
 
     # Post-process acb files
-    audio_transcode_semaphore = asyncio.Semaphore(
-        _get_audio_transcode_concurrency(config)
-    )
+    audio_transcode_semaphore = _get_shared_audio_transcode_semaphore(config)
     for save_dir, acb_files in post_process_acb_files:
         for acb_file in acb_files:
             acb_cue_sheet_name: str = acb_file["cueSheetName"]
@@ -702,6 +744,7 @@ async def extract_asset_bundle(
                 logger.warning("%s not found in %s", acb_output_path, save_dir)
 
     # Post-process movie bundles
+    video_transcode_semaphore = _get_shared_video_transcode_semaphore(config)
     for save_dir, movie_bundles in post_process_movie_bundles:
         if len(movie_bundles) == 1:
             # the movie bundle consists of a single file
@@ -751,30 +794,31 @@ async def extract_asset_bundle(
             continue
 
         if await usm_output_path.exists():
-            # ffmpeg already supports usm; convert directly to mp4.
-            video_output_path = usm_output_path.with_suffix(".mp4")
-            ffmpeg_process, encoder_name = await _run_ffmpeg_usm_to_mp4(
-                usm_output_path, video_output_path
-            )
-            await ffmpeg_process.wait()
-
-            if ffmpeg_process.returncode != 0 and encoder_name:
-                logger.warning(
-                    "Failed to convert %s to mp4 with %s, falling back to software encoding",
-                    usm_output_path,
-                    encoder_name,
-                )
-                _disable_ffmpeg_video_encoder()
-                ffmpeg_process, _ = await _run_ffmpeg_usm_to_mp4(
+            async with video_transcode_semaphore:
+                # ffmpeg already supports usm; convert directly to mp4.
+                video_output_path = usm_output_path.with_suffix(".mp4")
+                ffmpeg_process, encoder_name = await _run_ffmpeg_usm_to_mp4(
                     usm_output_path, video_output_path
                 )
                 await ffmpeg_process.wait()
 
-            if ffmpeg_process.returncode != 0:
-                logger.warning("Failed to convert %s to mp4", usm_output_path)
-            else:
-                logger.debug("Converted %s to mp4", usm_output_path)
-                exported_files.append(video_output_path)
+                if ffmpeg_process.returncode != 0 and encoder_name:
+                    logger.warning(
+                        "Failed to convert %s to mp4 with %s, falling back to software encoding",
+                        usm_output_path,
+                        encoder_name,
+                    )
+                    _disable_ffmpeg_video_encoder()
+                    ffmpeg_process, _ = await _run_ffmpeg_usm_to_mp4(
+                        usm_output_path, video_output_path
+                    )
+                    await ffmpeg_process.wait()
+
+                if ffmpeg_process.returncode != 0:
+                    logger.warning("Failed to convert %s to mp4", usm_output_path)
+                else:
+                    logger.debug("Converted %s to mp4", usm_output_path)
+                    exported_files.append(video_output_path)
 
             await usm_output_path.unlink()
             logger.debug("Removed %s", usm_output_path)

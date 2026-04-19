@@ -19,6 +19,8 @@ USER_AGENT = None
 MAX_CONCURRENCY = os.cpu_count()
 # Maximum number of concurrent audio transcodes, defaults to MAX_CONCURRENCY if unset
 MAX_CONCURRENCY_AUDIO_TRANSCODES = MAX_CONCURRENCY
+# Maximum number of concurrent video transcodes, defaults to half the CPU cores
+MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
 
