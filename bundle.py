@@ -253,14 +253,42 @@ def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
         logger.debug("%s not tracked in exported_files, skip removal", file_path)
 
 
-async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Path:
+async def _resolve_existing_path(
+    expected_path: Path,
+    save_dir: Path,
+    expected_suffix: str | None = None,
+) -> Path:
     if await expected_path.exists():
         return expected_path
 
-    expected_path_lower = expected_path.with_name(expected_path.name.lower())
+    expected_name_lower = expected_path.name.lower()
+    expected_path_lower = expected_path.with_name(expected_name_lower)
     if await expected_path_lower.exists():
         logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
         return expected_path_lower
+
+    candidate_paths = [
+        path
+        async for path in save_dir.iterdir()
+        if path.name.lower() == expected_name_lower
+        and (expected_suffix is None or path.suffix.lower() == expected_suffix.lower())
+    ]
+    if len(candidate_paths) == 1:
+        logger.debug(
+            "Found %s instead of %s via case-insensitive lookup",
+            candidate_paths[0],
+            expected_path.name,
+        )
+        return candidate_paths[0]
+
+    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
+
+
+async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Path:
+    try:
+        return await _resolve_existing_path(expected_path, save_dir, ".usm")
+    except FileNotFoundError:
+        pass
 
     candidate_paths = [
         path async for path in save_dir.iterdir() if path.suffix.lower() == ".usm"
@@ -882,14 +910,31 @@ async def extract_asset_bundle(
                 acb_textasset_filename: str = acb_file["assetBundleFileName"]
 
                 logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
-                acb_textasset_path = (save_dir / acb_textasset_filename.removesuffix(
-                    ".bytes"
-                )).with_suffix(".acb")
+                expected_acb_textasset_path = (
+                    save_dir / acb_textasset_filename.removesuffix(".bytes")
+                ).with_suffix(".acb")
                 assert (
-                    acb_textasset_path == acb_output_path
-                ), f"Path mismatch: {acb_textasset_path} != {acb_output_path}"
-                if not await acb_textasset_path.exists():
+                    expected_acb_textasset_path == acb_output_path
+                ), f"Path mismatch: {expected_acb_textasset_path} != {acb_output_path}"
+                try:
+                    acb_textasset_path = await _resolve_existing_path(
+                        expected_acb_textasset_path,
+                        save_dir,
+                        ".acb",
+                    )
+                except FileNotFoundError:
                     logger.error("%s not found in %s", acb_textasset_filename, save_dir)
+                    continue
+
+                if acb_textasset_path != acb_output_path:
+                    await acb_textasset_path.rename(acb_output_path)
+                    _discard_exported_file(exported_files, acb_textasset_path)
+                    exported_files.append(acb_output_path)
+                    logger.debug(
+                        "Renamed %s to %s to match cue sheet name",
+                        acb_textasset_path,
+                        acb_output_path,
+                    )
             else:
                 # split files
                 patter = re.compile(r"{(\d)\:D(\d)}")
@@ -901,30 +946,33 @@ async def extract_asset_bundle(
                 ]
 
                 # find and merge the files
-                acb_textasset_paths = [
-                    save_dir / acb_textasset_filename.removesuffix(".bytes")
-                    for acb_textasset_filename in acb_textasset_filenames
-                ]
-                if all([await path.exists() for path in acb_textasset_paths]):
-                    # merge the files
-                    async with await open_file(acb_output_path, "wb") as outfile:
-                        for acb_textasset_path in acb_textasset_paths:
-                            async with await open_file(
-                                acb_textasset_path, "rb"
-                            ) as infile:
-                                await outfile.write(await infile.read())
-                            _discard_exported_file(exported_files, acb_textasset_path)
-                            await acb_textasset_path.unlink()
-
-                    logger.debug(
-                        "Merged %s to %s.acb",
-                        acb_textasset_filenames,
-                        acb_cue_sheet_name,
-                    )
-                else:
+                try:
+                    acb_textasset_paths = [
+                        await _resolve_existing_path(
+                            save_dir / acb_textasset_filename.removesuffix(".bytes"),
+                            save_dir,
+                        )
+                        for acb_textasset_filename in acb_textasset_filenames
+                    ]
+                except FileNotFoundError:
                     logger.error(
                         "%s not found in %s", acb_textasset_filenames, save_dir
                     )
+                    continue
+
+                # merge the files
+                async with await open_file(acb_output_path, "wb") as outfile:
+                    for acb_textasset_path in acb_textasset_paths:
+                        async with await open_file(acb_textasset_path, "rb") as infile:
+                            await outfile.write(await infile.read())
+                        _discard_exported_file(exported_files, acb_textasset_path)
+                        await acb_textasset_path.unlink()
+
+                logger.debug(
+                    "Merged %s to %s.acb",
+                    acb_textasset_filenames,
+                    acb_cue_sheet_name,
+                )
 
             # extract audio files from the acb file
             if await acb_output_path.exists():
