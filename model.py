@@ -11,6 +11,8 @@ class ConfigLike(Protocol):
     MAX_CONCURRENCY_AUDIO_ENCODERS: int
     MAX_CONCURRENCY_AUDIO_TRANSCODES: int
     HCA_DECODE_BACKEND: str
+    REQUEST_TIMEOUT: int | float | None
+    DOWNLOAD_MAX_RETRIES: int
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]

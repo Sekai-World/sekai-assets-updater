@@ -6,7 +6,7 @@ import aiohttp
 
 from constants import NUVERSE_REGIONS
 from crypto import unpack
-from helpers import format_url_template, refresh_cookie
+from helpers import format_url_template, get_request_timeout, refresh_cookie
 from model import ConfigLike
 
 logger = logging.getLogger("asset_updater")
@@ -47,9 +47,11 @@ async def fetch_asset_bundle_info(
     if headers is None:
         headers, cookie = await build_request_headers(config)
 
+    request_timeout = get_request_timeout(config)
+
     game_version_json = None
     if config.GAME_VERSION_JSON_URL:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=request_timeout) as session:
             async with session.get(config.GAME_VERSION_JSON_URL) as response:
                 if response.status == 200:
                     game_version_json = await response.json(content_type="text/plain")
@@ -84,7 +86,10 @@ async def fetch_asset_bundle_info(
             appVersion=game_version_json["appVersion"],
             appHash=app_hash,
         )
-        async with aiohttp.ClientSession(proxy=config.PROXY_URL) as session:
+        async with aiohttp.ClientSession(
+            proxy=config.PROXY_URL,
+            timeout=request_timeout,
+        ) as session:
             async with session.get(game_version_url, headers=headers) as response:
                 if response.status == 200:
                     result = await response.read()
@@ -121,7 +126,7 @@ async def fetch_asset_bundle_info(
                     or game_version_json["appVersion"]
                 )
             )
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=request_timeout) as session:
                 async with session.get(asset_ver_url, headers=headers) as response:
                     if response.status == 200:
                         result = await response.read()
@@ -155,7 +160,7 @@ async def fetch_asset_bundle_info(
                 config.ASSET_BUNDLE_INFO_URL,
                 **asset_bundle_info_url_args,
             )
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=request_timeout) as session:
             async with session.get(asset_bundle_info_url, headers=headers) as response:
                 if response.status == 200:
                     result = await response.read()

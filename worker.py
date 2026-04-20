@@ -40,6 +40,7 @@ async def worker(
             url,
             bundle_save_path,
             headers=headers,
+            config=config,
         )
     else:
         # Save the bundle to the temp directory
@@ -51,6 +52,7 @@ async def worker(
             url,
             bundle_save_path,
             headers=headers,
+            config=config,
         )
 
     # Get the extracted save path

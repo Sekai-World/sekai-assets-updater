@@ -27,7 +27,7 @@ from constants import (
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
     UNITY_FS_CONTAINER_BASE,
 )
-from helpers import deobfuscate
+from helpers import deobfuscate, get_download_max_retries, get_request_timeout
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
 from utils.playable import extract_playable
@@ -663,28 +663,53 @@ def _render_image_asset(
 
 
 async def download_deobfuscate_bundle(
-    url: str, bundle_save_path: Path, headers: Dict[str, str]
+    url: str, bundle_save_path: Path, headers: Dict[str, str], config=None
 ) -> Tuple[str, Dict]:
-    """Download and deobfuscate the bundle."""
-    # Download the bundle
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                # Read the response data
-                data = await response.read()
-                # Deobfuscate the data
-                deobfuscated_data = await deobfuscate(data)
-                # Save the deobfuscated data to the file
-                async with await open_file(bundle_save_path, "wb") as f:
-                    await f.write(deobfuscated_data)
-            else:
-                logger.debug(
-                    "Failed to download %s: %s, response: %s",
+    """Download and deobfuscate the bundle, retrying on transient network errors."""
+    max_retries = get_download_max_retries(config)
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.read()
+                        deobfuscated_data = await deobfuscate(data)
+                        async with await open_file(bundle_save_path, "wb") as f:
+                            await f.write(deobfuscated_data)
+                        return
+                    else:
+                        logger.debug(
+                            "Failed to download %s: %s, response: %s",
+                            url,
+                            response.status,
+                            await response.text(),
+                        )
+                        raise aiohttp.ClientError(f"Failed to download {url}")
+        except (
+            asyncio.TimeoutError,
+            asyncio.CancelledError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ClientPayloadError,
+        ) as exc:
+            last_exc = exc
+            if attempt < max_retries:
+                logger.warning(
+                    "Download attempt %d/%d failed for %s (%s: %s), retrying...",
+                    attempt,
+                    max_retries,
                     url,
-                    response.status,
-                    await response.text(),
+                    type(exc).__name__,
+                    exc,
                 )
-                raise aiohttp.ClientError(f"Failed to download {url}")
+            else:
+                logger.error(
+                    "Download failed after %d attempts for %s: %s",
+                    max_retries,
+                    url,
+                    exc,
+                )
+                raise
 
 
 async def extract_asset_bundle(

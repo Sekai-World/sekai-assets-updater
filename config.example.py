@@ -14,6 +14,10 @@ REGION = SekaiServerRegion.JP
 UNITY_VERSION = "2022.3.21f1"
 # User agent for requests, replace with the correct user agent if needed
 USER_AGENT = None
+# HTTP request timeout in seconds; set to 0 or None to disable
+REQUEST_TIMEOUT = 180
+# Number of download retry attempts on timeout or connection errors
+DOWNLOAD_MAX_RETRIES = 3
 
 # Concurrency settings, default to the number of CPU cores
 MAX_CONCURRENCY = os.cpu_count()

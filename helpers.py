@@ -15,6 +15,9 @@ from anyio import Path, open_file
 
 logger = logging.getLogger("asset_updater")
 
+DEFAULT_REQUEST_TIMEOUT = 30 * 60
+DEFAULT_DOWNLOAD_MAX_RETRIES = 3
+
 
 class LocalQueueHandler(QueueHandler):
     def emit(self, record: logging.LogRecord) -> None:
@@ -114,6 +117,42 @@ def format_url_template(template: str, **values: str) -> str:
         raise ValueError(f"Missing format values for {missing_fields}: {template}")
 
     return template.format(**{name: values[name] for name in placeholders})
+
+
+def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
+    timeout_value = getattr(config, "REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
+
+    if timeout_value in (None, 0, 0.0):
+        return aiohttp.ClientTimeout(total=None)
+
+    try:
+        timeout_seconds = float(timeout_value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid REQUEST_TIMEOUT=%r, falling back to %ss",
+            timeout_value,
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+        timeout_seconds = float(DEFAULT_REQUEST_TIMEOUT)
+
+    if timeout_seconds <= 0:
+        return aiohttp.ClientTimeout(total=None)
+
+    return aiohttp.ClientTimeout(total=timeout_seconds)
+
+
+def get_download_max_retries(config=None) -> int:
+    value = getattr(config, "DOWNLOAD_MAX_RETRIES", DEFAULT_DOWNLOAD_MAX_RETRIES)
+    try:
+        retries = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DOWNLOAD_MAX_RETRIES=%r, falling back to %d",
+            value,
+            DEFAULT_DOWNLOAD_MAX_RETRIES,
+        )
+        retries = DEFAULT_DOWNLOAD_MAX_RETRIES
+    return max(1, retries)
 
 
 async def get_download_list(
@@ -417,7 +456,7 @@ async def refresh_cookie(
 
     # If the cookie is expired or not set, fetch a new one
     if config.GAME_COOKIE_URL:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
             async with session.post(
                 config.GAME_COOKIE_URL, headers=headers
             ) as response:
