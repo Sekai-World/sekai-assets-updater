@@ -112,28 +112,6 @@ async def main(
             "Force full download enabled, ignoring cached json metadata and cached dl_list"
         )
 
-    if (
-        (not update_asset_bundle_info_only)
-        and (not force_full_download)
-        and await cfg.DL_LIST_CACHE_PATH.exists()
-    ):
-        logger.info(
-            "Cache file %s exists, loading from cache", cfg.DL_LIST_CACHE_PATH
-        )
-        is_success = False
-        # Load the dl_list from the cache and start downloading
-        async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-            dl_list: List[DownloadItem] = json.loads(await f.read())
-            logger.info("%d items to download", len(dl_list))
-            is_success = await do_download(
-                dl_list, config=cfg, headers=headers, cookie=cookie
-            )
-
-        # remove the cache file
-        if is_success:
-            await cfg.DL_LIST_CACHE_PATH.unlink()
-        return
-
     fetch_result = await fetch_asset_bundle_info(cfg, headers=headers, cookie=cookie)
     headers = fetch_result.headers
     cookie = fetch_result.cookie
@@ -174,8 +152,8 @@ async def main(
         )
         return
 
-    # Generate the download list
-    download_list: List[DownloadItem] = await get_download_list(
+    # Generate the download list from the latest version info
+    new_download_list: List[DownloadItem] = await get_download_list(
         asset_bundle_info,
         game_version_json,
         config=cfg,
@@ -186,7 +164,52 @@ async def main(
         priority_list=cfg.DL_PRIORITY_LIST,
         force_full_download=force_full_download,
     )
-    logger.info("Download list generated, %d items to download", len(download_list))
+
+    # If there are pending items from a previous interrupted run, merge them:
+    # existing pending items come first so they are retried, new items follow.
+    # Items that already appear in the pending list are not duplicated.
+    pending_list: List[DownloadItem] = []
+    if (not force_full_download) and await cfg.DL_LIST_CACHE_PATH.exists():
+        async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
+            pending_list = json.loads(await f.read())
+        logger.info(
+            "Found %d pending item(s) from previous run in %s",
+            len(pending_list),
+            cfg.DL_LIST_CACHE_PATH,
+        )
+
+    if pending_list and new_download_list:
+        pending_bundle_names = {
+            bundle.get("bundleName") for _, bundle in pending_list
+        }
+        deduped_new = [
+            item for item in new_download_list
+            if item[1].get("bundleName") not in pending_bundle_names
+        ]
+        download_list: List[DownloadItem] = pending_list + deduped_new
+        logger.info(
+            "Merged download list: %d pending + %d new = %d total",
+            len(pending_list),
+            len(deduped_new),
+            len(download_list),
+        )
+    elif pending_list:
+        download_list = pending_list
+        logger.info(
+            "No new updates; retrying %d pending item(s)", len(pending_list)
+        )
+    else:
+        download_list = new_download_list
+
+    if not download_list:
+        logger.info("Nothing to download")
+        return
+
+    logger.info("Download list ready, %d items to download", len(download_list))
+
+    # Persist the (merged) list so a mid-run crash can be resumed
+    async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
+        await f.write(json.dumps(download_list, option=json.OPT_INDENT_2))
 
     is_success = await do_download(
         download_list, config=cfg, headers=headers, cookie=cookie

@@ -321,11 +321,6 @@ async def get_download_list(
             priority_list=priority_list,
         )
 
-    # Cache the download list
-    if download_list:
-        async with await open_file(config.DL_LIST_CACHE_PATH, "wb") as f:
-            await f.write(json.dumps(download_list, option=json.OPT_INDENT_2))
-
     # Cache the asset bundle info
     async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
         await f.write(json.dumps({
