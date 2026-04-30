@@ -6,7 +6,11 @@ import aiohttp
 
 from constants import NUVERSE_REGIONS
 from crypto import unpack
-from helpers import format_url_template, get_request_timeout, refresh_cookie
+from helpers import (
+    format_url_template,
+    get_request_timeout,
+    refresh_cookie,
+)
 from model import ConfigLike
 
 logger = logging.getLogger("asset_updater")
@@ -101,9 +105,17 @@ async def fetch_asset_bundle_info(
                         raise ValueError(f"Invalid result from {game_version_url}")
                     assetbundle_host_hash = json_result["assetbundleHostHash"]
                 else:
+                    result = await response.read()
                     raise RuntimeError(
-                        "Failed to fetch assetbundle host hash from "
-                        f"{game_version_url}"
+                        "Failed to fetch assetbundle host hash from %s, status: %s, "
+                        "response headers: %s, response: %s, request headers: %s"
+                        % (
+                            game_version_url,
+                            response.status,
+                            dict(response.headers),
+                            result.decode(errors="replace"),
+                            headers,
+                        )
                     )
             logger.debug(
                 "Current assetbundleHostHash: %s, assetHash: %s, game version url: %s",

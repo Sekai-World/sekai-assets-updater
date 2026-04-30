@@ -116,7 +116,11 @@ def format_url_template(template: str, **values: str) -> str:
         missing_fields = ", ".join(sorted(missing_placeholders))
         raise ValueError(f"Missing format values for {missing_fields}: {template}")
 
-    return template.format(**{name: values[name] for name in placeholders})
+    normalized_values = {
+        name: values[name].strip() if isinstance(values[name], str) else values[name]
+        for name in placeholders
+    }
+    return template.format(**normalized_values)
 
 
 def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
@@ -437,7 +441,9 @@ def get_cookie_expire_time(cookie_header: str) -> int | None:
 
 
 async def refresh_cookie(
-    config, headers: Dict[str, str], cookie: str | None = None
+    config,
+    headers: Dict[str, str],
+    cookie: str | None = None,
 ) -> Tuple[Dict[str, str], str]:
     """Refresh the cookie using the GAME_COOKIE_URL."""
     if cookie:
