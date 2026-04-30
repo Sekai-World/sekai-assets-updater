@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import tempfile
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple, Union
 
@@ -139,6 +140,7 @@ async def _put_sentinels(queue: asyncio.Queue, count: int) -> None:
 
 
 async def _download_stage(
+    pipeline_id: str,
     name: str,
     input_queue: asyncio.Queue,
     extract_queue: asyncio.Queue,
@@ -161,7 +163,12 @@ async def _download_stage(
 
             url, bundle = item
             label = bundle.get("bundleName", url)
-            logger.debug("%s downloading %s", name, label)
+            logger.debug(
+                "PIPELINE | id=%s | worker=%s | stage=download | action=start_item | item=%s",
+                pipeline_id,
+                name,
+                label,
+            )
 
             required_download_bytes = _get_bundle_file_size(bundle)
             bundle_save_path: Union[Path, None] = None
@@ -221,7 +228,12 @@ async def _download_stage(
                     tmp_bundle_save_file.close()
                 if bundle_save_path and remove_bundle_after_extract:
                     await bundle_save_path.unlink(missing_ok=True)
-                logger.exception("Failed to download %s", label)
+                logger.exception(
+                    "ERROR | pipeline_id=%s | worker=%s | stage=download | item=%s",
+                    pipeline_id,
+                    name,
+                    label,
+                )
                 async with failed_lock:
                     failed_tasks.append((url, bundle))
         finally:
@@ -229,6 +241,7 @@ async def _download_stage(
 
 
 async def _extract_stage(
+    pipeline_id: str,
     name: str,
     extract_queue: asyncio.Queue,
     upload_queue: asyncio.Queue,
@@ -244,7 +257,12 @@ async def _extract_stage(
 
             artifact = item
             label = artifact.bundle.get("bundleName", artifact.url)
-            logger.debug("%s extracting %s", name, label)
+            logger.debug(
+                "PIPELINE | id=%s | worker=%s | stage=extract | action=start_item | item=%s",
+                pipeline_id,
+                name,
+                label,
+            )
 
             try:
                 if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
@@ -266,12 +284,23 @@ async def _extract_stage(
                     unity_version=config.UNITY_VERSION,
                     config=config,
                 )
-                logger.debug("Extracted %s to %s", label, artifact.exported_list)
+                logger.debug(
+                    "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
+                    pipeline_id,
+                    name,
+                    label,
+                    artifact.exported_list,
+                )
 
                 await _cleanup_artifact(artifact, remove_bundle=True)
                 await upload_queue.put(artifact)
             except Exception:
-                logger.exception("Failed to extract %s", label)
+                logger.exception(
+                    "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s",
+                    pipeline_id,
+                    name,
+                    label,
+                )
                 async with failed_lock:
                     failed_tasks.append((artifact.url, artifact.bundle))
                 await _cleanup_artifact(
@@ -284,6 +313,7 @@ async def _extract_stage(
 
 
 async def _upload_stage(
+    pipeline_id: str,
     name: str,
     upload_queue: asyncio.Queue,
     config,
@@ -298,7 +328,12 @@ async def _upload_stage(
 
             artifact = item
             label = artifact.bundle.get("bundleName", artifact.url)
-            logger.debug("%s uploading %s", name, label)
+            logger.debug(
+                "PIPELINE | id=%s | worker=%s | stage=upload | action=start_item | item=%s",
+                pipeline_id,
+                name,
+                label,
+            )
 
             try:
                 if config.ASSET_REMOTE_STORAGE:
@@ -315,9 +350,19 @@ async def _upload_stage(
                                 storage["args"],
                                 max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
                             )
-                logger.debug("Finished processing %s", label)
+                logger.debug(
+                    "PIPELINE | id=%s | worker=%s | stage=upload | action=done_item | item=%s",
+                    pipeline_id,
+                    name,
+                    label,
+                )
             except Exception:
-                logger.exception("Failed to upload %s", label)
+                logger.exception(
+                    "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
+                    pipeline_id,
+                    name,
+                    label,
+                )
                 async with failed_lock:
                     failed_tasks.append((artifact.url, artifact.bundle))
             finally:
@@ -337,6 +382,9 @@ async def run_pipeline(
     cookie: str | None = None,
     download_disk_space_gate: DownloadDiskSpaceGate | None = None,
 ) -> List[DownloadItem]:
+    start_time = asyncio.get_running_loop().time()
+    pipeline_id = uuid.uuid4().hex[:8]
+    total_items = len(dl_list)
     download_concurrency = get_download_stage_concurrency(config)
     extract_concurrency = get_extract_stage_concurrency(config)
     upload_concurrency = get_upload_stage_concurrency(config)
@@ -354,10 +402,16 @@ async def run_pipeline(
     await _put_sentinels(download_queue, download_concurrency)
 
     logger.info(
-        "Pipeline concurrency: downloads=%d extracts=%d uploads=%d extract_queue=%d upload_queue=%d",
+        "PIPELINE | status=start | id=%s | items=%d | downloads=%d | extracts=%d | uploads=%d",
+        pipeline_id,
+        total_items,
         download_concurrency,
         extract_concurrency,
         upload_concurrency,
+    )
+    logger.debug(
+        "PIPELINE | id=%s | queue_sizes | extract_queue=%d | upload_queue=%d",
+        pipeline_id,
         extract_queue_size,
         upload_queue_size,
     )
@@ -366,6 +420,7 @@ async def run_pipeline(
         download_tasks = [
             asyncio.create_task(
                 _download_stage(
+                    pipeline_id,
                     f"download_worker-{worker_id}",
                     download_queue,
                     extract_queue,
@@ -383,6 +438,7 @@ async def run_pipeline(
         extract_tasks = [
             asyncio.create_task(
                 _extract_stage(
+                    pipeline_id,
                     f"extract_worker-{worker_id}",
                     extract_queue,
                     upload_queue,
@@ -396,6 +452,7 @@ async def run_pipeline(
         upload_tasks = [
             asyncio.create_task(
                 _upload_stage(
+                    pipeline_id,
                     f"upload_worker-{worker_id}",
                     upload_queue,
                     config,
@@ -407,10 +464,13 @@ async def run_pipeline(
         ]
 
         await download_queue.join()
+        logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
         await _put_sentinels(extract_queue, extract_concurrency)
         await extract_queue.join()
+        logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
         await _put_sentinels(upload_queue, upload_concurrency)
         await upload_queue.join()
+        logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
 
         await asyncio.gather(
             *download_tasks,
@@ -418,6 +478,16 @@ async def run_pipeline(
             *upload_tasks,
             return_exceptions=False,
         )
+
+    succeeded = total_items - len(failed_tasks)
+    logger.info(
+        "PIPELINE | status=completed | id=%s | succeeded=%d | failed=%d | total=%d | duration_sec=%.2f",
+        pipeline_id,
+        succeeded,
+        len(failed_tasks),
+        total_items,
+        asyncio.get_running_loop().time() - start_time,
+    )
 
     return failed_tasks
 
