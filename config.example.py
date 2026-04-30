@@ -18,6 +18,10 @@ USER_AGENT = None
 REQUEST_TIMEOUT = 180
 # Number of download retry attempts on timeout or connection errors
 DOWNLOAD_MAX_RETRIES = 3
+# Minimum free bytes to keep on the download filesystem before starting a new download
+MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
+# How often blocked downloads recheck free disk space
+DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5
 
 # Concurrency settings, default to the number of CPU cores
 MAX_CONCURRENCY = os.cpu_count()

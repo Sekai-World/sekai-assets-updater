@@ -7,6 +7,7 @@ from anyio import open_file
 
 from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
 from helpers import (
+    build_download_disk_space_gate,
     ensure_dir_exists,
     filter_bundles,
     get_download_list,
@@ -43,6 +44,14 @@ async def do_download(
     The function will use a queue to manage the download tasks.
     """
     logger.info("Starting download...")
+    download_disk_space_gate = build_download_disk_space_gate(config)
+    if download_disk_space_gate is not None:
+        logger.info(
+            "Download disk space gate enabled for %s with min free bytes=%d",
+            download_disk_space_gate.target_path,
+            download_disk_space_gate.min_free_bytes,
+        )
+
     # Create a queue to manage tasks
     queue = asyncio.Queue()
 
@@ -64,6 +73,7 @@ async def do_download(
                     config,
                     headers,
                     cookie=cookie,
+                    download_disk_space_gate=download_disk_space_gate,
                 )
             except Exception as e:
                 # Log the error and add the task to failed_tasks

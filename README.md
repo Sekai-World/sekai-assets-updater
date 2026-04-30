@@ -41,6 +41,17 @@ Important fields:
 - `ASSET_VER_URL` for Nuverse regions
 - `ASSET_BUNDLE_INFO_URL`
 - `ASSET_BUNDLE_URL`
+- `MIN_FREE_DISK_BYTES`: minimum free disk space to keep before a new download starts
+- `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL`: how often blocked downloads recheck free space
+
+Disk space gate:
+
+- Download admission is checked against the filesystem backing `ASSET_LOCAL_BUNDLE_CACHE_DIR`
+- If `ASSET_LOCAL_BUNDLE_CACHE_DIR` is `None`, the gate uses the system temp directory filesystem
+- Each in-flight download reserves the bundle `fileSize` from metadata before the request starts
+- A new download waits until `free_bytes - reserved_bytes >= MIN_FREE_DISK_BYTES + bundle.fileSize`
+- Set `MIN_FREE_DISK_BYTES = 0` to disable the gate
+- The gate only controls when a download may start; extraction and upload behavior remain unchanged for now
 
 Concurrency:
 
@@ -103,6 +114,8 @@ Force a full rebuild of `dl_list.json` and redownload everything matched by the 
 uv run python main.py -c config.py --force-full-download
 ```
 
+If downloads are blocked by low free disk space, the updater logs a warning and retries after `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL` seconds.
+
 ## Resume Behavior
 
 If `DL_LIST_CACHE_PATH` exists, `main.py` will load it and resume from that cached download list instead of rebuilding the list.
@@ -164,3 +177,4 @@ Video pipeline:
 
 - Some configs rely on cached metadata produced by earlier runs.
 - If you only want local extraction, set `ASSET_REMOTE_STORAGE = []`.
+- The current worker flow is still `download -> extract -> upload` per bundle. The disk-space gate was added first so the later pipeline split can be introduced without risking unbounded local storage growth.

@@ -5,9 +5,17 @@ from typing import Dict, Tuple, Union
 from anyio import Path
 
 from bundle import download_deobfuscate_bundle, extract_asset_bundle
-from helpers import refresh_cookie, upload_to_storage
+from helpers import DownloadDiskSpaceGate, refresh_cookie, upload_to_storage
 
 logger = logging.getLogger("asset_updater")
+
+
+def _get_bundle_file_size(bundle: Dict) -> int:
+    value = bundle.get("fileSize", 0)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def worker(
@@ -16,6 +24,7 @@ async def worker(
     config,
     headers: Dict[str, str],
     cookie: str = None,
+    download_disk_space_gate: DownloadDiskSpaceGate | None = None,
 ):
     url, bundle = dl_info
 
@@ -23,6 +32,8 @@ async def worker(
 
     if cookie:
         headers, cookie = await refresh_cookie(config, headers, cookie)
+
+    required_download_bytes = _get_bundle_file_size(bundle)
 
     bundle_save_path: Union[Path, None] = None
     tmp_bundle_save_file = None
@@ -35,25 +46,47 @@ async def worker(
         # Create the directory if it doesn't exist
         await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Download the bundle
-        await download_deobfuscate_bundle(
-            url,
-            bundle_save_path,
-            headers=headers,
-            config=config,
-        )
+        if download_disk_space_gate is not None:
+            async with download_disk_space_gate.reserve(
+                required_download_bytes,
+                bundle.get("bundleName", url),
+            ):
+                await download_deobfuscate_bundle(
+                    url,
+                    bundle_save_path,
+                    headers=headers,
+                    config=config,
+                )
+        else:
+            await download_deobfuscate_bundle(
+                url,
+                bundle_save_path,
+                headers=headers,
+                config=config,
+            )
     else:
         # Save the bundle to the temp directory
         tmp_bundle_save_file = tempfile.NamedTemporaryFile()
         bundle_save_path = Path(tmp_bundle_save_file.name)
 
-        # Download the bundle
-        await download_deobfuscate_bundle(
-            url,
-            bundle_save_path,
-            headers=headers,
-            config=config,
-        )
+        if download_disk_space_gate is not None:
+            async with download_disk_space_gate.reserve(
+                required_download_bytes,
+                bundle.get("bundleName", url),
+            ):
+                await download_deobfuscate_bundle(
+                    url,
+                    bundle_save_path,
+                    headers=headers,
+                    config=config,
+                )
+        else:
+            await download_deobfuscate_bundle(
+                url,
+                bundle_save_path,
+                headers=headers,
+                config=config,
+            )
 
     # Get the extracted save path
     extracted_save_path: Union[Path, None] = None

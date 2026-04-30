@@ -13,6 +13,8 @@ class ConfigLike(Protocol):
     HCA_DECODE_BACKEND: str
     REQUEST_TIMEOUT: int | float | None
     DOWNLOAD_MAX_RETRIES: int
+    MIN_FREE_DISK_BYTES: int
+    DOWNLOAD_DISK_SPACE_CHECK_INTERVAL: int | float
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]
