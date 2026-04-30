@@ -51,11 +51,15 @@ Disk space gate:
 - Each in-flight download reserves the bundle `fileSize` from metadata before the request starts
 - A new download waits until `free_bytes - reserved_bytes >= MIN_FREE_DISK_BYTES + bundle.fileSize`
 - Set `MIN_FREE_DISK_BYTES = 0` to disable the gate
-- The gate only controls when a download may start; extraction and upload behavior remain unchanged for now
+- The gate only controls when a download may start; bounded stage queues prevent downloads from outrunning extract/upload
 
 Concurrency:
 
-- `MAX_CONCURRENCY`: download/extract worker count
+- `MAX_CONCURRENCY`: legacy default for download/extract stage concurrency
+- `MAX_CONCURRENCY_DOWNLOADS`: concurrent bundle downloads
+- `MAX_CONCURRENCY_EXTRACTS`: concurrent bundle extractions
+- `MAX_CONCURRENCY_UPLOAD_STAGE`: concurrent bundle upload stages
+- `PIPELINE_STAGE_QUEUE_SIZE`: maximum queued artifacts between pipeline stages
 - `MAX_CONCURRENT_AUDIO_FILES`: concurrent audio file pipelines
 - `MAX_CONCURRENCY_HCA_DECODES`: concurrent HCA decodes
 - `MAX_CONCURRENCY_AUDIO_ENCODERS`: concurrent `ffmpeg` audio encodes
@@ -177,4 +181,4 @@ Video pipeline:
 
 - Some configs rely on cached metadata produced by earlier runs.
 - If you only want local extraction, set `ASSET_REMOTE_STORAGE = []`.
-- The current worker flow is still `download -> extract -> upload` per bundle. The disk-space gate was added first so the later pipeline split can be introduced without risking unbounded local storage growth.
+- The updater runs bounded `download -> extract -> upload` pipeline stages. Temporary bundle files are removed after extraction succeeds when bundle caching is disabled, and temporary extracted directories are removed after upload succeeds when extracted caching is disabled.

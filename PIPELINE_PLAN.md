@@ -56,6 +56,12 @@ Validation:
 - Run a focused behavior check on the pipeline driver with a tiny synthetic workload.
 - Confirm failure handling still writes the pending list.
 
+Status:
+
+- Completed.
+- Implemented bounded download, extract, and upload stage queues with configurable stage concurrency.
+- Verified with synthetic pipeline checks including failed task persistence.
+
 ## Phase 3: Stage Cleanup Guarantees
 
 Objective: release disk space as soon as each bundle no longer needs it.
@@ -71,6 +77,13 @@ Validation:
 - Run a narrow end-to-end dry run on one bundle with temp paths.
 - Confirm temporary files disappear after downstream success.
 
+Status:
+
+- Completed.
+- Temporary bundle files are removed after successful extract when bundle caching is disabled.
+- Temporary extracted directories are removed after upload stage completion when extracted caching is disabled.
+- Failure paths clean temporary artifacts while preserving failed bundle metadata for retry.
+
 ## Phase 4: Session Reuse And Throughput Tuning
 
 Objective: recover network overhead once the pipeline is structurally safe.
@@ -84,8 +97,12 @@ Validation:
 
 - Compare logs and runtime on a small representative bundle set.
 
+Status:
+
+- Completed.
+- Pipeline downloads share one aiohttp session across download workers.
+- Added stage-specific concurrency knobs while preserving legacy defaults where practical.
+
 ## Current Step
 
-Phase 1 is complete.
-
-Next up is Phase 2: split the worker into bounded download, extract, and upload stages while preserving the existing cleanup guarantees.
+All planned phases are complete.
