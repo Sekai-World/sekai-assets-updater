@@ -663,36 +663,48 @@ def _render_image_asset(
 
 
 async def download_deobfuscate_bundle(
-    url: str, bundle_save_path: Path, headers: Dict[str, str], config=None
-) -> Tuple[str, Dict]:
+    url: str,
+    bundle_save_path: Path,
+    headers: Dict[str, str],
+    config=None,
+    session: aiohttp.ClientSession | None = None,
+) -> None:
     """Download and deobfuscate the bundle, retrying on transient network errors."""
     max_retries = get_download_max_retries(config)
-    last_exc: BaseException | None = None
+
+    async def fetch_once(active_session: aiohttp.ClientSession) -> None:
+        async with active_session.get(url, headers=headers) as response:
+            if response.status == 200:
+                data = await response.read()
+                deobfuscated_data = await deobfuscate(data)
+                async with await open_file(bundle_save_path, "wb") as f:
+                    await f.write(deobfuscated_data)
+                return
+
+            logger.debug(
+                "Failed to download %s: %s, response: %s",
+                url,
+                response.status,
+                await response.text(),
+            )
+            raise aiohttp.ClientError(f"Failed to download {url}")
+
     for attempt in range(1, max_retries + 1):
         try:
-            async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.read()
-                        deobfuscated_data = await deobfuscate(data)
-                        async with await open_file(bundle_save_path, "wb") as f:
-                            await f.write(deobfuscated_data)
-                        return
-                    else:
-                        logger.debug(
-                            "Failed to download %s: %s, response: %s",
-                            url,
-                            response.status,
-                            await response.text(),
-                        )
-                        raise aiohttp.ClientError(f"Failed to download {url}")
+            if session is not None:
+                await fetch_once(session)
+            else:
+                async with aiohttp.ClientSession(
+                    timeout=get_request_timeout(config)
+                ) as retry_session:
+                    await fetch_once(retry_session)
+            return
         except (
             asyncio.TimeoutError,
             asyncio.CancelledError,
             aiohttp.ServerDisconnectedError,
             aiohttp.ClientPayloadError,
         ) as exc:
-            last_exc = exc
             if attempt < max_retries:
                 logger.warning(
                     "Download attempt %d/%d failed for %s (%s: %s), retrying...",

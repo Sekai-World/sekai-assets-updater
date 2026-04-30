@@ -14,7 +14,7 @@ from helpers import (
     setup_logging_queue,
 )
 from model import ConfigLike
-from worker import worker
+from worker import run_pipeline
 
 logger = logging.getLogger("asset_updater")
 
@@ -52,45 +52,17 @@ async def do_download(
             download_disk_space_gate.min_free_bytes,
         )
 
-    # Create a queue to manage tasks
-    queue = asyncio.Queue()
-
-    # Populate the queue with download tasks
-    for url, bundle in dl_list:
-        await queue.put((url, bundle))
-
-    # List to track failed tasks
-    failed_tasks = []
-
-    async def worker_task(worker_id):
-        nonlocal failed_tasks
-        while not queue.empty():
-            url, bundle = await queue.get()
-            try:
-                await worker(
-                    f"download_worker-{worker_id}",
-                    (url, bundle),
-                    config,
-                    headers,
-                    cookie=cookie,
-                    download_disk_space_gate=download_disk_space_gate,
-                )
-            except Exception as e:
-                # Log the error and add the task to failed_tasks
-                logger.exception("Failed to download %s: %s", url, e)
-                failed_tasks.append((url, bundle))
-            finally:
-                queue.task_done()
-
-    # Create and run worker tasks
-    workers = [
-        asyncio.create_task(worker_task(worker_id))
-        for worker_id in range(config.MAX_CONCURRENCY)
-    ]
-    await queue.join()
-
-    # Wait for all workers to finish
-    await asyncio.gather(*workers, return_exceptions=True)
+    try:
+        failed_tasks = await run_pipeline(
+            dl_list,
+            config,
+            headers,
+            cookie=cookie,
+            download_disk_space_gate=download_disk_space_gate,
+        )
+    except Exception:
+        logger.exception("Pipeline failed; preserving full pending download list")
+        failed_tasks = dl_list
 
     # Replace the original download list with the failed tasks
     if failed_tasks:
