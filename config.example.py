@@ -25,6 +25,13 @@ DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5
 
 # Concurrency settings, default to the number of CPU cores
 MAX_CONCURRENCY = os.cpu_count()
+# Pipeline stage concurrency. Defaults preserve the previous MAX_CONCURRENCY behavior
+# for download/extract while upload uses one bundle-level worker.
+MAX_CONCURRENCY_DOWNLOADS = MAX_CONCURRENCY
+MAX_CONCURRENCY_EXTRACTS = MAX_CONCURRENCY
+MAX_CONCURRENCY_UPLOAD_STAGE = 1
+# Maximum queued artifacts between stages.
+PIPELINE_STAGE_QUEUE_SIZE = MAX_CONCURRENCY
 # Maximum number of audio files processed concurrently
 MAX_CONCURRENT_AUDIO_FILES = MAX_CONCURRENCY
 # Maximum number of concurrent HCA decode tasks
