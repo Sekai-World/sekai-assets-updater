@@ -20,6 +20,7 @@ class ConfigLike(Protocol):
     MIN_FREE_DISK_BYTES: int
     DOWNLOAD_DISK_SPACE_CHECK_INTERVAL: int | float
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
+    TEXTURE_OUTPUT_FORMATS: tuple[str, ...]
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]
     UNITY_VERSION: str

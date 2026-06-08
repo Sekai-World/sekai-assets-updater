@@ -46,6 +46,8 @@ HCA_DECODE_BACKEND = "auto"
 MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
+# Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
+TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 
 # Crypto settings
 AES_KEY = bytes("AES_KEY")

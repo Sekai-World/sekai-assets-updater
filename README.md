@@ -67,6 +67,7 @@ Concurrency:
 - `HCA_DECODE_BACKEND`: `auto`, `vgmstream`, or `python`
 - `MAX_CONCURRENCY_VIDEO_TRANSCODES`: concurrent video transcodes
 - `MAX_CONCURRENCY_UPLOADS`: concurrent remote uploads
+- `TEXTURE_OUTPUT_FORMATS`: texture formats to export, for example `("webp",)` or `("png", "webp")`
 
 Filters:
 
