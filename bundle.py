@@ -844,7 +844,7 @@ def _write_assetstudio_read(
                 _asset_container_path(read),
                 tree,
             )
-        if not is_playable:
+        if not is_playable and not save_path.suffix:
             save_path = save_path.with_suffix(".json")
         save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
         return [save_path], tree
