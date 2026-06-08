@@ -4,7 +4,8 @@ Update and extract Project Sekai asset bundles.
 
 ## Requirements
 
-- Python `3.12`
+- Python `3.14.5t`
+- `mise`
 - `uv`
 - `ffmpeg`
 - `vgmstream-cli` for faster HCA decoding (optional)
@@ -20,8 +21,12 @@ On macOS and supported Linux/Windows environments, video conversion will try to 
 ## Install
 
 ```bash
+mise install
 uv sync
 ```
+
+`mise.toml` pins Python `3.14.5t` and Rust `stable`. `uv` also enforces
+free-threaded Python `3.14` from `pyproject.toml` and `.python-version`.
 
 ## Config
 
