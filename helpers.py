@@ -138,7 +138,7 @@ def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
 
     try:
         timeout_seconds = float(timeout_value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.warning(
             "Invalid REQUEST_TIMEOUT=%r, falling back to %ss",
             timeout_value,
@@ -156,7 +156,7 @@ def get_download_max_retries(config=None) -> int:
     value = getattr(config, "DOWNLOAD_MAX_RETRIES", DEFAULT_DOWNLOAD_MAX_RETRIES)
     try:
         retries = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.warning(
             "Invalid DOWNLOAD_MAX_RETRIES=%r, falling back to %d",
             value,
@@ -170,7 +170,7 @@ def get_min_free_disk_bytes(config=None) -> int:
     value = getattr(config, "MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES)
     try:
         min_free_bytes = int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.warning(
             "Invalid MIN_FREE_DISK_BYTES=%r, falling back to %d",
             value,
@@ -188,7 +188,7 @@ def get_download_disk_space_check_interval(config=None) -> float:
     )
     try:
         check_interval = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         logger.warning(
             "Invalid DOWNLOAD_DISK_SPACE_CHECK_INTERVAL=%r, falling back to %s",
             value,
@@ -442,7 +442,11 @@ async def get_download_list(
 
         # Get the download list for a full download
         asset_hash: str = game_version_json.get("assetHash", "")
-        app_version: str = getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
+        app_version: str = (
+            getattr(config, "APP_VERSION_OVERRIDE", None)
+            or game_version_json.get("appVersion")
+            or ""
+        )
         assert app_version, "App version must be set in game version json or config"
         asset_bundle_url_args = {
             "assetbundleHostHash": assetbundle_host_hash,
@@ -476,11 +480,16 @@ async def get_download_list(
 
     # Cache the asset bundle info
     async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
-        await f.write(json.dumps({
-            "version": asset_bundle_info.get("version", ""),
-            "os": asset_bundle_info.get("os", ""),
-            "bundles": current_bundles
-        }, option=json.OPT_INDENT_2))
+        await f.write(
+            json.dumps(
+                {
+                    "version": asset_bundle_info.get("version", ""),
+                    "os": asset_bundle_info.get("os", ""),
+                    "bundles": current_bundles,
+                },
+                option=json.OPT_INDENT_2,
+            )
+        )
 
     # Cache the game version json
     async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH, "wb") as f:
@@ -582,10 +591,7 @@ def get_cookie_expire_time(cookie_header: str) -> int | None:
         return None
 
     return (
-        statements[0]
-        .get("Condition", {})
-        .get("DateLessThan", {})
-        .get("AWS:EpochTime")
+        statements[0].get("Condition", {}).get("DateLessThan", {}).get("AWS:EpochTime")
     )
 
 
@@ -606,7 +612,9 @@ async def refresh_cookie(
 
     # If the cookie is expired or not set, fetch a new one
     if config.GAME_COOKIE_URL:
-        async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
+        async with aiohttp.ClientSession(
+            timeout=get_request_timeout(config)
+        ) as session:
             async with session.post(
                 config.GAME_COOKIE_URL, headers=headers
             ) as response:

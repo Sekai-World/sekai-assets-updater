@@ -40,7 +40,7 @@ class PipelineArtifact:
 def _sanitize_concurrency(value, default: int = 1) -> int:
     try:
         return max(1, int(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return max(1, default)
 
 
@@ -65,9 +65,7 @@ def get_extract_stage_concurrency(config) -> int:
 
 
 def get_upload_stage_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1)
-    )
+    return _sanitize_concurrency(getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1))
 
 
 def get_stage_queue_size(config, downstream_concurrency: int) -> int:
@@ -85,7 +83,7 @@ def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
     value = bundle.get("fileSize", 0)
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
