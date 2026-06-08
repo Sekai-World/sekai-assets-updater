@@ -9,6 +9,8 @@ import shutil
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from io import BytesIO
+from pathlib import Path as StdPath
+from pathlib import PurePosixPath
 from typing import Dict, List, Tuple
 
 import orjson as json
@@ -27,7 +29,7 @@ from constants import (
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
     UNITY_FS_CONTAINER_BASE,
 )
-from helpers import deobfuscate, get_download_max_retries, get_request_timeout
+from helpers import get_download_max_retries, get_request_timeout
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
 from utils.playable import extract_playable
@@ -39,6 +41,7 @@ _audio_file_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
 _hca_decode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
 _audio_encoder_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
 _video_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
+_extract_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
 _audio_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
 _vgmstream_cli_cache: str | None = None
 _vgmstream_cli_checked = False
@@ -100,6 +103,37 @@ def _get_video_transcode_concurrency(config) -> int:
             getattr(config, "MAX_CONCURRENCY", 1),
         )
     )
+
+
+def _get_extract_process_concurrency(config) -> int:
+    return _sanitize_concurrency(
+        getattr(
+            config,
+            "MAX_CONCURRENCY_EXTRACTS",
+            getattr(config, "MAX_CONCURRENCY", 1),
+        )
+    )
+
+
+def _get_texture_output_formats(config) -> tuple[str, ...]:
+    value = getattr(config, "TEXTURE_OUTPUT_FORMATS", ("png", "webp"))
+    if isinstance(value, str):
+        formats = [part.strip().lower().removeprefix(".") for part in value.split(",")]
+    else:
+        formats = [
+            str(part).strip().lower().removeprefix(".")
+            for part in value
+        ]
+
+    valid_formats = []
+    for image_format in formats:
+        if image_format in {"png", "webp"} and image_format not in valid_formats:
+            valid_formats.append(image_format)
+
+    if not valid_formats and formats:
+        logger.warning("No valid TEXTURE_OUTPUT_FORMATS found, skipping texture export")
+
+    return tuple(valid_formats)
 
 
 def _get_shared_audio_file_semaphore(config) -> asyncio.Semaphore:
@@ -173,7 +207,39 @@ def _shutdown_audio_process_pool() -> None:
     executor.shutdown(wait=False, cancel_futures=False)
 
 
+def _shutdown_extract_process_pool() -> None:
+    global _extract_process_pool_cache
+
+    if _extract_process_pool_cache is None:
+        return
+
+    _, executor = _extract_process_pool_cache
+    _extract_process_pool_cache = None
+    executor.shutdown(wait=False, cancel_futures=False)
+
+
+atexit.register(_shutdown_extract_process_pool)
 atexit.register(_shutdown_audio_process_pool)
+
+
+def _get_shared_extract_process_pool(config) -> ProcessPoolExecutor:
+    global _extract_process_pool_cache
+
+    concurrency = _get_extract_process_concurrency(config)
+    if (
+        _extract_process_pool_cache is None
+        or _extract_process_pool_cache[0] != concurrency
+    ):
+        if _extract_process_pool_cache is not None:
+            _extract_process_pool_cache[1].shutdown(
+                wait=False,
+                cancel_futures=False,
+            )
+        _extract_process_pool_cache = (
+            concurrency,
+            ProcessPoolExecutor(max_workers=concurrency),
+        )
+    return _extract_process_pool_cache[1]
 
 
 def _get_shared_audio_process_pool(config) -> ProcessPoolExecutor:
@@ -542,23 +608,47 @@ async def _process_extracted_audio_file(
             )
             exported_audio_files.append(wav_path)
 
-            # wav -> mp3
-            mp3_path = extracted_audio_file_path.with_suffix(".mp3")
-            if not await _run_ffmpeg_audio_encode(wav_path, mp3_path, config):
-                logger.warning("Failed to convert %s to mp3", wav_path)
-            else:
-                logger.debug("Converted %s to mp3", wav_path)
-                exported_audio_files.append(mp3_path)
+            encode_tasks = []
 
-            # wav -> flac
-            # only for music files
+            mp3_path = extracted_audio_file_path.with_suffix(".mp3")
+            encode_tasks.append(
+                (
+                    "mp3",
+                    mp3_path,
+                    _run_ffmpeg_audio_encode(wav_path, mp3_path, config),
+                )
+            )
+
             if "music" in save_dir.parts:
                 flac_path = extracted_audio_file_path.with_suffix(".flac")
-                if not await _run_ffmpeg_audio_encode(wav_path, flac_path, config):
-                    logger.warning("Failed to convert %s to flac", wav_path)
+                encode_tasks.append(
+                    (
+                        "flac",
+                        flac_path,
+                        _run_ffmpeg_audio_encode(wav_path, flac_path, config),
+                    )
+                )
+
+            encode_results = await asyncio.gather(
+                *(task for _, _, task in encode_tasks),
+                return_exceptions=True,
+            )
+            for (format_name, output_path, _), result in zip(
+                encode_tasks,
+                encode_results,
+            ):
+                if isinstance(result, Exception):
+                    logger.error(
+                        "Failed to convert %s to %s",
+                        wav_path,
+                        format_name,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                elif not result:
+                    logger.warning("Failed to convert %s to %s", wav_path, format_name)
                 else:
-                    logger.debug("Converted %s to flac", wav_path)
-                    exported_audio_files.append(flac_path)
+                    logger.debug("Converted %s to %s", wav_path, format_name)
+                    exported_audio_files.append(output_path)
         except Exception as exc:
             logger.exception(
                 "Failed processing extracted audio %s: %s",
@@ -662,6 +752,379 @@ def _render_image_asset(
     return data.image
 
 
+def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) -> StdPath:
+    source_path = PurePosixPath(unityfs_path)
+    base_paths = (
+        PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix()),
+        PurePosixPath(UNITY_FS_BUILT_IN_CONTAINER_BASE.as_posix()),
+        PurePosixPath(UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE.as_posix()),
+    )
+
+    for index, base_path in enumerate(base_paths):
+        try:
+            relpath = source_path.relative_to(base_path)
+        except ValueError:
+            continue
+
+        if index == 0:
+            relpath = PurePosixPath(*relpath.parts[1:])
+        return extracted_save_path.joinpath(*relpath.parts)
+
+    raise ValueError(f"Failed to get relative path for {unityfs_path}")
+
+
+def _discard_exported_file_sync(exported_files: list[StdPath], file_path: StdPath) -> None:
+    try:
+        exported_files.remove(file_path)
+        return
+    except ValueError:
+        pass
+
+    file_path_lower = file_path.with_name(file_path.name.lower())
+    try:
+        exported_files.remove(file_path_lower)
+    except ValueError:
+        logger.debug("%s not tracked in exported_files, skip removal", file_path)
+
+
+def _resolve_existing_path_sync(
+    expected_path: StdPath,
+    save_dir: StdPath,
+    expected_suffix: str | None = None,
+) -> StdPath:
+    if expected_path.exists():
+        return expected_path
+
+    expected_name_lower = expected_path.name.lower()
+    expected_path_lower = expected_path.with_name(expected_name_lower)
+    if expected_path_lower.exists():
+        logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
+        return expected_path_lower
+
+    candidate_paths = [
+        path
+        for path in save_dir.iterdir()
+        if path.name.lower() == expected_name_lower
+        and (expected_suffix is None or path.suffix.lower() == expected_suffix.lower())
+    ]
+    if len(candidate_paths) == 1:
+        logger.debug(
+            "Found %s instead of %s via case-insensitive lookup",
+            candidate_paths[0],
+            expected_path.name,
+        )
+        return candidate_paths[0]
+
+    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
+
+
+def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -> StdPath:
+    try:
+        return _resolve_existing_path_sync(expected_path, save_dir, ".usm")
+    except FileNotFoundError:
+        pass
+
+    candidate_paths = [
+        path for path in save_dir.iterdir() if path.suffix.lower() == ".usm"
+    ]
+    if len(candidate_paths) == 1:
+        logger.warning(
+            "Expected %s in %s, falling back to discovered usm %s",
+            expected_path.name,
+            save_dir,
+            candidate_paths[0].name,
+        )
+        return candidate_paths[0]
+
+    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
+
+
+def _save_image_formats(
+    image: Image.Image,
+    save_path: StdPath,
+    texture_output_formats: tuple[str, ...],
+) -> list[StdPath]:
+    saved_paths: list[StdPath] = []
+    for image_format in texture_output_formats:
+        output_path = save_path.with_suffix(f".{image_format}")
+        logger.debug("Saving texture to %s", output_path)
+        image.save(output_path)
+        saved_paths.append(output_path)
+    return saved_paths
+
+
+def _extract_bundle_files_sync(
+    bundle_save_path: str,
+    bundle: Dict[str, str],
+    extracted_save_path: str,
+    unity_version: str | None,
+    texture_output_formats: tuple[str, ...],
+) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
+    UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
+
+    bundle_path = StdPath(bundle_save_path)
+    output_root = StdPath(extracted_save_path)
+    unity_file = UnityPy.load(bundle_path.as_posix())
+    if not unity_file:
+        raise ValueError(f"Failed to load {bundle_save_path}")
+
+    logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
+
+    exported_files: list[StdPath] = []
+    post_process_acb_files: list[tuple[StdPath, list[Dict]]] = []
+    post_process_movie_bundles: list[tuple[StdPath, list[Dict]]] = []
+    audio_jobs: list[tuple[str, list[str]]] = []
+    video_jobs: list[str] = []
+
+    for unityfs_path, unityfs_obj in unity_file.container.items():
+        try:
+            save_path = _build_unityfs_save_path(unityfs_path, output_root)
+        except Exception as e:
+            logger.exception("Failed to get relative path for %s", unityfs_path)
+            raise e
+
+        save_path = save_path.with_name(save_path.name.strip())
+        save_dir = save_path.parent
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            match unityfs_obj.type.name:
+                case "MonoBehaviour":
+                    tree = None
+                    try:
+                        if unityfs_obj.serialized_type.node:
+                            tree = unityfs_obj.read_typetree()
+                    except AttributeError:
+                        tree = unityfs_obj.read_typetree()
+                    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
+
+                    if unityfs_path.endswith(".playable"):
+                        tree = extract_playable(unity_file, unityfs_path)
+
+                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
+                    exported_files.append(save_path)
+
+                    if "acbFiles" in tree:
+                        post_process_acb_files.append((save_dir, tree["acbFiles"]))
+                        logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
+                    elif "movieBundleDatas" in tree:
+                        post_process_movie_bundles.append((save_dir, tree["movieBundleDatas"]))
+                        logger.debug(
+                            "Found movieBundleDatas in %s: %s",
+                            unityfs_path,
+                            tree["movieBundleDatas"],
+                        )
+                case "TextAsset":
+                    data = unityfs_obj.read()
+                    if isinstance(data, UnityPy.classes.TextAsset):
+                        if save_path.suffix == ".bytes":
+                            save_path = save_path.with_suffix("")
+                        save_path.write_bytes(data.m_Script.encode("utf-8", "surrogateescape"))
+                        exported_files.append(save_path)
+                    else:
+                        raise TypeError(
+                            f"Expected TextAsset, got {type(data)} for {unityfs_path}"
+                        )
+                case "Texture2D" | "Sprite":
+                    data = unityfs_obj.read()
+                    if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
+                        data, UnityPy.classes.Sprite
+                    ):
+                        image = _render_image_asset(data)
+                        exported_files.extend(
+                            _save_image_formats(image, save_path, texture_output_formats)
+                        )
+                    else:
+                        raise TypeError(
+                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
+                        )
+                case "Texture2DArray":
+                    data = unityfs_obj.read()
+                    if isinstance(data, UnityPy.classes.Texture2DArray):
+                        for i, image in enumerate(data.images):
+                            texture_path = save_path.with_name(f"{save_path.stem}_{i}")
+                            exported_files.extend(
+                                _save_image_formats(
+                                    image,
+                                    texture_path,
+                                    texture_output_formats,
+                                )
+                            )
+                    else:
+                        raise TypeError(
+                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
+                        )
+                case "AudioClip":
+                    data = unityfs_obj.read()
+                    if isinstance(data, UnityPy.classes.AudioClip):
+                        for filename, sample_data in data.samples.items():
+                            sample_path = save_path.with_name(filename)
+                            logger.debug("Saving audio clip %s to %s", filename, sample_path)
+                            sample_path.write_bytes(sample_data)
+                            exported_files.append(sample_path)
+                    else:
+                        raise TypeError(
+                            f"Expected AudioClip, got {type(data)} for {unityfs_path}"
+                        )
+                case "Mesh":
+                    logger.warning("Mesh data is not supported yet, skipping %s", unityfs_path)
+                    continue
+                case "Cubemap":
+                    logger.warning("Cubemap data is not supported yet, skipping %s", unityfs_path)
+                    continue
+                case _:
+                    logger.warning(
+                        "Unknowen type %s of %s, extracting typetree",
+                        unityfs_obj.type.name,
+                        unityfs_path,
+                    )
+                    tree = unityfs_obj.read_typetree()
+                    try:
+                        json.dumps(tree)
+                    except (ValueError, TypeError):
+                        logger.warning("Failed to serialize %s, skipping", tree)
+                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
+                    exported_files.append(save_path)
+        except (ValueError, TypeError, AttributeError, OSError) as e:
+            logger.exception("Failed to extract %s: %s", unityfs_path, e)
+            raise e
+
+    logger.debug(
+        "Extracted %d files from %s, list: %s",
+        len(exported_files),
+        bundle_save_path,
+        exported_files,
+    )
+
+    for save_dir, acb_files in post_process_acb_files:
+        for acb_file in acb_files:
+            acb_cue_sheet_name: str = acb_file["cueSheetName"]
+            acb_output_path = (save_dir / acb_cue_sheet_name).with_suffix(".acb")
+
+            if acb_file["formatType"] == 0 or acb_file["spilitFileNum"] == 0:
+                acb_textasset_filename: str = acb_file["assetBundleFileName"]
+                logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
+                expected_acb_textasset_path = (
+                    save_dir / acb_textasset_filename.removesuffix(".bytes")
+                ).with_suffix(".acb")
+                assert (
+                    expected_acb_textasset_path == acb_output_path
+                ), f"Path mismatch: {expected_acb_textasset_path} != {acb_output_path}"
+                try:
+                    acb_textasset_path = _resolve_existing_path_sync(
+                        expected_acb_textasset_path,
+                        save_dir,
+                        ".acb",
+                    )
+                except FileNotFoundError:
+                    logger.error("%s not found in %s", acb_textasset_filename, save_dir)
+                    continue
+
+                if acb_textasset_path != acb_output_path:
+                    acb_textasset_path.rename(acb_output_path)
+                    _discard_exported_file_sync(exported_files, acb_textasset_path)
+                    exported_files.append(acb_output_path)
+                    logger.debug(
+                        "Renamed %s to %s to match cue sheet name",
+                        acb_textasset_path,
+                        acb_output_path,
+                    )
+            else:
+                pattern = re.compile(r"{(\d)\:D(\d)}")
+                acb_textasset_filenames = [
+                    pattern.sub(r"{\1:0\2d}", acb_file["assetBundleFileName"])
+                    .format(i)
+                    .lower()
+                    for i in range(1, acb_file["spilitFileNum"] + 1)
+                ]
+
+                try:
+                    acb_textasset_paths = [
+                        _resolve_existing_path_sync(
+                            save_dir / acb_textasset_filename.removesuffix(".bytes"),
+                            save_dir,
+                        )
+                        for acb_textasset_filename in acb_textasset_filenames
+                    ]
+                except FileNotFoundError:
+                    logger.error("%s not found in %s", acb_textasset_filenames, save_dir)
+                    continue
+
+                with acb_output_path.open("wb") as outfile:
+                    for acb_textasset_path in acb_textasset_paths:
+                        with acb_textasset_path.open("rb") as infile:
+                            shutil.copyfileobj(infile, outfile)
+                        _discard_exported_file_sync(exported_files, acb_textasset_path)
+                        acb_textasset_path.unlink()
+
+                logger.debug("Merged %s to %s.acb", acb_textasset_filenames, acb_cue_sheet_name)
+
+            if acb_output_path.exists():
+                with acb_output_path.open("rb") as f:
+                    acb_data = f.read()
+                    extracted_audio_files = extract_acb(
+                        BytesIO(acb_data),
+                        save_dir.as_posix(),
+                        acb_output_path.as_posix(),
+                    )
+
+                acb_output_path.unlink()
+                logger.debug("Removed %s", acb_output_path)
+                _discard_exported_file_sync(exported_files, acb_output_path)
+                audio_jobs.append((save_dir.as_posix(), extracted_audio_files))
+            else:
+                logger.warning("%s not found in %s", acb_output_path, save_dir)
+
+    for save_dir, movie_bundles in post_process_movie_bundles:
+        if len(movie_bundles) == 1:
+            movie_bundle = movie_bundles[0]
+            usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
+            usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
+            usm_output_path = _resolve_existing_usm_path_sync(usm_output_path, save_dir)
+        elif len(movie_bundles) > 1:
+            pattern = re.compile(r"-\d{3}.usm.bytes")
+            usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
+            usm_output_path = save_dir / usm_output_name
+            usm_split_filenames: list[str] = [x["usmFileName"] for x in movie_bundles]
+            usm_split_paths = [
+                save_dir / usm_split_filename.removesuffix(".bytes")
+                for usm_split_filename in usm_split_filenames
+            ]
+
+            with usm_output_path.open("wb") as outfile:
+                for usm_split_path in usm_split_paths:
+                    if not usm_split_path.exists():
+                        usm_split_path_lower = usm_split_path.with_name(
+                            usm_split_path.name.lower()
+                        )
+                        if usm_split_path_lower.exists():
+                            usm_split_path = usm_split_path_lower
+                            logger.debug("Found %s instead of %s", usm_split_path, usm_split_paths)
+                        else:
+                            raise FileNotFoundError(
+                                f"{usm_split_path} not found in {save_dir}"
+                            )
+                    with usm_split_path.open("rb") as infile:
+                        shutil.copyfileobj(infile, outfile)
+                    _discard_exported_file_sync(exported_files, usm_split_path)
+                    usm_split_path.unlink()
+
+            logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
+            exported_files.append(usm_output_path)
+        else:
+            logger.warning("Empty movieBundleDatas in %s", save_dir)
+            continue
+
+        if usm_output_path.exists():
+            video_jobs.append(usm_output_path.as_posix())
+
+    return (
+        [path.as_posix() for path in exported_files],
+        audio_jobs,
+        video_jobs,
+    )
+
+
 async def download_deobfuscate_bundle(
     url: str,
     bundle_save_path: Path,
@@ -675,10 +1138,34 @@ async def download_deobfuscate_bundle(
     async def fetch_once(active_session: aiohttp.ClientSession) -> None:
         async with active_session.get(url, headers=headers) as response:
             if response.status == 200:
-                data = await response.read()
-                deobfuscated_data = await deobfuscate(data)
                 async with await open_file(bundle_save_path, "wb") as f:
-                    await f.write(deobfuscated_data)
+                    try:
+                        header = await response.content.readexactly(4)
+                    except asyncio.IncompleteReadError as exc:
+                        header = exc.partial
+
+                    if header == b"\x20\x00\x00\x00":
+                        chunk = b""
+                    elif header == b"\x10\x00\x00\x00":
+                        try:
+                            obfuscated_header = await response.content.readexactly(128)
+                        except asyncio.IncompleteReadError as exc:
+                            obfuscated_header = exc.partial
+                        chunk = bytes(
+                            a ^ b
+                            for a, b in zip(
+                                obfuscated_header,
+                                (b"\xff" * 5 + b"\x00" * 3) * 16,
+                            )
+                        )
+                    else:
+                        chunk = header
+
+                    if chunk:
+                        await f.write(chunk)
+                    async for chunk in response.content.iter_chunked(1024 * 1024):
+                        if chunk:
+                            await f.write(chunk)
                 return
 
             logger.debug(
@@ -731,375 +1218,47 @@ async def extract_asset_bundle(
     unity_version: str = None,
     config=None,
 ) -> List[Path]:
-    """Extract the asset bundle to the specified directory.
-
-    Args:
-        bundle_save_path (Path): _description_
-        bundle (Dict[str, str]): _description_
-        extracted_save_path (Path): _description_
-        unity_version (str, optional): _description_. Defaults to None.
-        config (_type_, optional): _description_. Defaults to None.
-
-    Raises:
-        ValueError: _description_
-        TypeError: _description_
-        TypeError: _description_
-        TypeError: _description_
-        RuntimeError: _description_
-
-    Returns:
-        List[Path]: _description_
-    """
-    UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-
-    # Load the bundle
-    _unity_file = UnityPy.load(bundle_save_path.as_posix())
-    # Check if the bundle is valid
-    if not _unity_file:
-        raise ValueError(f"Failed to load {bundle_save_path}")
-
-    logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
-
-    exported_files: List[Path] = []
-    post_process_acb_files: List[Tuple[Path, List[Dict]]] = []
-    post_process_movie_bundles: List[Tuple[Path, List[Dict]]] = []
-    for unityfs_path, unityfs_obj in _unity_file.container.items():
-        try:
-            relpath = Path(unityfs_path).relative_to(UNITY_FS_CONTAINER_BASE)
-            save_path = extracted_save_path / relpath.relative_to(*relpath.parts[:1])
-        except ValueError:
-            try:
-                relpath = Path(unityfs_path).relative_to(UNITY_FS_BUILT_IN_CONTAINER_BASE)
-            except ValueError:
-                relpath = Path(unityfs_path).relative_to(
-                    UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE
-                )
-            save_path = extracted_save_path / relpath
-        except Exception as e:
-            logger.exception("Failed to get relative path for %s", unityfs_path)
-            raise e
-        # trim whitespace from the path
-        save_path = save_path.with_name(save_path.name.strip())
-        save_dir = save_path.parent
-        # Create the directory if it doesn't exist
-        await save_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            match unityfs_obj.type.name:
-                case "MonoBehaviour":
-                    tree = None
-                    try:
-                        if unityfs_obj.serialized_type.node:
-                            tree = unityfs_obj.read_typetree()
-                    except AttributeError:
-                        tree = unityfs_obj.read_typetree()
-                    logger.debug(
-                        "Saving MonoBehaviour %s to %s", unityfs_path, save_path
-                    )
-    
-                    if unityfs_path.endswith(".playable"):
-                        tree = extract_playable(_unity_file, unityfs_path)
-
-                    # Save the typetree to a json file
-                    async with await open_file(save_path, "wb") as f:
-                        await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-
-                    if "acbFiles" in tree:
-                        post_process_acb_files.append((save_dir, tree["acbFiles"]))
-                        logger.debug(
-                            "Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"]
-                        )
-                    elif "movieBundleDatas" in tree:
-                        post_process_movie_bundles.append(
-                            (save_dir, tree["movieBundleDatas"])
-                        )
-                        logger.debug(
-                            "Found movieBundleDatas in %s: %s",
-                            unityfs_path,
-                            tree["movieBundleDatas"],
-                        )
-                case "TextAsset":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.TextAsset):
-                        if save_path.suffix == ".bytes":
-                            save_path = save_path.with_suffix("")
-                        async with await open_file(save_path, "wb") as f:
-                            await f.write(
-                                data.m_Script.encode("utf-8", "surrogateescape")
-                            )
-                        exported_files.append(save_path)
-                    else:
-                        raise TypeError(
-                            f"Expected TextAsset, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2D" | "Sprite":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
-                        data, UnityPy.classes.Sprite
-                    ):
-                        image = _render_image_asset(data)
-                        # save as png
-                        logger.debug(
-                            "Saving texture %s to %s",
-                            unityfs_path,
-                            save_path.with_suffix(".png"),
-                        )
-                        image.save(save_path.with_suffix(".png"))
-                        exported_files.append(save_path.with_suffix(".png"))
-
-                        # save as webp
-                        logger.debug(
-                            "Saving texture %s to %s",
-                            unityfs_path,
-                            save_path.with_suffix(".png"),
-                        )
-                        image.save(save_path.with_suffix(".webp"))
-                        exported_files.append(save_path.with_suffix(".webp"))
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2DArray":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2DArray):
-                        for i, image in enumerate(data.images):
-                            _save_path = save_path.with_name(
-                                save_path.stem + f"_{i}"
-                            ).with_suffix(".png")
-                            logger.debug(
-                                "Saving texture %s to %s",
-                                unityfs_path,
-                                _save_path,
-                            )
-                            image.save(_save_path)
-                            exported_files.append(_save_path)
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
-                        )
-                case "AudioClip":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.AudioClip):
-                        for filename, sample_data in data.samples.items():
-                            logger.debug(
-                                "Saving audio clip %s to %s",
-                                filename,
-                                save_path.with_name(filename),
-                            )
-                            async with await open_file(
-                                save_path.with_name(filename), "wb"
-                            ) as f:
-                                await f.write(sample_data)
-                            exported_files.append(save_path.with_name(filename))
-                    else:
-                        raise TypeError(
-                            f"Expected AudioClip, got {type(data)} for {unityfs_path}"
-                        )
-                case "Mesh":
-                    # Mesh data is not supported yet
-                    logger.warning(
-                        "Mesh data is not supported yet, skipping %s", unityfs_path
-                    )
-                    continue
-                case "Cubemap":
-                    # Cubemap data is not supported yet
-                    logger.warning(
-                        "Cubemap data is not supported yet, skipping %s", unityfs_path
-                    )
-                    continue
-                case _:
-                    logger.warning(
-                        "Unknowen type %s of %s, extracting typetree",
-                        unityfs_obj.type.name,
-                        unityfs_path,
-                    )
-                    tree = unityfs_obj.read_typetree()
-                    try:
-                        json.dumps(tree)
-                    except (ValueError, TypeError):
-                        logger.warning(
-                            "Failed to serialize %s, skipping", tree
-                        )
-                    async with await open_file(save_path, "wb") as f:
-                        await f.write(json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-        except (ValueError, TypeError, AttributeError, OSError) as e:
-            logger.exception("Failed to extract %s: %s", unityfs_path, e)
-            raise e
-
-    logger.debug(
-        "Extracted %d files from %s, list: %s",
-        len(exported_files),
-        bundle_save_path,
-        exported_files,
+    """Extract the asset bundle to the specified directory."""
+    loop = asyncio.get_running_loop()
+    exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
+        _get_shared_extract_process_pool(config),
+        _extract_bundle_files_sync,
+        bundle_save_path.as_posix(),
+        bundle,
+        extracted_save_path.as_posix(),
+        unity_version,
+        _get_texture_output_formats(config),
     )
 
-    # Post-process acb files
+    exported_files: List[Path] = [Path(path) for path in exported_paths]
+
     audio_file_semaphore = _get_shared_audio_file_semaphore(config)
-    for save_dir, acb_files in post_process_acb_files:
-        for acb_file in acb_files:
-            acb_cue_sheet_name: str = acb_file["cueSheetName"]
-            acb_output_path = (save_dir / acb_cue_sheet_name).with_suffix(".acb")
-
-            if acb_file["formatType"] == 0 or acb_file["spilitFileNum"] == 0:
-                # single file
-                acb_textasset_filename: str = acb_file["assetBundleFileName"]
-
-                logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
-                expected_acb_textasset_path = (
-                    save_dir / acb_textasset_filename.removesuffix(".bytes")
-                ).with_suffix(".acb")
-                assert (
-                    expected_acb_textasset_path == acb_output_path
-                ), f"Path mismatch: {expected_acb_textasset_path} != {acb_output_path}"
-                try:
-                    acb_textasset_path = await _resolve_existing_path(
-                        expected_acb_textasset_path,
-                        save_dir,
-                        ".acb",
-                    )
-                except FileNotFoundError:
-                    logger.error("%s not found in %s", acb_textasset_filename, save_dir)
-                    continue
-
-                if acb_textasset_path != acb_output_path:
-                    await acb_textasset_path.rename(acb_output_path)
-                    _discard_exported_file(exported_files, acb_textasset_path)
-                    exported_files.append(acb_output_path)
-                    logger.debug(
-                        "Renamed %s to %s to match cue sheet name",
-                        acb_textasset_path,
-                        acb_output_path,
-                    )
-            else:
-                # split files
-                patter = re.compile(r"{(\d)\:D(\d)}")
-                acb_textasset_filenames = [
-                    patter.sub(r"{\1:0\2d}", acb_file["assetBundleFileName"])
-                    .format(i)
-                    .lower()
-                    for i in range(1, acb_file["spilitFileNum"] + 1)
-                ]
-
-                # find and merge the files
-                try:
-                    acb_textasset_paths = [
-                        await _resolve_existing_path(
-                            save_dir / acb_textasset_filename.removesuffix(".bytes"),
-                            save_dir,
-                        )
-                        for acb_textasset_filename in acb_textasset_filenames
-                    ]
-                except FileNotFoundError:
-                    logger.error(
-                        "%s not found in %s", acb_textasset_filenames, save_dir
-                    )
-                    continue
-
-                # merge the files
-                async with await open_file(acb_output_path, "wb") as outfile:
-                    for acb_textasset_path in acb_textasset_paths:
-                        async with await open_file(acb_textasset_path, "rb") as infile:
-                            await outfile.write(await infile.read())
-                        _discard_exported_file(exported_files, acb_textasset_path)
-                        await acb_textasset_path.unlink()
-
-                logger.debug(
-                    "Merged %s to %s.acb",
-                    acb_textasset_filenames,
-                    acb_cue_sheet_name,
+    for save_dir_path, extracted_audio_files in audio_jobs:
+        save_dir = Path(save_dir_path)
+        audio_tasks = [
+            asyncio.create_task(
+                _process_extracted_audio_file(
+                    extracted_audio_file,
+                    save_dir,
+                    config,
+                    audio_file_semaphore,
                 )
-
-            # extract audio files from the acb file
-            if await acb_output_path.exists():
-                # acb -> hca
-                async with await open_file(acb_output_path, "rb") as f:
-                    acb_data = await f.read()
-                    extracted_audio_files = extract_acb(
-                        BytesIO(acb_data),
-                        save_dir.as_posix(),
-                        acb_output_path.as_posix(),
-                    )
-
-                # remove the acb file
-                await acb_output_path.unlink()
-                logger.debug("Removed %s", acb_output_path)
-                _discard_exported_file(exported_files, acb_output_path)
-
-                audio_tasks = [
-                    asyncio.create_task(
-                        _process_extracted_audio_file(
-                            extracted_audio_file,
-                            save_dir,
-                            config,
-                            audio_file_semaphore,
-                        )
-                    )
-                    for extracted_audio_file in extracted_audio_files
-                ]
-                audio_results = await asyncio.gather(*audio_tasks)
-                for audio_files in audio_results:
-                    exported_files.extend(audio_files)
-            else:
-                logger.warning("%s not found in %s", acb_output_path, save_dir)
-
-    # Post-process movie bundles
-    video_transcode_semaphore = _get_shared_video_transcode_semaphore(config)
-    for save_dir, movie_bundles in post_process_movie_bundles:
-        if len(movie_bundles) == 1:
-            # the movie bundle consists of a single file
-            movie_bundle = movie_bundles[0]
-            usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
-            usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
-            usm_output_path = await _resolve_existing_usm_path(
-                usm_output_path, save_dir
             )
-        elif len(movie_bundles) > 1:
-            # the movie bundle consists of multiple files
-            pattern = re.compile(r"-\d{3}.usm.bytes")
-            usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
-            usm_output_path = save_dir / usm_output_name
-            usm_split_filenames: List[str] = [x["usmFileName"] for x in movie_bundles]
-            usm_split_paths = [
-                save_dir / usm_split_filename.removesuffix(".bytes")
-                for usm_split_filename in usm_split_filenames
-            ]
+            for extracted_audio_file in extracted_audio_files
+        ]
+        audio_results = await asyncio.gather(*audio_tasks)
+        for audio_files in audio_results:
+            exported_files.extend(audio_files)
 
-            # merge split usm files to one
-            async with await open_file(usm_output_path, "wb") as outfile:
-                for usm_split_path in usm_split_paths:
-                    if not await usm_split_path.exists():
-                        # maybe case-sensitive filesystem issue
-                        usm_split_path_lower = usm_split_path.with_name(
-                            usm_split_path.name.lower()
-                        )
-                        if await usm_split_path_lower.exists():
-                            usm_split_path = usm_split_path_lower
-                            logger.debug(
-                                "Found %s instead of %s", usm_split_path, usm_split_paths
-                            )
-                        else:
-                            raise FileNotFoundError(
-                                f"{usm_split_path} not found in {save_dir}"
-                            )
-                    async with await open_file(usm_split_path, "rb") as infile:
-                        await outfile.write(await infile.read())
-                    _discard_exported_file(exported_files, usm_split_path)
-                    await usm_split_path.unlink()
-
-                logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
-                exported_files.append(usm_output_path)
-        else:
-            logger.warning("Empty movieBundleDatas in %s", save_dir)
-            continue
-
+    video_transcode_semaphore = _get_shared_video_transcode_semaphore(config)
+    for usm_output_path_text in video_jobs:
+        usm_output_path = Path(usm_output_path_text)
         if await usm_output_path.exists():
             async with video_transcode_semaphore:
-                # ffmpeg already supports usm; convert directly to mp4.
                 video_output_path = usm_output_path.with_suffix(".mp4")
                 ffmpeg_process, encoder_name = await _run_ffmpeg_usm_to_mp4(
-                    usm_output_path, video_output_path
+                    usm_output_path,
+                    video_output_path,
                 )
                 await ffmpeg_process.wait()
 
@@ -1111,7 +1270,8 @@ async def extract_asset_bundle(
                     )
                     _disable_ffmpeg_video_encoder()
                     ffmpeg_process, _ = await _run_ffmpeg_usm_to_mp4(
-                        usm_output_path, video_output_path
+                        usm_output_path,
+                        video_output_path,
                     )
                     await ffmpeg_process.wait()
 
@@ -1125,9 +1285,7 @@ async def extract_asset_bundle(
             logger.debug("Removed %s", usm_output_path)
             _discard_exported_file(exported_files, usm_output_path)
 
-    # Final cleanup of exported files, all files ending with
-    # ".bytes", ".acb", ".usm" will be removed
-    for file in exported_files[:]:  # Iterate over a copy of the list
+    for file in exported_files[:]:
         if file.suffix in [".bytes", ".acb", ".usm"]:
             await file.unlink()
             logger.debug("Removed %s in cleanup stage", file)

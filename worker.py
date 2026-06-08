@@ -189,8 +189,10 @@ async def _download_stage(
                     )
                     await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
                 else:
-                    tmp_bundle_save_file = tempfile.NamedTemporaryFile()
+                    tmp_bundle_save_file = tempfile.NamedTemporaryFile(delete=False)
                     bundle_save_path = Path(tmp_bundle_save_file.name)
+                    tmp_bundle_save_file.close()
+                    tmp_bundle_save_file = None
                     remove_bundle_after_extract = True
 
                 if download_disk_space_gate is not None:
