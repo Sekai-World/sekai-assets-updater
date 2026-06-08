@@ -11,19 +11,19 @@ from concurrent.futures import ProcessPoolExecutor
 from io import BytesIO
 from pathlib import Path as StdPath
 from pathlib import PurePosixPath
-from typing import Dict, List, Tuple
-
-import orjson as json
+from typing import Any, Dict, List, Tuple
 
 import aiohttp
-import UnityPy
-import UnityPy.classes
-import UnityPy.config
-from PIL import Image
-from UnityPy.enums import ClassIDType, SpritePackingRotation
-from UnityPy.export.SpriteHelper import SpriteSettings, get_image
+import json_compat as json
 from anyio import Path, open_file
+from PIL import Image
 
+from assetstudio_ffi import (
+    AssetStudioRead,
+    export_assetstudio_objects,
+    image_from_payload,
+    safe_payload_bundle_path,
+)
 from constants import (
     UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
@@ -32,7 +32,7 @@ from constants import (
 from helpers import get_download_max_retries, get_request_timeout
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
-from utils.playable import extract_playable
+from utils.playable import extract_playable_from_objects
 
 logger = logging.getLogger("live2d")
 
@@ -134,6 +134,26 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
         logger.warning("No valid TEXTURE_OUTPUT_FORMATS found, skipping texture export")
 
     return tuple(valid_formats)
+
+
+def _get_assetstudio_config(config) -> dict[str, Any]:
+    return {
+        "ASSET_STUDIO_FFI_LIBRARY_PATH": getattr(
+            config,
+            "ASSET_STUDIO_FFI_LIBRARY_PATH",
+            None,
+        ),
+        "ASSET_STUDIO_FFI_WORKER_PATH": getattr(
+            config,
+            "ASSET_STUDIO_FFI_WORKER_PATH",
+            None,
+        ),
+        "ASSET_STUDIO_FFI_READ_BATCH_SIZE": getattr(
+            config,
+            "ASSET_STUDIO_FFI_READ_BATCH_SIZE",
+            64,
+        ),
+    }
 
 
 def _get_shared_audio_file_semaphore(config) -> asyncio.Semaphore:
@@ -659,99 +679,6 @@ async def _process_extracted_audio_file(
         return exported_audio_files
 
 
-def _should_fallback_sprite_render(exc: Exception) -> bool:
-    if isinstance(exc, ValueError):
-        return "Coordinate 'lower' is less than 'upper'" in str(exc)
-    if isinstance(exc, StopIteration):
-        return True
-    return isinstance(exc, RuntimeError) and isinstance(exc.__cause__, StopIteration)
-
-
-def _get_sprite_atlas_data(data: UnityPy.classes.Sprite):
-    atlas = None
-    if data.m_SpriteAtlas:
-        atlas = data.m_SpriteAtlas.read()
-    elif data.m_AtlasTags:
-        for obj in data.assets_file.objects.values():
-            if obj.type != ClassIDType.SpriteAtlas:
-                continue
-            atlas = obj.read()
-            if atlas.m_Name == data.m_AtlasTags[0]:
-                break
-            atlas = None
-
-    if not atlas:
-        return data.m_RD
-
-    sprite_atlas_data = next(
-        (value for key, value in atlas.m_RenderDataMap if key == data.m_RenderDataKey),
-        None,
-    )
-    if sprite_atlas_data is None:
-        logger.warning(
-            "Sprite atlas render data missing for %s, falling back to embedded render data",
-            data.m_Name or data.path_id,
-        )
-        return data.m_RD
-    return sprite_atlas_data
-
-
-def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
-    """Render a sprite, falling back to its texture rect when tight mesh export fails."""
-    try:
-        return data.image
-    except (ValueError, RuntimeError, StopIteration) as exc:
-        if not _should_fallback_sprite_render(exc):
-            raise
-
-    sprite_atlas_data = _get_sprite_atlas_data(data)
-
-    texture_rect = sprite_atlas_data.textureRect
-    if texture_rect.width <= 0 or texture_rect.height <= 0:
-        raise ValueError(
-            f"Invalid sprite texture rect {texture_rect} for {data.m_Name or data.path_id}"
-        )
-
-    image = get_image(
-        data,
-        sprite_atlas_data.texture,
-        sprite_atlas_data.alphaTexture,
-    ).crop(
-        (
-            texture_rect.x,
-            texture_rect.y,
-            texture_rect.x + texture_rect.width,
-            texture_rect.y + texture_rect.height,
-        )
-    )
-
-    settings = SpriteSettings(sprite_atlas_data.settingsRaw)
-    if settings.packed == 1:
-        rotation = settings.packingRotation
-        if rotation == SpritePackingRotation.kSPRFlipHorizontal:
-            image = image.transpose(Image.FLIP_LEFT_RIGHT)
-        elif rotation == SpritePackingRotation.kSPRFlipVertical:
-            image = image.transpose(Image.FLIP_TOP_BOTTOM)
-        elif rotation == SpritePackingRotation.kSPRRotate180:
-            image = image.transpose(Image.ROTATE_180)
-        elif rotation == SpritePackingRotation.kSPRRotate90:
-            image = image.transpose(Image.ROTATE_270)
-
-    logger.warning(
-        "Falling back to texture rect export for sprite %s",
-        data.m_Name or data.path_id,
-    )
-    return image.transpose(Image.FLIP_TOP_BOTTOM)
-
-
-def _render_image_asset(
-    data: UnityPy.classes.Texture2D | UnityPy.classes.Sprite,
-) -> Image.Image:
-    if isinstance(data, UnityPy.classes.Sprite):
-        return _render_sprite_with_fallback(data)
-    return data.image
-
-
 def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) -> StdPath:
     source_path = PurePosixPath(unityfs_path)
     base_paths = (
@@ -853,20 +780,116 @@ def _save_image_formats(
     return saved_paths
 
 
+def _asset_container_path(read: AssetStudioRead) -> str:
+    return (
+        read.asset.get("container")
+        or read.asset.get("name")
+        or f"{read.asset.get('path_id', 'asset')}"
+    )
+
+
+def _asset_type(read: AssetStudioRead) -> str:
+    return str(read.asset.get("type") or read.asset.get("asset_type") or "")
+
+
+def _asset_save_path(read: AssetStudioRead, output_root: StdPath) -> StdPath:
+    save_path = _build_unityfs_save_path(_asset_container_path(read), output_root)
+    return save_path.with_name(save_path.name.strip())
+
+
+def _write_payload_bundle(target: StdPath, payload: bytes) -> list[StdPath]:
+    written: list[StdPath] = []
+    for name, data in safe_payload_bundle_path_payloads(payload):
+        entry_target = target.parent / target.stem / name
+        entry_target.parent.mkdir(parents=True, exist_ok=True)
+        entry_target.write_bytes(data)
+        written.append(entry_target)
+    return written
+
+
+def safe_payload_bundle_path_payloads(payload: bytes) -> list[tuple[StdPath, bytes]]:
+    from assetstudio_ffi import parse_payload_bundle
+
+    return [
+        (StdPath(safe_payload_bundle_path(name)), data)
+        for name, data in parse_payload_bundle(payload).items()
+    ]
+
+
+def _write_assetstudio_read(
+    read: AssetStudioRead,
+    output_root: StdPath,
+    texture_output_formats: tuple[str, ...],
+    all_objects: dict[int, dict[str, Any]],
+) -> tuple[list[StdPath], dict[str, Any] | None]:
+    save_path = _asset_save_path(read, output_root)
+    save_dir = save_path.parent
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    asset_type = _asset_type(read)
+    payload_kind = read.response.get("payload_kind") or ""
+    suggested_extension = read.response.get("suggested_extension") or ""
+
+    if payload_kind == "typetree_json":
+        tree = json.loads(read.payload)
+        if _asset_type(read) == "MonoScript":
+            return [], tree
+        is_playable = _asset_container_path(read).endswith(".playable")
+        if is_playable:
+            if not isinstance(tree, dict) or "m_Tracks" not in tree:
+                return [], tree
+            tree = extract_playable_from_objects(
+                all_objects,
+                int(read.asset.get("path_id") or 0),
+                _asset_container_path(read),
+                tree,
+            )
+        if not is_playable:
+            save_path = save_path.with_suffix(".json")
+        save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
+        return [save_path], tree
+
+    if payload_kind == "text_bytes":
+        if save_path.suffix == ".bytes":
+            save_path = save_path.with_suffix("")
+        save_path.write_bytes(read.payload)
+        return [save_path], None
+
+    if payload_kind in {"image_raw_rgba", "image_bmp"}:
+        image = image_from_payload(read.payload)
+        return _save_image_formats(image, save_path, texture_output_formats), None
+
+    if payload_kind == "image_array_bundle_raw_rgba":
+        written: list[StdPath] = []
+        for name, data in safe_payload_bundle_path_payloads(read.payload):
+            image = image_from_payload(data)
+            written.extend(
+                _save_image_formats(image, save_path.parent / save_path.stem / name, texture_output_formats)
+            )
+        return written, None
+
+    if payload_kind.startswith("image_array_bundle_"):
+        return _write_payload_bundle(save_path, read.payload), None
+
+    extension = suggested_extension or save_path.suffix or ".bin"
+    if extension and not extension.startswith("."):
+        extension = f".{extension}"
+    save_path = save_path.with_suffix(extension)
+    save_path.write_bytes(read.payload)
+    return [save_path], None
+
+
 def _extract_bundle_files_sync(
     bundle_save_path: str,
     bundle: Dict[str, str],
     extracted_save_path: str,
     unity_version: str | None,
     texture_output_formats: tuple[str, ...],
+    assetstudio_config: dict[str, Any],
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
-    UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-
     bundle_path = StdPath(bundle_save_path)
     output_root = StdPath(extracted_save_path)
-    unity_file = UnityPy.load(bundle_path.as_posix())
-    if not unity_file:
-        raise ValueError(f"Failed to load {bundle_save_path}")
+    reads = export_assetstudio_objects(bundle_path, unity_version, assetstudio_config)
 
     logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
 
@@ -875,118 +898,45 @@ def _extract_bundle_files_sync(
     post_process_movie_bundles: list[tuple[StdPath, list[Dict]]] = []
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
-
-    for unityfs_path, unityfs_obj in unity_file.container.items():
+    all_objects: dict[int, dict[str, Any]] = {}
+    for read in reads:
+        if read.response.get("payload_kind") != "typetree_json" or not read.payload:
+            continue
         try:
-            save_path = _build_unityfs_save_path(unityfs_path, output_root)
-        except Exception as e:
-            logger.exception("Failed to get relative path for %s", unityfs_path)
-            raise e
+            all_objects[int(read.asset["path_id"])] = {
+                "type": _asset_type(read),
+                "data": json.loads(read.payload),
+            }
+        except (KeyError, TypeError, ValueError):
+            logger.debug("Skipping invalid typetree object metadata: %s", read.asset)
 
-        save_path = save_path.with_name(save_path.name.strip())
-        save_dir = save_path.parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-
+    for read in reads:
         try:
-            match unityfs_obj.type.name:
-                case "MonoBehaviour":
-                    tree = None
-                    try:
-                        if unityfs_obj.serialized_type.node:
-                            tree = unityfs_obj.read_typetree()
-                    except AttributeError:
-                        tree = unityfs_obj.read_typetree()
-                    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
+            written_files, tree = _write_assetstudio_read(
+                read,
+                output_root,
+                texture_output_formats,
+                all_objects,
+            )
+            exported_files.extend(written_files)
 
-                    if unityfs_path.endswith(".playable"):
-                        tree = extract_playable(unity_file, unityfs_path)
+            if tree is None:
+                continue
 
-                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-
-                    if "acbFiles" in tree:
-                        post_process_acb_files.append((save_dir, tree["acbFiles"]))
-                        logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
-                    elif "movieBundleDatas" in tree:
-                        post_process_movie_bundles.append((save_dir, tree["movieBundleDatas"]))
-                        logger.debug(
-                            "Found movieBundleDatas in %s: %s",
-                            unityfs_path,
-                            tree["movieBundleDatas"],
-                        )
-                case "TextAsset":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.TextAsset):
-                        if save_path.suffix == ".bytes":
-                            save_path = save_path.with_suffix("")
-                        save_path.write_bytes(data.m_Script.encode("utf-8", "surrogateescape"))
-                        exported_files.append(save_path)
-                    else:
-                        raise TypeError(
-                            f"Expected TextAsset, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2D" | "Sprite":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
-                        data, UnityPy.classes.Sprite
-                    ):
-                        image = _render_image_asset(data)
-                        exported_files.extend(
-                            _save_image_formats(image, save_path, texture_output_formats)
-                        )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2DArray":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2DArray):
-                        for i, image in enumerate(data.images):
-                            texture_path = save_path.with_name(f"{save_path.stem}_{i}")
-                            exported_files.extend(
-                                _save_image_formats(
-                                    image,
-                                    texture_path,
-                                    texture_output_formats,
-                                )
-                            )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
-                        )
-                case "AudioClip":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.AudioClip):
-                        for filename, sample_data in data.samples.items():
-                            sample_path = save_path.with_name(filename)
-                            logger.debug("Saving audio clip %s to %s", filename, sample_path)
-                            sample_path.write_bytes(sample_data)
-                            exported_files.append(sample_path)
-                    else:
-                        raise TypeError(
-                            f"Expected AudioClip, got {type(data)} for {unityfs_path}"
-                        )
-                case "Mesh":
-                    logger.warning("Mesh data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case "Cubemap":
-                    logger.warning("Cubemap data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case _:
-                    logger.warning(
-                        "Unknowen type %s of %s, extracting typetree",
-                        unityfs_obj.type.name,
-                        unityfs_path,
-                    )
-                    tree = unityfs_obj.read_typetree()
-                    try:
-                        json.dumps(tree)
-                    except (ValueError, TypeError):
-                        logger.warning("Failed to serialize %s, skipping", tree)
-                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
+            save_dir = _asset_save_path(read, output_root).parent
+            unityfs_path = _asset_container_path(read)
+            if "acbFiles" in tree:
+                post_process_acb_files.append((save_dir, tree["acbFiles"]))
+                logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
+            elif "movieBundleDatas" in tree:
+                post_process_movie_bundles.append((save_dir, tree["movieBundleDatas"]))
+                logger.debug(
+                    "Found movieBundleDatas in %s: %s",
+                    unityfs_path,
+                    tree["movieBundleDatas"],
+                )
         except (ValueError, TypeError, AttributeError, OSError) as e:
-            logger.exception("Failed to extract %s: %s", unityfs_path, e)
+            logger.exception("Failed to extract %s: %s", _asset_container_path(read), e)
             raise e
 
     logger.debug(
@@ -1228,6 +1178,7 @@ async def extract_asset_bundle(
         extracted_save_path.as_posix(),
         unity_version,
         _get_texture_output_formats(config),
+        _get_assetstudio_config(config),
     )
 
     exported_files: List[Path] = [Path(path) for path in exported_paths]

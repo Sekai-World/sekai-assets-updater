@@ -3,15 +3,13 @@ name = "sekai-assets-updater"
 version = "0.1.0"
 description = "Update assets of Project Sekai Colorful Stage"
 readme = "README.md"
-requires-python = "==3.12.*"
+requires-python = "==3.14.*"
 dependencies = [
     "aiohttp==3.14.0",
     "anyio==4.9.0",
     "idna==3.15",
     "olefile==0.47",
-    "orjson==3.11.6",
     "pillow==12.2.0",
     "pycryptodome==3.22.0",
     "u-msgpack-python==2.8.0",
-    "unitypy==1.22.5",
 ]

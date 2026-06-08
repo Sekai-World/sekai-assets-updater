@@ -14,8 +14,9 @@ from string import Formatter
 from typing import AsyncIterator, Dict, List, Tuple
 
 import aiohttp
-import orjson as json
 from anyio import Path, open_file
+
+import json_compat as json
 
 logger = logging.getLogger("asset_updater")
 

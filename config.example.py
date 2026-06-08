@@ -48,6 +48,11 @@ MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 MAX_CONCURRENCY_UPLOADS = 10
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
+# AssetStudioFFI runtime paths. The library path can also be provided with
+# HARUKI_ASSET_STUDIO_FFI_LIBRARY_PATH. The worker defaults to assetstudio_ffi_worker.
+ASSET_STUDIO_FFI_LIBRARY_PATH = None
+ASSET_STUDIO_FFI_WORKER_PATH = None
+ASSET_STUDIO_FFI_READ_BATCH_SIZE = 64
 
 # Crypto settings
 AES_KEY = bytes("AES_KEY")

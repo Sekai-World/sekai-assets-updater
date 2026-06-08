@@ -21,6 +21,9 @@ class ConfigLike(Protocol):
     DOWNLOAD_DISK_SPACE_CHECK_INTERVAL: int | float
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
     TEXTURE_OUTPUT_FORMATS: tuple[str, ...]
+    ASSET_STUDIO_FFI_LIBRARY_PATH: Optional[str]
+    ASSET_STUDIO_FFI_WORKER_PATH: Optional[str]
+    ASSET_STUDIO_FFI_READ_BATCH_SIZE: int
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]
     UNITY_VERSION: str

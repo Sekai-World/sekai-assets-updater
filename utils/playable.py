@@ -3,10 +3,6 @@
 
 import logging
 
-import UnityPy
-import UnityPy.config
-
-
 # Track class names (tracks that contain m_Clips)
 TRACK_CLASSES = {
     "MCTimelineCharacterTalkTrack",
@@ -334,35 +330,19 @@ TRACK_EXTRACTORS = {
 logger = logging.getLogger("utils.playable")
 
 
-def extract_playable(env: UnityPy.load, container_path: str) -> dict:
-    """
-    Parse an AssetBundle and extract the full timeline data.
-    container_path: optional path of the playable container for metadata.
-    """
-    script_obj = None
-    for path, obj in env.container.items():
-        if path != container_path:
-            continue
-        script_obj = obj
-        break
-
-    if not script_obj:
-        raise ValueError(f"No .playable entry found for {container_path}")
-
-    # load all objects once
-    all_objects = {}
-    for obj in env.objects:
-        data = obj.read_typetree()
-        all_objects[obj.path_id] = {"type": obj.type.name, "data": data}
-    logger.debug(f"Loaded {len(all_objects)} objects")
-
+def extract_playable_from_objects(
+    all_objects: dict,
+    root_pid: int,
+    container_path: str,
+    root_tree: dict,
+) -> dict:
+    """Parse timeline data from AssetStudio typetree objects."""
     script_map = build_script_map(all_objects)
     char_map = build_character_map(all_objects, script_map)
     logger.debug(f"Character map: {char_map}")
     data_by_pid = {pid: obj["data"] for pid, obj in all_objects.items()}
 
     # playable main file
-    root_pid = script_obj.path_id
     logger.debug(f"Processing: {container_path}, root object path_id: {root_pid}")
 
     # Build a set of all path_ids reachable from the playable root. This scopes
@@ -455,7 +435,7 @@ def extract_playable(env: UnityPy.load, container_path: str) -> dict:
     for cid, cname in sorted(char_map.items()):
         characters.append({"characterId": cid, "character3dId": cid, "name": cname})
 
-    result = script_obj.read_typetree()
+    result = dict(root_tree)
     result.update(
         {
             "__timelineParse": {
@@ -478,166 +458,7 @@ def extract_playable(env: UnityPy.load, container_path: str) -> dict:
 
 # CLI script
 if __name__ == "__main__":
-    import os
     import sys
-    import json
-    from pathlib import Path
 
-    if len(sys.argv) < 2:
-        print("Usage: python playable.py <input_file> [output_dir]")
-        print("  input_file: Unity AssetBundle file path (contains .playable)")
-        print("  output_dir: output directory (default: current directory)")
-        sys.exit(1)
-
-    input_file = sys.argv[1]
-    if not os.path.exists(input_file):
-        print(f"[!] File not found: {input_file}")
-        sys.exit(1)
-
-    output_dir = sys.argv[2] if len(sys.argv) >= 3 else "."
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Step 1: scan container for .playable entries
-    print(f"[*] Scanning container: {input_file}")
-    UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.21f1"
-    env = UnityPy.load(Path(input_file).read_bytes())
-
-    playables = {
-        path: obj for path, obj in env.container.items() if path.endswith(".playable")
-    }
-
-    if not playables:
-        print("[!] No .playable entries found in container")
-        sys.exit(1)
-
-    print(f"[*] Found {len(playables)} .playable entries:")
-    for p in playables:
-        print(f"    {p}")
-
-    # Step 2: load all objects once (same SerializedFile)
-    all_objects = {}
-    for obj in env.objects:
-        data = obj.read_typetree()
-        all_objects[obj.path_id] = {"type": obj.type.name, "data": data}
-    print(f"[*] Loaded {len(all_objects)} objects")
-
-    script_map = build_script_map(all_objects)
-    char_map = build_character_map(all_objects, script_map)
-    print(f"[*] Character map: {char_map}")
-    data_by_pid = {pid: obj["data"] for pid, obj in all_objects.items()}
-
-    # Step 3: export each playable separately
-    for container_path, script_obj in playables.items():
-        root_pid = script_obj.path_id
-        playable_filename = os.path.basename(container_path)
-        output_file = os.path.join(output_dir, playable_filename)
-
-        print(f"\n[>] Processing: {container_path}")
-        print(f"    root object path_id: {root_pid}")
-
-        # Collect events for this playable (scope by references from the playable root)
-        def gather_referenced_pids(start_pid: int) -> set:
-            visited = set()
-            to_visit = [start_pid]
-
-            while to_visit:
-                pid = to_visit.pop()
-                if pid in visited:
-                    continue
-                visited.add(pid)
-                obj2 = all_objects.get(pid)
-                if not obj2:
-                    continue
-                data2 = obj2.get("data")
-
-                stack = [data2]
-                while stack:
-                    node = stack.pop()
-                    if isinstance(node, dict):
-                        path_ref = node.get("m_PathID")
-                        if isinstance(path_ref, int) and path_ref not in visited:
-                            to_visit.append(path_ref)
-                        m_asset = node.get("m_Asset")
-                        if isinstance(m_asset, dict):
-                            aid = m_asset.get("m_PathID")
-                            if isinstance(aid, int) and aid not in visited:
-                                to_visit.append(aid)
-                        for v in node.values():
-                            if isinstance(v, (dict, list)):
-                                stack.append(v)
-                    elif isinstance(node, list):
-                        for item in node:
-                            if isinstance(item, (dict, list)):
-                                stack.append(item)
-
-            return visited
-
-        referenced_pids = gather_referenced_pids(root_pid)
-        referenced_pids.add(root_pid)
-
-        events = []
-        track_counts = {}
-        for pid in referenced_pids:
-            obj = all_objects.get(pid)
-            if not obj or obj["type"] != "MonoBehaviour":
-                continue
-            d = obj["data"]
-            cls = get_class_name(d, script_map)
-            if cls not in TRACK_EXTRACTORS:
-                continue
-            extractor, needs_character = TRACK_EXTRACTORS[cls]
-            character_id = d.get("CharacterId", 0)
-            track_name = d.get("m_Name", "")
-            character_name = (
-                char_map.get(character_id, track_name) if needs_character else ""
-            )
-            clips = d.get("m_Clips", [])
-            if not clips:
-                continue
-            track_counts[cls] = track_counts.get(cls, 0) + len(clips)
-            for clip in clips:
-                asset_pid = clip.get("m_Asset", {}).get("m_PathID", 0)
-                asset_data = data_by_pid.get(asset_pid, {})
-                events.append(extractor(clip, asset_data, character_name))
-
-        events.sort(key=lambda e: (e["start"], e.get("character", ""), e["type"]))
-
-        # Timeline name lookup
-        timeline_name = ""
-        for pid, obj in all_objects.items():
-            if obj["type"] == "MonoBehaviour":
-                d = obj["data"]
-                if get_class_name(d, script_map) == "TimelineAsset":
-                    timeline_name = d.get("m_Name", "")
-                    break
-
-        # Character list
-        characters = []
-        for cid, cname in sorted(char_map.items()):
-            characters.append({"characterId": cid, "character3dId": cid, "name": cname})
-
-        result = script_obj.read_typetree()
-        result.update(
-            {
-                "__timelineParse": {
-                    "version": 1,
-                    "meta": {
-                        "timelineName": timeline_name,
-                        "containerPath": container_path,
-                        "totalEvents": len(events),
-                        "characters": characters,
-                        "trackEventCounts": track_counts,
-                    },
-                    "events": events,
-                }
-            }
-        )
-
-        print(f"[*] Extracted {len(events)} events")
-        for cls, count in sorted(track_counts.items()):
-            print(f"    {cls}: {count} clips")
-
-        # Save full timeline as JSON (use container file name)
-        with open(output_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, indent=2, ensure_ascii=False, default=str)
-        print(f"[+] Saved full timeline: {output_file}")
+    print("Standalone playable extraction now runs through the AssetStudioFFI pipeline.")
+    sys.exit(2)

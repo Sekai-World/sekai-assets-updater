@@ -3,9 +3,9 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-import orjson as json
 from anyio import open_file
 
+import json_compat as json
 from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
 from helpers import (
     build_download_disk_space_gate,
