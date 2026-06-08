@@ -30,6 +30,9 @@ MAX_CONCURRENCY = os.cpu_count()
 MAX_CONCURRENCY_DOWNLOADS = MAX_CONCURRENCY
 MAX_CONCURRENCY_EXTRACTS = MAX_CONCURRENCY
 MAX_CONCURRENCY_UPLOAD_STAGE = 1
+# Asset extraction executor: "auto" uses threads on free-threaded Python,
+# processes otherwise. Use "process" to fall back if threads are unstable.
+ASSET_EXTRACT_EXECUTOR = "auto"
 # Maximum queued artifacts between stages.
 PIPELINE_STAGE_QUEUE_SIZE = MAX_CONCURRENCY
 # Maximum number of audio files processed concurrently

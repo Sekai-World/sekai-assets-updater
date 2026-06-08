@@ -23,6 +23,16 @@ Runtime requirement:
 - Local defaults are auto-discovered from `.tools/assetstudio-ffi/bin` and
   `.tools/assetstudio-ffi/assetstudio-ffi-*`.
 
+Concurrency notes:
+
+- `ASSET_EXTRACT_EXECUTOR = "auto"` uses `ThreadPoolExecutor` on free-threaded
+  Python and `ProcessPoolExecutor` otherwise. Set it to `"process"` to force the
+  legacy isolation path.
+- `MAX_CONCURRENCY_EXTRACTS` controls asset extraction workers for both
+  executor modes.
+- Use CPU count as the extract/audio baseline, and about half the CPU count for
+  `MAX_CONCURRENCY_VIDEO_TRANSCODES`.
+
 Re-test command:
 
 ```sh
