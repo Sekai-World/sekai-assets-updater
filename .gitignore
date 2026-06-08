@@ -179,6 +179,7 @@ config*.py
 cache/
 .tools/
 test*.py
+!tests/test*.py
 
 # General
 .DS_Store
