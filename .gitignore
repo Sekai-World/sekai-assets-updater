@@ -177,6 +177,7 @@ config*.py
 !config.example.py
 
 cache/
+.tools/
 test*.py
 
 # General
