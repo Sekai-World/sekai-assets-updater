@@ -554,7 +554,7 @@ class AFSArchive(object):
         return self.src.bytes(ent.size, at=ent.offset)
 
 
-def extract_acb(acb_file, target_dir, acb_file_path):
+def extract_acb(acb_file, target_dir, acb_file_path, cue_name=None):
     utf = UTFTable(acb_file)
     cue = TrackList(utf)
     embedded_awb = io.BytesIO(utf.rows[0]["AwbFile"])
@@ -574,6 +574,8 @@ def extract_acb(acb_file, target_dir, acb_file_path):
 
     outputs = []
     for track in cue.tracks:
+        if cue_name is not None and track.name != cue_name:
+            continue
         name = "{0}{1}".format(
             track.name, wave_type_ftable.get(track.enc_type, track.enc_type))
         with open(os.path.join(target_dir, name), "wb") as named_out_file:

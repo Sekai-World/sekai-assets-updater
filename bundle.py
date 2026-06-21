@@ -818,6 +818,73 @@ def _resolve_existing_path_sync(
     raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
 
+def _resolve_shared_audio_outputs_sync(
+    output_root: StdPath,
+    save_dir: StdPath,
+    cue_sheet_name: str,
+) -> list[StdPath]:
+    expected_names = {
+        f"{cue_sheet_name}{suffix}".lower()
+        for suffix in (".wav", ".mp3", ".flac", ".hca")
+    }
+    return [
+        path
+        for path in output_root.rglob("*")
+        if path.is_file()
+        and path.parent != save_dir
+        and path.name.lower() in expected_names
+    ]
+
+
+def _extract_acb_from_cached_bundles_sync(
+    bundle_save_path: StdPath,
+    acb_textasset_filename: str,
+    acb_output_path: StdPath,
+    unity_version: str | None,
+) -> bool:
+    bundle_cache_root = bundle_save_path
+    for _ in bundle_save_path.parts:
+        if bundle_cache_root.name == "bundle":
+            break
+        if bundle_cache_root.parent == bundle_cache_root:
+            return False
+        bundle_cache_root = bundle_cache_root.parent
+
+    expected_textasset_name = acb_textasset_filename.lower()
+    for cached_bundle_path in bundle_cache_root.rglob("*"):
+        if not cached_bundle_path.is_file() or cached_bundle_path == bundle_save_path:
+            continue
+
+        try:
+            UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
+            cached_unity_file = UnityPy.load(cached_bundle_path.as_posix())
+            if not cached_unity_file:
+                continue
+        except Exception:
+            continue
+
+        for unityfs_path, unityfs_obj in cached_unity_file.container.items():
+            if unityfs_obj.type.name != "TextAsset":
+                continue
+            if PurePosixPath(unityfs_path).name.lower() != expected_textasset_name:
+                continue
+
+            data = unityfs_obj.read()
+            if not isinstance(data, UnityPy.classes.TextAsset):
+                continue
+
+            acb_output_path.write_bytes(data.m_Script.encode("utf-8", "surrogateescape"))
+            logger.debug(
+                "Extracted %s from cached bundle %s to %s",
+                acb_textasset_filename,
+                cached_bundle_path.relative_to(bundle_cache_root),
+                acb_output_path,
+            )
+            return True
+
+    return False
+
+
 def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -> StdPath:
     try:
         return _resolve_existing_path_sync(expected_path, save_dir, ".usm")
@@ -1007,9 +1074,6 @@ def _extract_bundle_files_sync(
                 expected_acb_textasset_path = (
                     save_dir / acb_textasset_filename.removesuffix(".bytes")
                 ).with_suffix(".acb")
-                assert (
-                    expected_acb_textasset_path == acb_output_path
-                ), f"Path mismatch: {expected_acb_textasset_path} != {acb_output_path}"
                 try:
                     acb_textasset_path = _resolve_existing_path_sync(
                         expected_acb_textasset_path,
@@ -1017,18 +1081,68 @@ def _extract_bundle_files_sync(
                         ".acb",
                     )
                 except FileNotFoundError:
-                    logger.error("%s not found in %s", acb_textasset_filename, save_dir)
-                    continue
-
-                if acb_textasset_path != acb_output_path:
-                    acb_textasset_path.rename(acb_output_path)
-                    _discard_exported_file_sync(exported_files, acb_textasset_path)
-                    exported_files.append(acb_output_path)
-                    logger.debug(
-                        "Renamed %s to %s to match cue sheet name",
-                        acb_textasset_path,
+                    if _extract_acb_from_cached_bundles_sync(
+                        bundle_path,
+                        acb_textasset_filename,
                         acb_output_path,
+                        unity_version,
+                    ):
+                        pass
+                    else:
+                        shared_audio_paths = _resolve_shared_audio_outputs_sync(
+                            output_root,
+                            save_dir,
+                            acb_cue_sheet_name,
+                        )
+                        if not shared_audio_paths:
+                            raise FileNotFoundError(
+                                f"{acb_textasset_filename} not found in {save_dir}"
+                            )
+
+                        for shared_audio_path in shared_audio_paths:
+                            copied_audio_path = save_dir / shared_audio_path.name
+                            shutil.copy2(shared_audio_path, copied_audio_path)
+                            exported_files.append(copied_audio_path)
+                        logger.debug(
+                            "Copied shared audio outputs for %s from %s to %s",
+                            acb_cue_sheet_name,
+                            shared_audio_paths[0].parent,
+                            save_dir,
+                        )
+                        continue
+                else:
+                    if acb_textasset_path != acb_output_path:
+                        acb_textasset_path.rename(acb_output_path)
+                        _discard_exported_file_sync(exported_files, acb_textasset_path)
+                        exported_files.append(acb_output_path)
+                        logger.debug(
+                            "Renamed %s to %s to match cue sheet name",
+                            acb_textasset_path,
+                            acb_output_path,
+                        )
+
+                if not acb_output_path.exists():
+                    shared_audio_paths = _resolve_shared_audio_outputs_sync(
+                        output_root,
+                        save_dir,
+                        acb_cue_sheet_name,
                     )
+                    if not shared_audio_paths:
+                        raise FileNotFoundError(
+                            f"{acb_textasset_filename} not found in {save_dir}"
+                        )
+
+                    for shared_audio_path in shared_audio_paths:
+                        copied_audio_path = save_dir / shared_audio_path.name
+                        shutil.copy2(shared_audio_path, copied_audio_path)
+                        exported_files.append(copied_audio_path)
+                    logger.debug(
+                        "Copied shared audio outputs for %s from %s to %s",
+                        acb_cue_sheet_name,
+                        shared_audio_paths[0].parent,
+                        save_dir,
+                    )
+                    continue
             else:
                 pattern = re.compile(r"{(\d)\:D(\d)}")
                 acb_textasset_filenames = [
@@ -1062,10 +1176,21 @@ def _extract_bundle_files_sync(
             if acb_output_path.exists():
                 with acb_output_path.open("rb") as f:
                     acb_data = f.read()
+                    acb_asset_name = (
+                        acb_file["assetBundleFileName"]
+                        .removesuffix(".bytes")
+                        .removesuffix(".acb")
+                    )
+                    cue_name = (
+                        acb_cue_sheet_name
+                        if acb_cue_sheet_name != acb_asset_name
+                        else None
+                    )
                     extracted_audio_files = extract_acb(
                         BytesIO(acb_data),
                         save_dir.as_posix(),
                         acb_output_path.as_posix(),
+                        cue_name,
                     )
 
                 acb_output_path.unlink()
