@@ -16,6 +16,7 @@ from typing import Dict, List, Tuple
 import orjson as json
 
 import aiohttp
+import cridecoder
 import UnityPy
 import UnityPy.classes
 import UnityPy.config
@@ -445,7 +446,41 @@ def _disable_ffmpeg_video_encoder() -> None:
     _ffmpeg_video_encoder_cache = (None, [])
 
 
-async def _run_ffmpeg_usm_to_mp4(
+async def _demux_usm_to_m2v(usm_path: Path) -> Path | None:
+    """Demux a USM into its raw .m2v video stream via cridecoder.
+
+    Returns the path to the extracted video stream, or ``None`` if no video
+    stream was produced. Audio streams are not exported here — the video
+    pipeline only needs the elementary video for ffmpeg to transcode.
+    """
+    output_dir = usm_path.parent
+    loop = asyncio.get_running_loop()
+    try:
+        outputs = await loop.run_in_executor(
+            None,
+            cridecoder.extract_usm,
+            usm_path.as_posix(),
+            output_dir.as_posix(),
+            None,
+            False,
+        )
+    except Exception:
+        logger.exception("Failed to demux %s with cridecoder", usm_path)
+        return None
+
+    for output in outputs:
+        if output.lower().endswith(".m2v"):
+            return Path(output)
+
+    # Fall back to the first produced stream if the extension differs.
+    if outputs:
+        return Path(outputs[0])
+
+    logger.warning("cridecoder produced no video stream for %s", usm_path)
+    return None
+
+
+async def _run_ffmpeg_video_to_mp4(
     input_path: Path,
     output_path: Path,
 ) -> tuple[asyncio.subprocess.Process, str | None]:
@@ -1381,30 +1416,42 @@ async def extract_asset_bundle(
         if await usm_output_path.exists():
             async with video_transcode_semaphore:
                 video_output_path = usm_output_path.with_suffix(".mp4")
-                ffmpeg_process, encoder_name = await _run_ffmpeg_usm_to_mp4(
-                    usm_output_path,
-                    video_output_path,
-                )
-                await ffmpeg_process.wait()
 
-                if ffmpeg_process.returncode != 0 and encoder_name:
-                    logger.warning(
-                        "Failed to convert %s to mp4 with %s, falling back to software encoding",
-                        usm_output_path,
-                        encoder_name,
-                    )
-                    _disable_ffmpeg_video_encoder()
-                    ffmpeg_process, _ = await _run_ffmpeg_usm_to_mp4(
-                        usm_output_path,
+                # Demux the USM into a raw .m2v video stream via cridecoder,
+                # then transcode that elementary stream to mp4 with ffmpeg.
+                m2v_path = await _demux_usm_to_m2v(usm_output_path)
+                if m2v_path is None:
+                    logger.warning("Failed to demux %s", usm_output_path)
+                else:
+                    ffmpeg_process, encoder_name = await _run_ffmpeg_video_to_mp4(
+                        m2v_path,
                         video_output_path,
                     )
                     await ffmpeg_process.wait()
 
-                if ffmpeg_process.returncode != 0:
-                    logger.warning("Failed to convert %s to mp4", usm_output_path)
-                else:
-                    logger.debug("Converted %s to mp4", usm_output_path)
-                    exported_files.append(video_output_path)
+                    if ffmpeg_process.returncode != 0 and encoder_name:
+                        logger.warning(
+                            "Failed to convert %s to mp4 with %s, falling back to software encoding",
+                            usm_output_path,
+                            encoder_name,
+                        )
+                        _disable_ffmpeg_video_encoder()
+                        ffmpeg_process, _ = await _run_ffmpeg_video_to_mp4(
+                            m2v_path,
+                            video_output_path,
+                        )
+                        await ffmpeg_process.wait()
+
+                    if ffmpeg_process.returncode != 0:
+                        logger.warning("Failed to convert %s to mp4", usm_output_path)
+                    else:
+                        logger.debug("Converted %s to mp4", usm_output_path)
+                        exported_files.append(video_output_path)
+
+                    if await m2v_path.exists():
+                        await m2v_path.unlink()
+                        logger.debug("Removed %s", m2v_path)
+                        _discard_exported_file(exported_files, m2v_path)
 
             await usm_output_path.unlink()
             logger.debug("Removed %s", usm_output_path)

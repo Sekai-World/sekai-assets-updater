@@ -168,14 +168,14 @@ Common outputs:
 
 Audio pipeline:
 
-- `acb` is unpacked by the local parser in [`utils/acb.py`](./utils/acb.py)
-- extracted `hca` files are decoded by `vgmstream-cli` when available, otherwise by the local Python decoder in [`utils/hca.py`](./utils/hca.py)
+- `acb` is unpacked by the native [`cridecoder`](https://github.com/Team-Haruki/cridecoder) library (wrapped in [`utils/acb.py`](./utils/acb.py))
+- extracted `hca` files are decoded by `vgmstream-cli` when available, otherwise by `cridecoder` (wrapped in [`utils/hca.py`](./utils/hca.py))
 - audio file concurrency, HCA decode concurrency, and `ffmpeg` audio encode concurrency are configured separately
-- the Python decoder runs in a process pool to use multiple CPU cores better
+- the `cridecoder` HCA decoder runs in a process pool to use multiple CPU cores better
 
 Video pipeline:
 
-- `usm` is converted directly by `ffmpeg`
+- `usm` is demuxed to a raw `.m2v` video stream by `cridecoder`, which `ffmpeg` then transcodes to `.mp4`
 - hardware H.264 encoding is used when available
 
 ## Notes

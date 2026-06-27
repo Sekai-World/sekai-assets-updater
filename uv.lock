@@ -138,6 +138,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cridecoder"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/aa/3e/d94b98be141f8e9ef92066aeb641a0c67ae29929971ab191294565f152dc/cridecoder-0.3.0.tar.gz", hash = "sha256:2115ec8ab9cfad167b1fc94acddad92b12273a360ca7bea9322a371d18e191a3", size = 104542, upload-time = "2026-06-27T06:22:39.068Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b8/c9/94e3932fca0be86cd7627ebb2f5aacd2e10850173d297540228a1b7e1d64/cridecoder-0.3.0-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:f31ddca1a85b862ee32b680f1374d931771ff8b9d26c80c34492b7bb0b880dee", size = 609871, upload-time = "2026-06-27T06:22:10.064Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/23/bc85c9c6814dbaeeaebc2cebe920edb644c064f300bf3f15772adb0eaa47/cridecoder-0.3.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:f5716eee8ae656313c223d4f49183fb8f409625cef282af83f0a63a402aa655e", size = 592682, upload-time = "2026-06-27T06:22:11.145Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/93/6e12c86cc9d9f914568c925c62a5e446566a0e09274959fc3d7177e96789/cridecoder-0.3.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:dd6b5024fec59b1ccdca0dac7c1e9d3f5c8321a87297aa6c333c8edc04724d64", size = 630409, upload-time = "2026-06-27T06:22:12.338Z" },
+    { url = "https://files.pythonhosted.org/packages/49/cf/ff0c878cd0b28e193b6b928eecdf528158141c4e028a9b89b58368a69ef8/cridecoder-0.3.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:776251b88d0b79e6f18c78b725e3fe8e3bb2a81aa3b806df63549ceebfd04b22", size = 645231, upload-time = "2026-06-27T06:22:13.395Z" },
+    { url = "https://files.pythonhosted.org/packages/7a/5a/989b3216faefcd6bb95e1d7dd83faf9f2bdc3dcd2a1e56ba6a1acfd0d970/cridecoder-0.3.0-cp312-cp312-win_amd64.whl", hash = "sha256:690f1a1c20dbcdaef7f0ec9834296fe1f8c40ff4ebaafab9ebd95a3abd3588ca", size = 501234, upload-time = "2026-06-27T06:22:14.831Z" },
+]
+
+[[package]]
 name = "etcpak"
 version = "0.9.15"
 source = { registry = "https://pypi.org/simple" }
@@ -358,6 +371,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "anyio" },
+    { name = "cridecoder" },
     { name = "idna" },
     { name = "olefile" },
     { name = "orjson" },
@@ -371,6 +385,7 @@ dependencies = [
 requires-dist = [
     { name = "aiohttp", specifier = "==3.14.0" },
     { name = "anyio", specifier = "==4.9.0" },
+    { name = "cridecoder", specifier = ">=0.3.0" },
     { name = "idna", specifier = "==3.15" },
     { name = "olefile", specifier = "==0.47" },
     { name = "orjson", specifier = "==3.11.6" },
