@@ -20,6 +20,7 @@ class ConfigLike(Protocol):
     MIN_FREE_DISK_BYTES: int
     DOWNLOAD_DISK_SPACE_CHECK_INTERVAL: int | float
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
+    MAX_CONCURRENCY_USM_DEMUXES: int
     TEXTURE_OUTPUT_FORMATS: tuple[str, ...]
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]
@@ -43,8 +44,8 @@ class ConfigLike(Protocol):
 
 
 class SekaiServerRegion(Enum):
-    JP = 'jp'
-    EN = 'en'
-    TW = 'tw'
-    KR = 'kr'
-    CN = 'cn'
+    JP = "jp"
+    EN = "en"
+    TW = "tw"
+    KR = "kr"
+    CN = "cn"

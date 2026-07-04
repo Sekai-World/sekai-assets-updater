@@ -178,6 +178,9 @@ config*.py
 
 cache/
 test*.py
+!test_audio_pipeline.py
+.omo/
+.tools/
 
 # General
 .DS_Store
