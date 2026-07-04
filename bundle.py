@@ -992,6 +992,29 @@ def _resolve_shared_audio_outputs_sync(
     ]
 
 
+def _resolve_local_audio_outputs_sync(
+    save_dir: StdPath,
+    cue_sheet_name: str,
+) -> list[StdPath]:
+    """Find audio files matching the cue sheet name directly in save_dir.
+
+    This covers the case where an AudioClip in the same bundle has already
+    been extracted directly (e.g. via UnityPy's AudioClip handler) and the
+    referenced ACB TextAsset lives in a different bundle that may not be
+    available in the bundle cache.
+    """
+    expected_names = {
+        f"{cue_sheet_name}{suffix}".lower()
+        for suffix in (".wav", ".mp3", ".flac", ".hca")
+    }
+    return [
+        path
+        for path in save_dir.iterdir()
+        if path.is_file()
+        and path.name.lower() in expected_names
+    ]
+
+
 def _extract_acb_from_cached_bundles_sync(
     bundle_save_path: StdPath,
     acb_textasset_filename: str,
@@ -1245,9 +1268,26 @@ def _extract_bundle_files_sync(
                             acb_cue_sheet_name,
                         )
                         if not shared_audio_paths:
-                            raise FileNotFoundError(
-                                f"{acb_textasset_filename} not found in {save_dir}"
+                            local_audio_paths = _resolve_local_audio_outputs_sync(
+                                save_dir,
+                                acb_cue_sheet_name,
                             )
+                            if local_audio_paths:
+                                logger.debug(
+                                    "ACB textasset %s not found, but audio for %s already extracted locally, skipping ACB processing",
+                                    acb_textasset_filename,
+                                    acb_cue_sheet_name,
+                                )
+                                continue
+                            logger.warning(
+                                "ACB textasset %s not found in %s and no shared/local audio available for %s; "
+                                "the ACB data likely resides in a separate bundle. "
+                                "Skipping this acbFile entry — the audio will be extracted when that bundle is processed",
+                                acb_textasset_filename,
+                                save_dir,
+                                acb_cue_sheet_name,
+                            )
+                            continue
 
                         for shared_audio_path in shared_audio_paths:
                             copied_audio_path = save_dir / shared_audio_path.name
@@ -1278,7 +1318,26 @@ def _extract_bundle_files_sync(
                         acb_cue_sheet_name,
                     )
                     if not shared_audio_paths:
-                        raise FileNotFoundError(f"{acb_textasset_filename} not found in {save_dir}")
+                        local_audio_paths = _resolve_local_audio_outputs_sync(
+                            save_dir,
+                            acb_cue_sheet_name,
+                        )
+                        if local_audio_paths:
+                            logger.debug(
+                                "ACB textasset %s not found, but audio for %s already extracted locally, skipping ACB processing",
+                                acb_textasset_filename,
+                                acb_cue_sheet_name,
+                            )
+                            continue
+                        logger.warning(
+                            "ACB textasset %s not found in %s and no shared/local audio available for %s; "
+                            "the ACB data likely resides in a separate bundle. "
+                            "Skipping this acbFile entry — the audio will be extracted when that bundle is processed",
+                            acb_textasset_filename,
+                            save_dir,
+                            acb_cue_sheet_name,
+                        )
+                        continue
 
                     for shared_audio_path in shared_audio_paths:
                         copied_audio_path = save_dir / shared_audio_path.name
