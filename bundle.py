@@ -1004,14 +1004,12 @@ def _resolve_local_audio_outputs_sync(
     available in the bundle cache.
     """
     expected_names = {
-        f"{cue_sheet_name}{suffix}".lower()
-        for suffix in (".wav", ".mp3", ".flac", ".hca")
+        f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
     }
     return [
         path
         for path in save_dir.iterdir()
-        if path.is_file()
-        and path.name.lower() in expected_names
+        if path.is_file() and path.name.lower() in expected_names
     ]
 
 
