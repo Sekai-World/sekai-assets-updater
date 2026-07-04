@@ -7,7 +7,7 @@ Update and extract Project Sekai asset bundles.
 - Python `3.12`
 - `uv`
 - `ffmpeg`
-- `vgmstream-cli` for faster HCA decoding (optional)
+- `vgmstream-cli` as an optional HCA decoding fallback
 - `rclone` if you use remote uploads
 
 `ffmpeg` is required for:
@@ -64,7 +64,8 @@ Concurrency:
 - `MAX_CONCURRENCY_HCA_DECODES`: concurrent HCA decodes
 - `MAX_CONCURRENCY_AUDIO_ENCODERS`: concurrent `ffmpeg` audio encodes
 - `MAX_CONCURRENCY_AUDIO_TRANSCODES`: legacy fallback for the three audio settings above
-- `HCA_DECODE_BACKEND`: `auto`, `vgmstream`, or `python`
+- `HCA_DECODE_BACKEND`: `auto`, `vgmstream`, or `python` (`python` is a legacy alias for `cridecoder`)
+- `MAX_CONCURRENCY_USM_DEMUXES`: concurrent `cridecoder` USM demux tasks
 - `MAX_CONCURRENCY_VIDEO_TRANSCODES`: concurrent video transcodes
 - `MAX_CONCURRENCY_UPLOADS`: concurrent remote uploads
 - `TEXTURE_OUTPUT_FORMATS`: texture formats to export, for example `("webp",)` or `("png", "webp")`
@@ -162,20 +163,21 @@ Common outputs:
 
 - `Texture2D` / `Sprite` -> `.png`, `.webp`
 - `AudioClip` -> extracted raw sample files
-- `acb` bundles -> extracted audio, then `wav`, `mp3`, and for music bundles also `flac`
+- `acb` bundles -> decoded `wav`, then `mp3`, and for music bundles also `flac`
 - `usm` bundles -> `.mp4`
 - typetree-capable assets -> `.json`
 
 Audio pipeline:
 
-- `acb` is unpacked by the native [`cridecoder`](https://github.com/Team-Haruki/cridecoder) library (wrapped in [`utils/acb.py`](./utils/acb.py))
-- extracted `hca` files are decoded by `vgmstream-cli` when available, otherwise by `cridecoder` (wrapped in [`utils/hca.py`](./utils/hca.py))
+- `acb` is decoded directly to `wav` by [`cridecoder.decode_acb_to_wav`](https://github.com/Team-Haruki/cridecoder) (wrapped in [`utils/acb.py`](./utils/acb.py))
+- standalone extracted `hca` files are decoded by `cridecoder` (wrapped in [`utils/hca.py`](./utils/hca.py)), with `vgmstream-cli` as the fallback in `auto` mode
 - audio file concurrency, HCA decode concurrency, and `ffmpeg` audio encode concurrency are configured separately
 - the `cridecoder` HCA decoder runs in a process pool to use multiple CPU cores better
 
 Video pipeline:
 
 - `usm` is demuxed to a raw `.m2v` video stream by `cridecoder`, which `ffmpeg` then transcodes to `.mp4`
+- USM demux tasks run in a bounded process pool controlled by `MAX_CONCURRENCY_USM_DEMUXES`
 - hardware H.264 encoding is used when available
 
 ## Notes

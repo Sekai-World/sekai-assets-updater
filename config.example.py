@@ -40,10 +40,13 @@ MAX_CONCURRENCY_HCA_DECODES = MAX_CONCURRENCY
 MAX_CONCURRENCY_AUDIO_ENCODERS = MAX_CONCURRENCY
 # Legacy combined audio concurrency fallback used when the new knobs are unset
 MAX_CONCURRENCY_AUDIO_TRANSCODES = MAX_CONCURRENCY
-# HCA decoder backend: "auto" prefers vgmstream-cli, falls back to the Python decoder
+# HCA decoder backend: "auto" prefers cridecoder, falls back to vgmstream-cli;
+# "python" is kept as a legacy alias for cridecoder.
 HCA_DECODE_BACKEND = "auto"
 # Maximum number of concurrent video transcodes, defaults to half the CPU cores
 MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
+# Maximum number of concurrent cridecoder USM demux tasks
+MAX_CONCURRENCY_USM_DEMUXES = MAX_CONCURRENCY_VIDEO_TRANSCODES
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
