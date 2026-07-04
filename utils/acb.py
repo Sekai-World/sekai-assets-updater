@@ -1,4 +1,4 @@
-"""ACB/AWB track extraction backed by the native cridecoder library.
+"""ACB/AWB track decoding backed by the native cridecoder library.
 
 This module previously bundled a pure-Python ACB parser (derived from
 VGMToolbox). It is now a thin wrapper around cridecoder (Rust), keeping the same
@@ -24,33 +24,38 @@ def extract_acb(
     acb_file_path: str,
     cue_name: Optional[str] = None,
 ) -> list[str]:
-    """Extract audio tracks from an ACB to ``target_dir``.
+    """Decode audio tracks from an ACB to WAV files in ``target_dir``.
 
     ``acb_file`` is an open binary stream of the ACB; ``acb_file_path`` is the
     path the ACB logically lives at — its parent directory is used to resolve
     external streaming ``.awb`` archives. ``cue_name`` optionally restricts the
-    output to a single track (by cue name), matching the previous behaviour.
+    output to a single decoded WAV track, matching the previous behaviour.
 
-    Returns the list of written track file paths.
+    Returns the list of written WAV file paths.
     """
-    acb_file.seek(0)
-    acb_bytes = acb_file.read()
+    existing_acb_path = os.fspath(acb_file_path)
+    tmp_path: str | None = None
+    if os.path.exists(existing_acb_path):
+        decode_path = existing_acb_path
+    else:
+        acb_file.seek(0)
+        acb_bytes = acb_file.read()
 
-    # cridecoder needs an on-disk path, and resolves external ".awb" archives
-    # relative to the ACB's directory. Stage the bytes next to acb_file_path so
-    # sibling streaming AWBs are found.
-    parent = os.path.dirname(acb_file_path) or "."
-    os.makedirs(parent, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(suffix=".acb", dir=parent)
-    try:
+        parent = os.path.dirname(existing_acb_path) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".acb", dir=parent)
         with os.fdopen(fd, "wb") as fh:
             fh.write(acb_bytes)
-        outputs = cridecoder.extract_acb(tmp_path, target_dir) or []
+        decode_path = tmp_path
+
+    try:
+        outputs = cridecoder.decode_acb_to_wav(decode_path, target_dir, None) or []
     finally:
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     if cue_name is None:
         return list(outputs)
