@@ -5,6 +5,11 @@ from anyio import Path
 
 
 class ConfigLike(Protocol):
+    UPDATER_MODE: str
+    ENABLE_LIVE2D_POSTPROCESS: bool
+    ENABLE_CHARTS_POSTPROCESS: bool
+    LIVE2D_REMOTE_STORAGE: list[dict]
+    CHARTS_REMOTE_STORAGE: list[dict]
     MAX_CONCURRENCY: int
     MAX_CONCURRENCY_DOWNLOADS: int
     MAX_CONCURRENCY_EXTRACTS: int

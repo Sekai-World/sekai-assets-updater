@@ -10,6 +10,9 @@ PROXY_URL = None
 # Server region
 REGION = SekaiServerRegion.JP
 
+# Single entry point processing mode. CLI --mode overrides this at runtime.
+UPDATER_MODE = "assets"
+
 # Fallback unity version, replace with the correct version if needed
 UNITY_VERSION = "2022.3.21f1"
 # User agent for requests, replace with the correct user agent if needed
@@ -84,7 +87,7 @@ DL_PRIORITY_LIST = None  # Example: [r"^music/.*", r"^character/member.*"]
 ASSET_LOCAL_EXTRACTED_DIR = None  # Example: Path("cache", "jp", "extracted")
 ASSET_LOCAL_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "bundle")
 
-# Remote storage settings
+# Normal asset remote storage settings
 ASSET_REMOTE_STORAGE = [
     {
         "type": "normal",
@@ -93,3 +96,10 @@ ASSET_REMOTE_STORAGE = [
         "args": ["copy", "src", "dst"],
     },
 ]
+
+# Optional post-processing in the default assets mode. Explicit --mode
+# live2d/charts always runs its corresponding post-processor.
+ENABLE_LIVE2D_POSTPROCESS = False
+ENABLE_CHARTS_POSTPROCESS = False
+LIVE2D_REMOTE_STORAGE = []
+CHARTS_REMOTE_STORAGE = []

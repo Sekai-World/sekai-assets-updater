@@ -517,6 +517,48 @@ async def filter_bundles(
     return bundles
 
 
+MODE_BUNDLE_PREFIXES = {
+    "assets": (),
+    "live2d": ("live2d/",),
+    "charts": ("music/music_score/",),
+}
+
+
+def get_mode_bundle_prefixes(mode: str) -> tuple[str, ...]:
+    """Return the mandatory bundle prefixes for an updater mode."""
+    try:
+        return MODE_BUNDLE_PREFIXES[mode]
+    except KeyError as exc:
+        raise ValueError(f"Unknown updater mode: {mode}") from exc
+
+
+def filter_bundles_for_mode(
+    bundles: Dict[str, Dict],
+    mode: str = "assets",
+) -> Dict[str, Dict]:
+    """Apply the non-negotiable scope restriction for a specialized mode."""
+    prefixes = get_mode_bundle_prefixes(mode)
+    if not prefixes:
+        return bundles
+    return {
+        key: value
+        for key, value in bundles.items()
+        if (value.get("bundleName") or "").startswith(prefixes)
+    }
+
+
+def filter_download_items_for_mode(items: List[Tuple[str, Dict]], mode: str) -> List[Tuple[str, Dict]]:
+    """Prevent a pending queue from crossing mode boundaries."""
+    prefixes = get_mode_bundle_prefixes(mode)
+    if not prefixes:
+        return items
+    return [
+        item
+        for item in items
+        if (item[1].get("bundleName") or "").startswith(prefixes)
+    ]
+
+
 async def sort_download_list(
     download_list: List[Tuple[str, Dict]],
     priority_list: List[str] | None = None,
@@ -690,3 +732,21 @@ async def upload_to_storage(
         raise RuntimeError(
             f"{len(errors)} upload(s) failed; first error: {errors[0]}"
         ) from errors[0]
+
+
+async def upload_directory(
+    source_dir: Path,
+    remote_path: Path,
+    upload_program: str,
+    upload_args: List[str],
+) -> None:
+    """Upload a complete specialized output tree as one storage operation."""
+    args = upload_args[:]
+    args[args.index("src")] = str(source_dir)
+    args[args.index("dst")] = str(remote_path)
+    logger.debug("Uploading directory %s to %s using %s %s", source_dir, remote_path, upload_program, " ".join(args))
+    process = await asyncio.create_subprocess_exec(upload_program, *args)
+    await process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(f"Failed to upload {source_dir} to {remote_path}")
+    logger.info("Successfully uploaded directory %s to %s", source_dir, remote_path)

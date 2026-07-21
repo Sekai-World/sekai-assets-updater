@@ -314,6 +314,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pjsekai-scores-rs-skia-image"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/a4/dfe16b077db07837a089230bd4f942173e8473b0083b6d243e7a535ea6b8/pjsekai_scores_rs_skia_image-0.5.0.tar.gz", hash = "sha256:3f70485884d1ed0771040fac84ed739cb20715c4af2739893ae826e86586b7c0", size = 98693, upload-time = "2026-07-13T09:02:07.414Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/05/b1da38a06f4f6be78218414d55401a25df84aa6d983d5c81b6e2416cb3f2/pjsekai_scores_rs_skia_image-0.5.0-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:b7a4047c981d78e0b811c5471d2f1a2fd93dad446dc9919975228434b10bf97f", size = 2520621, upload-time = "2026-07-13T09:01:29.204Z" },
+    { url = "https://files.pythonhosted.org/packages/86/1b/92786ca0bdc8848b69abc1ac33465eadd676bbd499a8ed4e9976bb16610a/pjsekai_scores_rs_skia_image-0.5.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:bd022c5823ea3671660d9fae0fa00cf9b6e0e2b13303919899788466df9c5074", size = 2368552, upload-time = "2026-07-13T09:01:30.984Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/98/4a6de8bd69f7037524c4d598883c26c3c97ff4d2c9f1d7b90f3da7fdb3c4/pjsekai_scores_rs_skia_image-0.5.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5b52802c71f47502cadd2f2801a5b368bbc6699a23c2a1c78af5d489e9c6ee6f", size = 3387901, upload-time = "2026-07-13T09:01:32.261Z" },
+    { url = "https://files.pythonhosted.org/packages/7f/af/b2409fe843ca9c2db14b101ffd7f129c006910a6346f64f18a982fbb0b95/pjsekai_scores_rs_skia_image-0.5.0-cp312-cp312-manylinux_2_34_aarch64.whl", hash = "sha256:88eb1ccf214c7326c8549afe71f99f32e6fa8b0e7f5a70235a182b95acb52c0f", size = 3548419, upload-time = "2026-07-13T09:01:33.706Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/c0/8845e50c136a22f6b0710c9d81df96191efb1a2932d05545cd636c39fccf/pjsekai_scores_rs_skia_image-0.5.0-cp312-cp312-win_amd64.whl", hash = "sha256:c0fe71fe9a17b94edf2484676adac9011034ff70c6faaab815a00a01f903b2d6", size = 2681669, upload-time = "2026-07-13T09:01:34.978Z" },
+]
+
+[[package]]
 name = "propcache"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -403,6 +416,7 @@ dependencies = [
     { name = "olefile" },
     { name = "orjson" },
     { name = "pillow" },
+    { name = "pjsekai-scores-rs-skia-image" },
     { name = "pycryptodome" },
     { name = "u-msgpack-python" },
     { name = "unitypy" },
@@ -422,6 +436,7 @@ requires-dist = [
     { name = "olefile", specifier = "==0.47" },
     { name = "orjson", specifier = "==3.11.6" },
     { name = "pillow", specifier = "==12.2.0" },
+    { name = "pjsekai-scores-rs-skia-image" },
     { name = "pycryptodome", specifier = "==3.22.0" },
     { name = "u-msgpack-python", specifier = "==2.8.0" },
     { name = "unitypy", specifier = "==1.22.5" },

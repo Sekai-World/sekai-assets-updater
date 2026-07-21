@@ -81,6 +81,8 @@ Storage:
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
 - `ASSET_LOCAL_BUNDLE_CACHE_DIR`: keep downloaded bundles locally; if `None`, use a temp file
 - `ASSET_REMOTE_STORAGE`: upload extracted files after processing; set to `[]` to disable uploads
+- `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
+- `LIVE2D_REMOTE_STORAGE` and `CHARTS_REMOTE_STORAGE` are independent `{base, program, args}` target lists. Multiple targets upload sequentially after successful processing.
 
 Cache files:
 
@@ -94,6 +96,16 @@ Run the full updater:
 
 ```bash
 uv run python main.py -c config.py
+```
+
+The single entry point supports `--mode assets|live2d|charts` (default `assets`).
+Specialized modes always constrain bundles to `live2d/` or `music/music_score/`,
+in addition to `DL_INCLUDE_LIST` and `DL_EXCLUDE_LIST`, and always run their
+corresponding post-processor regardless of the enable flag.
+
+```bash
+uv run python main.py -c config.py --mode live2d
+uv run python main.py -c config.py --mode charts
 ```
 
 Verbose mode:

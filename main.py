@@ -11,10 +11,13 @@ from helpers import (
     build_download_disk_space_gate,
     ensure_dir_exists,
     filter_bundles,
+    filter_bundles_for_mode,
+    filter_download_items_for_mode,
     get_download_list,
     setup_logging_queue,
 )
 from model import ConfigLike
+from specialized import get_enabled_specialized_modes, run_specialized_postprocess
 from worker import run_pipeline
 
 logger = logging.getLogger("asset_updater")
@@ -88,8 +91,18 @@ async def do_download(
 async def main(
     update_asset_bundle_info_only: bool = False,
     force_full_download: bool = False,
+    mode: str = "assets",
 ):
     cfg = require_config()
+    # Live2D extraction needs its motion bundles preserved for the global
+    # restore pass, including when it is enabled alongside the default assets
+    # mode. Charts use the normal extractor and only need post-processing.
+    cfg.UPDATER_MODE = (
+        "live2d"
+        if mode == "live2d"
+        or (mode == "assets" and getattr(cfg, "ENABLE_LIVE2D_POSTPROCESS", False))
+        else mode
+    )
     start_time = time.monotonic()
 
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
@@ -131,6 +144,7 @@ async def main(
         if not current_bundles:
             raise ValueError("bundles must be set in asset bundle info")
 
+        current_bundles = filter_bundles_for_mode(current_bundles, mode)
         current_bundles = await filter_bundles(
             current_bundles,
             include_list=cfg.DL_INCLUDE_LIST,
@@ -162,6 +176,13 @@ async def main(
 
     # Generate the download list from the latest version info
     logger.info("RUN | step=2/4 | action=build_download_list")
+    # get_download_list applies the user filters and writes the metadata cache;
+    # the mandatory mode scope is applied both before and after it so it cannot
+    # be bypassed by a cached queue or a broad include expression.
+    asset_bundle_info = dict(asset_bundle_info)
+    asset_bundle_info["bundles"] = filter_bundles_for_mode(
+        asset_bundle_info.get("bundles", {}), mode
+    )
     new_download_list: List[DownloadItem] = await get_download_list(
         asset_bundle_info,
         game_version_json,
@@ -173,6 +194,7 @@ async def main(
         priority_list=cfg.DL_PRIORITY_LIST,
         force_full_download=force_full_download,
     )
+    new_download_list = filter_download_items_for_mode(new_download_list, mode)
     logger.debug("New download candidates: %d item(s)", len(new_download_list))
 
     # If there are pending items from a previous interrupted run, merge them:
@@ -181,7 +203,7 @@ async def main(
     pending_list: List[DownloadItem] = []
     if (not force_full_download) and await cfg.DL_LIST_CACHE_PATH.exists():
         async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-            pending_list = json.loads(await f.read())
+            pending_list = filter_download_items_for_mode(json.loads(await f.read()), mode)
         logger.info(
             "RUN | action=load_pending | count=%d | path=%s",
             len(pending_list),
@@ -227,6 +249,10 @@ async def main(
         download_list, config=cfg, headers=headers, cookie=cookie
     )
 
+    if is_success:
+        for specialized_mode in get_enabled_specialized_modes(mode, cfg):
+            await run_specialized_postprocess(specialized_mode, cfg)
+
     # remove the cached download list
     if is_success and len(download_list) > 0:
         await cfg.DL_LIST_CACHE_PATH.unlink()
@@ -244,6 +270,12 @@ def cli():
 
     parser = argparse.ArgumentParser(
         description="Start the asset updater with given config."
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("assets", "live2d", "charts"),
+        default="assets",
+        help="Processing scope (default: assets).",
     )
     parser.add_argument(
         "-c",
@@ -322,6 +354,7 @@ def cli():
         main(
             update_asset_bundle_info_only=args.update_asset_bundle_info_only,
             force_full_download=args.force_full_download,
+            mode=args.mode,
         )
     )
 
