@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from bundle import download_deobfuscate_bundle, extract_asset_bundle
+from bundle import download_deobfuscate_bundle, extract_asset_bundle, is_live2d_bundle
 from helpers import (
     DownloadDiskSpaceGate,
     get_request_timeout,
@@ -35,6 +35,21 @@ class PipelineArtifact:
     tmp_extracted_save_dir: tempfile.TemporaryDirectory | None = None
     remove_bundle_after_extract: bool = False
     remove_extracted_after_upload: bool = False
+
+
+def get_bundle_cache_root(config, bundle: Dict[str, Any]):
+    """Select the cache root without allowing specialized roots to leak."""
+    if is_live2d_bundle(bundle):
+        return getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None)
+    return getattr(config, "ASSET_LOCAL_BUNDLE_CACHE_DIR", None)
+
+
+def get_bundle_cache_path(config, bundle: Dict[str, Any]):
+    root = get_bundle_cache_root(config, bundle)
+    bundle_name = bundle.get("bundleName") or ""
+    if root is None or not bundle_name:
+        return None
+    return root / bundle_name
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -183,10 +198,9 @@ async def _download_stage(
                         worker_cookie,
                     )
 
-                if isinstance(config.ASSET_LOCAL_BUNDLE_CACHE_DIR, Path):
-                    bundle_save_path = (
-                        config.ASSET_LOCAL_BUNDLE_CACHE_DIR / bundle["bundleName"]
-                    )
+                bundle_cache_root = get_bundle_cache_root(config, bundle)
+                if isinstance(bundle_cache_root, Path):
+                    bundle_save_path = bundle_cache_root / bundle["bundleName"]
                     await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
                 else:
                     tmp_bundle_save_file = tempfile.NamedTemporaryFile(delete=False)

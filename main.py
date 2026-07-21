@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -10,15 +11,23 @@ from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
 from helpers import (
     build_download_disk_space_gate,
     ensure_dir_exists,
-    filter_bundles,
     filter_bundles_for_mode,
     filter_download_items_for_mode,
     get_download_list,
+    dedupe_download_items,
+    select_bundles_for_download,
     setup_logging_queue,
 )
 from model import ConfigLike
-from specialized import get_enabled_specialized_modes, run_specialized_postprocess
-from worker import run_pipeline
+from specialized import (
+    get_enabled_specialized_modes,
+    get_required_bundle_prefixes,
+    mode_uses_bundle_pipeline,
+    needs_live2d_bundle_cache,
+    needs_shared_workspace,
+    run_specialized_postprocess,
+)
+from worker import get_bundle_cache_path, run_pipeline
 
 logger = logging.getLogger("asset_updater")
 
@@ -88,22 +97,16 @@ async def do_download(
         return True
 
 
-async def main(
+async def _run_main(
     update_asset_bundle_info_only: bool = False,
     force_full_download: bool = False,
     mode: str = "assets",
+    extracted_dir_is_temporary: bool = False,
 ):
     cfg = require_config()
-    # Live2D extraction needs its motion bundles preserved for the global
-    # restore pass, including when it is enabled alongside the default assets
-    # mode. Charts use the normal extractor and only need post-processing.
-    cfg.UPDATER_MODE = (
-        "live2d"
-        if mode == "live2d"
-        or (mode == "assets" and getattr(cfg, "ENABLE_LIVE2D_POSTPROCESS", False))
-        else mode
-    )
+    cfg.UPDATER_MODE = mode
     start_time = time.monotonic()
+    automatic_prefixes = get_required_bundle_prefixes(mode, cfg)
 
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
     logger.info(
@@ -144,11 +147,11 @@ async def main(
         if not current_bundles:
             raise ValueError("bundles must be set in asset bundle info")
 
-        current_bundles = filter_bundles_for_mode(current_bundles, mode)
-        current_bundles = await filter_bundles(
-            current_bundles,
+        current_bundles = select_bundles_for_download(
+            filter_bundles_for_mode(current_bundles, mode),
             include_list=cfg.DL_INCLUDE_LIST,
             exclude_list=cfg.DL_EXCLUDE_LIST,
+            automatic_prefixes=automatic_prefixes,
         )
         if not current_bundles:
             raise ValueError("No bundles found after filtering")
@@ -174,6 +177,8 @@ async def main(
         logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
         return
 
+    # Charts consume extracted scores from local/normal remote storage and do
+    # not participate in the asset-bundle download pipeline at all.
     # Generate the download list from the latest version info
     logger.info("RUN | step=2/4 | action=build_download_list")
     # get_download_list applies the user filters and writes the metadata cache;
@@ -193,6 +198,8 @@ async def main(
         exclude_list=cfg.DL_EXCLUDE_LIST,
         priority_list=cfg.DL_PRIORITY_LIST,
         force_full_download=force_full_download,
+        automatic_prefixes=automatic_prefixes,
+        bundle_cache_path_resolver=lambda bundle: get_bundle_cache_path(cfg, bundle),
     )
     new_download_list = filter_download_items_for_mode(new_download_list, mode)
     logger.debug("New download candidates: %d item(s)", len(new_download_list))
@@ -218,7 +225,9 @@ async def main(
             item for item in new_download_list
             if item[1].get("bundleName") not in pending_bundle_names
         ]
-        download_list: List[DownloadItem] = pending_list + deduped_new
+        download_list: List[DownloadItem] = dedupe_download_items(
+            pending_list + deduped_new
+        )
         logger.info(
             "RUN | action=merge_download_list | pending=%d | new=%d | total=%d",
             len(pending_list),
@@ -234,7 +243,15 @@ async def main(
         download_list = new_download_list
 
     if not download_list:
-        logger.info("RUN | result=noop | reason=no_items")
+        logger.info("RUN | result=noop | reason=no_items | postprocess=true")
+        is_success = await do_download([], config=cfg, headers=headers, cookie=cookie)
+        if is_success:
+            for specialized_mode in get_enabled_specialized_modes(mode, cfg):
+                await run_specialized_postprocess(
+                    specialized_mode,
+                    cfg,
+                    extracted_dir_is_temporary=extracted_dir_is_temporary,
+                )
         logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
         return
 
@@ -251,7 +268,11 @@ async def main(
 
     if is_success:
         for specialized_mode in get_enabled_specialized_modes(mode, cfg):
-            await run_specialized_postprocess(specialized_mode, cfg)
+            await run_specialized_postprocess(
+                specialized_mode,
+                cfg,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
+            )
 
     # remove the cached download list
     if is_success and len(download_list) > 0:
@@ -262,6 +283,62 @@ async def main(
         )
 
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+
+
+async def main(
+    update_asset_bundle_info_only: bool = False,
+    force_full_download: bool = False,
+    mode: str = "assets",
+):
+    """Run the updater with only the specialized run-scoped storage it needs."""
+    cfg = require_config()
+    if not mode_uses_bundle_pipeline(mode):
+        if update_asset_bundle_info_only:
+            logger.info(
+                "RUN | result=noop | reason=metadata_only_not_applicable_to_charts"
+            )
+            return
+
+        needs_extracted_workspace = needs_shared_workspace(mode, cfg)
+        if not needs_extracted_workspace:
+            return await run_specialized_postprocess("charts", cfg)
+
+    needs_extracted_workspace = needs_shared_workspace(mode, cfg)
+    needs_live2d_cache = needs_live2d_bundle_cache(mode, cfg)
+    if not needs_extracted_workspace and not needs_live2d_cache:
+        return await _run_main(update_asset_bundle_info_only, force_full_download, mode)
+
+    original_extracted_dir = cfg.ASSET_LOCAL_EXTRACTED_DIR
+    original_live2d_dir = getattr(cfg, "LIVE2D_BUNDLE_CACHE_DIR", None)
+    needs_run_temp_root = needs_extracted_workspace or needs_live2d_cache
+    if not needs_run_temp_root:
+        await run_specialized_postprocess("charts", cfg)
+        return
+
+    with tempfile.TemporaryDirectory(prefix="sekai-assets-") as temp_dir:
+        from anyio import Path
+
+        root = Path(temp_dir)
+        if needs_live2d_cache:
+            cfg.LIVE2D_BUNDLE_CACHE_DIR = root / "live2d-bundle"
+        if needs_extracted_workspace:
+            cfg.ASSET_LOCAL_EXTRACTED_DIR = root / "extracted"
+        try:
+            if mode == "charts":
+                return await run_specialized_postprocess(
+                    "charts",
+                    cfg,
+                    extracted_dir_is_temporary=needs_extracted_workspace,
+                )
+            return await _run_main(
+                update_asset_bundle_info_only,
+                force_full_download,
+                mode,
+                extracted_dir_is_temporary=needs_extracted_workspace,
+            )
+        finally:
+            cfg.ASSET_LOCAL_EXTRACTED_DIR = original_extracted_dir
+            cfg.LIVE2D_BUNDLE_CACHE_DIR = original_live2d_dir
 
 
 def cli():

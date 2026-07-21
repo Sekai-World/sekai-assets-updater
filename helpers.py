@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import logging
 import os
 import re
@@ -317,6 +318,8 @@ async def get_download_list(
     exclude_list: List[str] | None = None,
     priority_list: List[str] | None = None,
     force_full_download: bool = False,
+    automatic_prefixes: tuple[str, ...] = (),
+    bundle_cache_path_resolver=None,
 ) -> List[Tuple[str, Dict]]:
     """Generate the download list for the asset bundles.
 
@@ -351,67 +354,64 @@ async def get_download_list(
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
     asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
-    current_bundles = await filter_bundles(
+    current_bundles = select_bundles_for_download(
         current_bundles,
         include_list=include_list,
         exclude_list=exclude_list,
+        automatic_prefixes=automatic_prefixes,
     )
     assert current_bundles, "No bundles found after filtering"
+    async def select_changed_bundles(cached_bundles: Dict[str, Dict]) -> list[Dict]:
+        changed_bundles = []
+        for bundle in current_bundles.values():
+            if bundle_has_changed(bundle, cached_bundles.get(bundle.get("bundleName", ""), {})):
+                changed_bundles.append(bundle)
+                continue
+            if bundle_cache_path_resolver is None:
+                continue
+            cache_path = bundle_cache_path_resolver(bundle)
+            if cache_path is None:
+                continue
+            exists = cache_path.exists()
+            if inspect.isawaitable(exists):
+                exists = await exists
+            if not exists:
+                changed_bundles.append(bundle)
+        return changed_bundles
+
     if cached_asset_bundle_info and cached_game_version_json:
+        if assetver and cached_game_version_json.get("assetver") != assetver:
+            game_version_json["assetver"] = assetver
+
+        cached_bundles: Dict[str, Dict] = (
+            cached_asset_bundle_info.get("bundles") or {}
+        )
+        changed_bundles = await select_changed_bundles(cached_bundles)
+
+        # Generate the download list from changed or missing bundles.
         if assetver:
-            cached_assetver = cached_game_version_json.get("assetver", None)
-            if cached_assetver != assetver:
-                game_version_json["assetver"] = assetver
-
-                cached_bundles: Dict[str, Dict] = (
-                    cached_asset_bundle_info.get("bundles") or {}
+            app_version: str = (
+                config.APP_VERSION_OVERRIDE
+                or game_version_json.get("appVersion")
+                or ""
+            )
+            assert app_version, (
+                "App version must be set in game version json or config"
+            )
+            download_list = [
+                (
+                    config.ASSET_BUNDLE_URL.format(
+                        appVersion=app_version,
+                        bundleName=bundle.get("bundleName"),
+                        downloadPath=bundle.get("downloadPath"),
+                    ),
+                    bundle,
                 )
-
-                changed_bundles = [
-                    bundle
-                    for bundle in current_bundles.values()
-                    if bundle_has_changed(
-                        bundle,
-                        cached_bundles.get(bundle.get("bundleName", ""), {}),
-                    )
-                ]
-
-                # Generate the download list from changed bundles
-                app_version: str = (
-                    config.APP_VERSION_OVERRIDE
-                    or game_version_json.get("appVersion")
-                    or ""
-                )
-                assert app_version, (
-                    "App version must be set in game version json or config"
-                )
-                download_list = [
-                    (
-                        config.ASSET_BUNDLE_URL.format(
-                            appVersion=app_version,
-                            bundleName=bundle.get("bundleName"),
-                            downloadPath=bundle.get("downloadPath"),
-                        ),
-                        bundle,
-                    )
-                    for bundle in changed_bundles
-                ]
+                for bundle in changed_bundles
+            ]
         else:
             # Colorful Palette servers
-            cached_bundles: Dict[str, Dict] = (
-                cached_asset_bundle_info.get("bundles") or {}
-            )
-
             # Compare each bundle checksum and include new bundles as well.
-            changed_bundles = [
-                bundle
-                for bundle in current_bundles.values()
-                if bundle_has_changed(
-                    bundle,
-                    cached_bundles.get(bundle.get("bundleName", ""), {}),
-                )
-            ]
-
             # Generate the download list from changed bundles
             asset_hash: str = game_version_json.get("assetHash", "")
             asset_bundle_url_args = {
@@ -468,6 +468,7 @@ async def get_download_list(
         ]
 
     if download_list:
+        download_list = dedupe_download_items(download_list)
         download_list = await sort_download_list(
             download_list,
             priority_list=priority_list,
@@ -517,10 +518,49 @@ async def filter_bundles(
     return bundles
 
 
+def select_bundles_for_download(
+    bundles: Dict[str, Dict],
+    include_list: List[str] | None = None,
+    exclude_list: List[str] | None = None,
+    automatic_prefixes: tuple[str, ...] = (),
+) -> Dict[str, Dict]:
+    """Select user bundles and merge mandatory specialized bundles.
+
+    Bundles matching ``automatic_prefixes`` bypass the user include/exclude
+    filters. Bundle names are de-duplicated while preserving source order.
+    """
+    selected: Dict[str, Dict] = {}
+    selected_names: set[str] = set()
+    for key, value in bundles.items():
+        bundle_name = value.get("bundleName") or ""
+        user_selected = (
+            (not include_list or any(re.match(pattern, bundle_name) for pattern in include_list))
+            and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
+        )
+        automatic_selected = bundle_name.startswith(automatic_prefixes)
+        if (user_selected or automatic_selected) and bundle_name not in selected_names:
+            selected[key] = value
+            selected_names.add(bundle_name)
+    return selected
+
+
+def dedupe_download_items(items: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict]]:
+    """Remove duplicate download entries by bundle name, preserving order."""
+    result: List[Tuple[str, Dict]] = []
+    seen_names: set[str] = set()
+    for item in items:
+        bundle_name = item[1].get("bundleName") or ""
+        if bundle_name in seen_names:
+            continue
+        seen_names.add(bundle_name)
+        result.append(item)
+    return result
+
+
 MODE_BUNDLE_PREFIXES = {
     "assets": (),
     "live2d": ("live2d/",),
-    "charts": ("music/music_score/",),
+    "charts": (),
 }
 
 

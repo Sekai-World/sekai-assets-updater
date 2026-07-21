@@ -86,6 +86,9 @@ DL_PRIORITY_LIST = None  # Example: [r"^music/.*", r"^character/member.*"]
 # Local asset directories
 ASSET_LOCAL_EXTRACTED_DIR = None  # Example: Path("cache", "jp", "extracted")
 ASSET_LOCAL_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "bundle")
+# Live2D bundles use this separate cache root. If None, they use a run-scoped
+# temporary cache that lasts through Live2D post-processing and upload only.
+LIVE2D_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "live2d-bundle")
 
 # Normal asset remote storage settings
 ASSET_REMOTE_STORAGE = [
@@ -101,5 +104,7 @@ ASSET_REMOTE_STORAGE = [
 # live2d/charts always runs its corresponding post-processor.
 ENABLE_LIVE2D_POSTPROCESS = False
 ENABLE_CHARTS_POSTPROCESS = False
+# Charts use local music/music_score/*.txt files first, then fall back to the
+# normal extracted-asset mirrors listed in ASSET_REMOTE_STORAGE.
 LIVE2D_REMOTE_STORAGE = []
 CHARTS_REMOTE_STORAGE = []

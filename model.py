@@ -46,6 +46,9 @@ class ConfigLike(Protocol):
     DL_INCLUDE_LIST: Optional[List[str]]
     DL_EXCLUDE_LIST: Optional[List[str]]
     DL_PRIORITY_LIST: Optional[List[str]]
+    ASSET_LOCAL_EXTRACTED_DIR: Optional[Path]
+    ASSET_LOCAL_BUNDLE_CACHE_DIR: Optional[Path]
+    LIVE2D_BUNDLE_CACHE_DIR: Optional[Path]
 
 
 class SekaiServerRegion(Enum):
