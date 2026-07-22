@@ -17,6 +17,8 @@ import aiohttp
 import orjson as json
 from anyio import Path, open_file
 
+from security import derive_remote_key, validate_contained_file
+
 logger = logging.getLogger("asset_updater")
 
 DEFAULT_REQUEST_TIMEOUT = 30 * 60
@@ -588,6 +590,26 @@ def get_cookie_expire_time(cookie_header: str) -> int | None:
     )
 
 
+def _derive_storage_remote_path(remote_base: str, relative_key: str) -> str:
+    """Append one validated object key to an opaque configured storage target.
+
+    ``remote_base`` is an rclone destination, not a local filesystem path.  It
+    is therefore deliberately preserved byte-for-byte (apart from choosing the
+    separator when it has no trailing slash), which supports named remotes,
+    local absolute-path remotes, and on-the-fly remote syntax.  Only
+    ``relative_key`` is parsed and validated; it must be a normalized POSIX
+    path relative to the extraction root.
+    """
+    if not isinstance(remote_base, str):
+        raise TypeError("remote_base must be a text storage target")
+    if "\x00" in remote_base:
+        raise ValueError("remote_base contains a NUL byte")
+
+    remote_key = derive_remote_key(relative_key)
+    separator = "" if remote_base.endswith("/") else "/"
+    return f"{remote_base}{separator}{remote_key}"
+
+
 async def refresh_cookie(
     config,
     headers: Dict[str, str],
@@ -648,19 +670,27 @@ async def upload_to_storage(
 ):
     """Upload the extracted assets to remote storage with concurrency"""
 
+    root_path = os.path.abspath(os.fspath(extracted_save_path))
+    validated_uploads: list[tuple[object, str]] = []
+    for file_path in exported_list:
+        source_path = os.path.abspath(os.fspath(file_path))
+        relative_path = os.path.relpath(source_path, root_path)
+        relative_key = relative_path.replace(os.sep, "/")
+        validated_path = validate_contained_file(root_path, relative_key)
+        validated_uploads.append(
+            (validated_path, _derive_storage_remote_path(remote_base, relative_key))
+        )
+
     semaphore = asyncio.Semaphore(max_concurrent_uploads)
 
-    async def upload_file(file_path: Path):
+    async def upload_file(file_path: object, remote_path: str):
         """Upload a single file to remote storage"""
         async with semaphore:
-            # Construct the remote path
-            remote_path = Path(remote_base) / file_path.relative_to(extracted_save_path)
-
             # Construct the upload command
             program: str = upload_program
             args: list[str] = upload_args[:]
             args[args.index("src")] = str(file_path)
-            args[args.index("dst")] = str(remote_path)
+            args[args.index("dst")] = remote_path
             logger.debug(
                 "Uploading %s to %s using command: %s %s",
                 file_path,
@@ -682,7 +712,7 @@ async def upload_to_storage(
 
     # Run uploads concurrently and fail the worker if any upload fails.
     results = await asyncio.gather(
-        *(upload_file(file_path) for file_path in exported_list),
+        *(upload_file(file_path, remote_path) for file_path, remote_path in validated_uploads),
         return_exceptions=True,
     )
     errors = [result for result in results if isinstance(result, Exception)]

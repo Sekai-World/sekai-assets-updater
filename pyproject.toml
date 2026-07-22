@@ -25,7 +25,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["."]
-python_files = ["test_*.py"]
+python_files = ["test_*.py", "*_test.py"]
 addopts = ["--ignore=test_download_extract.py"]
 
 [tool.ruff]

@@ -28,7 +28,8 @@ def test_download_fixture_serves_and_deobfuscates_a_bundle(
     asyncio.run(
         bundle.download_deobfuscate_bundle(
             f"{server.url}/bundle",
-            output_path,
+            temp_dir,
+            "bundle",
             headers={},
             config=type("Config", (), {"DOWNLOAD_MAX_RETRIES": 1})(),
         )

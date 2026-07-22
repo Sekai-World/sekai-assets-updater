@@ -15,6 +15,7 @@ from helpers import (
     refresh_cookie,
     upload_to_storage,
 )
+from security import prepare_secure_directory, resolve_secure_path
 
 logger = logging.getLogger("asset_updater")
 
@@ -174,6 +175,8 @@ async def _download_stage(
             bundle_save_path: Union[Path, None] = None
             tmp_bundle_save_file = None
             remove_bundle_after_extract = False
+            download_root: Path | None = None
+            download_relative_path: str | None = None
 
             try:
                 if worker_cookie:
@@ -184,33 +187,51 @@ async def _download_stage(
                     )
 
                 if isinstance(config.ASSET_LOCAL_BUNDLE_CACHE_DIR, Path):
-                    bundle_save_path = (
-                        config.ASSET_LOCAL_BUNDLE_CACHE_DIR / bundle["bundleName"]
+                    bundle_cache_root = Path(
+                        prepare_secure_directory(config.ASSET_LOCAL_BUNDLE_CACHE_DIR).as_posix()
                     )
-                    await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    bundle_save_path = Path(
+                        resolve_secure_path(
+                            bundle_cache_root,
+                            bundle["bundleName"],
+                        ).as_posix()
+                    )
+                    bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    download_root = bundle_cache_root
+                    download_relative_path = bundle_save_path.relative_to(
+                        bundle_cache_root
+                    ).as_posix()
                 else:
                     tmp_bundle_save_file = tempfile.NamedTemporaryFile(delete=False)
                     bundle_save_path = Path(tmp_bundle_save_file.name)
                     tmp_bundle_save_file.close()
                     tmp_bundle_save_file = None
                     remove_bundle_after_extract = True
+                    download_root = bundle_save_path.parent
+                    download_relative_path = bundle_save_path.name
 
                 if download_disk_space_gate is not None:
+                    assert download_root is not None
+                    assert download_relative_path is not None
                     async with download_disk_space_gate.reserve(
                         required_download_bytes,
                         label,
                     ):
                         await download_deobfuscate_bundle(
                             url,
-                            bundle_save_path,
+                            download_root,
+                            download_relative_path,
                             headers=worker_headers,
                             config=config,
                             session=session,
                         )
                 else:
+                    assert download_root is not None
+                    assert download_relative_path is not None
                     await download_deobfuscate_bundle(
                         url,
-                        bundle_save_path,
+                        download_root,
+                        download_relative_path,
                         headers=worker_headers,
                         config=config,
                         session=session,
@@ -269,7 +290,9 @@ async def _extract_stage(
             try:
                 if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
                     extracted_save_path = config.ASSET_LOCAL_EXTRACTED_DIR
-                    await extracted_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    extracted_save_path = Path(
+                        prepare_secure_directory(extracted_save_path).as_posix()
+                    )
                     remove_extracted_after_upload = False
                 else:
                     tmp_extracted_save_dir = tempfile.TemporaryDirectory(delete=False)

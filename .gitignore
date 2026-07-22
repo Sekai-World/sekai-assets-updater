@@ -182,6 +182,7 @@ test*.py
 !tests/test_phase0_support.py
 .omo/
 .tools/
+.slim/deepwork/
 
 # General
 .DS_Store
