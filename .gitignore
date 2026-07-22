@@ -179,6 +179,7 @@ config*.py
 cache/
 test*.py
 !test_audio_pipeline.py
+!tests/test_phase0_support.py
 .omo/
 .tools/
 

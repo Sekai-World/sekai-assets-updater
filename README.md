@@ -122,6 +122,18 @@ uv run python main.py -c config.py --force-full-download
 
 If downloads are blocked by low free disk space, the updater logs a warning and retries after `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL` seconds.
 
+## Tests
+
+Run the test suite with uv, including the development dependencies:
+
+```bash
+uv run --group dev pytest
+```
+
+Tests are discovered from the project root using the `test_*.py` pattern. The
+single-bundle debugging script, `test_download_extract.py`, is excluded from
+the test run.
+
 ## Resume Behavior
 
 If `DL_LIST_CACHE_PATH` exists, `main.py` will load it and resume from that cached download list instead of rebuilding the list.
