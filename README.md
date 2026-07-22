@@ -81,9 +81,9 @@ Storage:
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
 - `ASSET_LOCAL_BUNDLE_CACHE_DIR`: keep downloaded bundles locally; if `None`, use a temp file
 - `LIVE2D_BUNDLE_CACHE_DIR`: separate persistent cache for `live2d/` bundles; if `None`, use a run-scoped temporary cache only while Live2D post-processing runs
-- `ASSET_REMOTE_STORAGE`: upload extracted files after processing; set to `[]` to disable uploads
+- `ASSET_REMOTE_STORAGE`: upload targets after processing; set to `[]` to disable uploads. Each target uses `type` to select its pipeline: `normal` for extracted assets, `live2d` for Live2D output, or `charts` for rendered charts.
 - `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
-- `LIVE2D_REMOTE_STORAGE` and `CHARTS_REMOTE_STORAGE` are independent `{base, program, args}` target lists. Multiple targets upload sequentially after successful processing.
+- Multiple targets of each `ASSET_REMOTE_STORAGE` type upload sequentially after successful processing.
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
 - Charts never download or cache asset bundles. They use existing `music/music_score/*.txt` files first; when absent, they copy `music/music_score/` from the first successful `type == "normal"` target in `ASSET_REMOTE_STORAGE`, using that target's program and args. If `ASSET_LOCAL_EXTRACTED_DIR` is persistent, the fallback uses a separate temporary workspace and cannot pollute it. If it is unset, the existing run-scoped extracted workspace is reused and cleaned after processing. Ordinary assets retain their existing temporary-file semantics.

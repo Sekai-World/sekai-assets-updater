@@ -90,7 +90,8 @@ ASSET_LOCAL_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "bundle")
 # temporary cache that lasts through Live2D post-processing and upload only.
 LIVE2D_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "live2d-bundle")
 
-# Normal asset remote storage settings
+# Asset remote storage settings. Each target's type controls which pipeline
+# uploads to it: normal assets, Live2D post-processing, or charts.
 ASSET_REMOTE_STORAGE = [
     {
         "type": "normal",
@@ -104,7 +105,3 @@ ASSET_REMOTE_STORAGE = [
 # live2d/charts always runs its corresponding post-processor.
 ENABLE_LIVE2D_POSTPROCESS = False
 ENABLE_CHARTS_POSTPROCESS = False
-# Charts use local music/music_score/*.txt files first, then fall back to the
-# normal extracted-asset mirrors listed in ASSET_REMOTE_STORAGE.
-LIVE2D_REMOTE_STORAGE = []
-CHARTS_REMOTE_STORAGE = []

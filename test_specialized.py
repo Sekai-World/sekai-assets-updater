@@ -26,11 +26,9 @@ class SpecializedHelpersTest(unittest.TestCase):
         return SimpleNamespace(
             ENABLE_LIVE2D_POSTPROCESS=False,
             ENABLE_CHARTS_POSTPROCESS=False,
-            LIVE2D_REMOTE_STORAGE=[
-                {"base": "live", "program": "rclone", "args": ["copy", "src", "dst"]}
-            ],
-            CHARTS_REMOTE_STORAGE=[
-                {"base": "charts", "program": "rclone", "args": ["copy", "src", "dst"]}
+            ASSET_REMOTE_STORAGE=[
+                {"type": "live2d", "base": "live", "program": "rclone", "args": ["copy", "src", "dst"]},
+                {"type": "charts", "base": "charts", "program": "rclone", "args": ["copy", "src", "dst"]},
             ],
             ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
             ASSET_LOCAL_EXTRACTED_DIR=None,
@@ -82,9 +80,13 @@ class SpecializedHelpersTest(unittest.TestCase):
 
     def test_specialized_storage_is_independent_from_normal_storage(self):
         config = self.config()
-        config.ASSET_REMOTE_STORAGE = [{"type": "live2d"}]
-        self.assertEqual(get_specialized_storage(config, "live2d"), config.LIVE2D_REMOTE_STORAGE)
-        self.assertEqual(get_specialized_storage(config, "charts"), config.CHARTS_REMOTE_STORAGE)
+        config.ASSET_REMOTE_STORAGE = [
+            {"type": "normal", "base": "normal"},
+            {"type": "live2d", "base": "live"},
+            {"type": "charts", "base": "charts"},
+        ]
+        self.assertEqual(get_specialized_storage(config, "live2d"), [config.ASSET_REMOTE_STORAGE[1]])
+        self.assertEqual(get_specialized_storage(config, "charts"), [config.ASSET_REMOTE_STORAGE[2]])
 
     def test_specialized_mode_prefixes_are_mandatory(self):
         bundles = {

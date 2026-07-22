@@ -65,10 +65,14 @@ def needs_live2d_bundle_cache(mode: str, config) -> bool:
 
 
 def get_specialized_storage(config, mode: str) -> list[dict]:
-    """Read the independent upload targets for a specialized mode."""
+    """Return asset storage targets configured for a specialized mode."""
     if mode not in SPECIALIZED_MODES:
         raise ValueError(f"Unsupported specialized mode: {mode}")
-    return list(getattr(config, f"{mode.upper()}_REMOTE_STORAGE", None) or [])
+    return [
+        storage
+        for storage in (getattr(config, "ASSET_REMOTE_STORAGE", None) or [])
+        if storage.get("type") == mode
+    ]
 
 
 def get_normal_storage_candidates(config) -> list[dict]:
