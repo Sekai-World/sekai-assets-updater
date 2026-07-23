@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
@@ -18,6 +19,11 @@ import orjson as json
 from anyio import Path, open_file
 
 from security import derive_remote_key, validate_contained_file
+from state import (
+    StateNotFoundError,
+    load_asset_metadata,
+    load_game_version,
+)
 
 logger = logging.getLogger("asset_updater")
 
@@ -25,6 +31,15 @@ DEFAULT_REQUEST_TIMEOUT = 30 * 60
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
 DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
+
+
+@dataclass(frozen=True)
+class DownloadPlan:
+    """In-memory selection result; construction performs no persistence."""
+
+    candidates: List[Tuple[str, Dict]]
+    asset_metadata: Dict
+    game_version: Dict
 
 
 class LocalQueueHandler(QueueHandler):
@@ -319,7 +334,7 @@ async def get_download_list(
     exclude_list: List[str] | None = None,
     priority_list: List[str] | None = None,
     force_full_download: bool = False,
-) -> List[Tuple[str, Dict]]:
+) -> DownloadPlan:
     """Generate the download list for the asset bundles.
 
     Args:
@@ -342,12 +357,19 @@ async def get_download_list(
     assert config.GAME_VERSION_JSON_CACHE_PATH, (
         "GAME_VERSION_JSON_CACHE_PATH must be set in config"
     )
-    if (not force_full_download) and await config.ASSET_BUNDLE_INFO_CACHE_PATH.exists():
-        async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH) as f:
-            cached_asset_bundle_info = json.loads(await f.read())
-    if (not force_full_download) and await config.GAME_VERSION_JSON_CACHE_PATH.exists():
-        async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH) as f:
-            cached_game_version_json = json.loads(await f.read())
+    if not force_full_download:
+        try:
+            cached_asset_bundle_info = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
+        except StateNotFoundError:
+            pass
+        try:
+            cached_game_version_json = load_game_version(config.GAME_VERSION_JSON_CACHE_PATH)
+        except StateNotFoundError:
+            pass
+
+    if assetver is not None:
+        game_version_json = dict(game_version_json)
+        game_version_json["assetver"] = assetver
 
     download_list = []
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
@@ -363,8 +385,6 @@ async def get_download_list(
         if assetver:
             cached_assetver = cached_game_version_json.get("assetver", None)
             if cached_assetver != assetver:
-                game_version_json["assetver"] = assetver
-
                 cached_bundles: Dict[str, Dict] = (
                     cached_asset_bundle_info.get("bundles") or {}
                 )
@@ -438,9 +458,6 @@ async def get_download_list(
             ]
 
     else:
-        if assetver:
-            game_version_json["assetver"] = assetver
-
         # Get the download list for a full download
         asset_hash: str = game_version_json.get("assetHash", "")
         app_version: str = getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
@@ -475,19 +492,12 @@ async def get_download_list(
             priority_list=priority_list,
         )
 
-    # Cache the asset bundle info
-    async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
-        await f.write(json.dumps({
-            "version": asset_bundle_info.get("version", ""),
-            "os": asset_bundle_info.get("os", ""),
-            "bundles": current_bundles
-        }, option=json.OPT_INDENT_2))
-
-    # Cache the game version json
-    async with await open_file(config.GAME_VERSION_JSON_CACHE_PATH, "wb") as f:
-        await f.write(json.dumps(game_version_json, option=json.OPT_INDENT_2))
-
-    return download_list
+    normalized_metadata = {
+        "version": asset_bundle_info.get("version", ""),
+        "os": asset_bundle_info.get("os", ""),
+        "bundles": current_bundles,
+    }
+    return DownloadPlan(download_list, normalized_metadata, game_version_json)
 
 
 async def filter_bundles(

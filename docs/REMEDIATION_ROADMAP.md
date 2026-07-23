@@ -85,6 +85,8 @@ This roadmap records the remediation work identified by the July 2026 project re
 
 **Priority:** P1
 
+**Status:** Complete (2026-07-23)
+
 ### Risks addressed
 
 - Metadata may be committed before `dl_list.json`, allowing a crash to silently skip downloads.
