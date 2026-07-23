@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import tempfile
 import uuid
@@ -15,7 +16,7 @@ from helpers import (
     refresh_cookie,
     upload_to_storage,
 )
-from security import prepare_secure_directory, resolve_secure_path
+from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 
 logger = logging.getLogger("asset_updater")
 
@@ -88,6 +89,28 @@ def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _bundle_staging_identity(bundle_name: Any) -> str:
+    """Return a deterministic, filesystem-safe identity for a bundle name."""
+
+    if not isinstance(bundle_name, str) or not bundle_name:
+        raise ValueError("bundleName must be a non-empty string")
+    digest = hashlib.sha256(bundle_name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"bundle-{digest[:24]}"
+
+
+def _validate_artifact_outputs(extracted_root: Path, exported_paths: List[Path]) -> List[Path]:
+    """Ensure extraction output is contained regular files for this artifact."""
+
+    root = extracted_root
+    root_std = __import__("pathlib").Path(root.as_posix()).resolve()
+    validated: List[Path] = []
+    for path in exported_paths:
+        candidate = __import__("pathlib").Path(path.as_posix())
+        relative_path = candidate.resolve().relative_to(root_std).as_posix()
+        validated.append(Path(validate_contained_file(root_std, relative_path).as_posix()))
+    return validated
 
 
 async def _cleanup_artifact(
@@ -287,11 +310,30 @@ async def _extract_stage(
                 label,
             )
 
+            upload_succeeded = False
             try:
+                bundle_cache_root = None
+                configured_bundle_cache_root = getattr(
+                    config,
+                    "ASSET_LOCAL_BUNDLE_CACHE_DIR",
+                    None,
+                )
+                if isinstance(configured_bundle_cache_root, Path):
+                    bundle_cache_root = Path(
+                        prepare_secure_directory(
+                            configured_bundle_cache_root
+                        ).as_posix()
+                    )
+
                 if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
-                    extracted_save_path = config.ASSET_LOCAL_EXTRACTED_DIR
+                    configured_root = Path(
+                        prepare_secure_directory(config.ASSET_LOCAL_EXTRACTED_DIR).as_posix()
+                    )
+                    identity_root = configured_root / _bundle_staging_identity(
+                        artifact.bundle.get("bundleName")
+                    )
                     extracted_save_path = Path(
-                        prepare_secure_directory(extracted_save_path).as_posix()
+                        prepare_secure_directory(identity_root / uuid.uuid4().hex).as_posix()
                     )
                     remove_extracted_after_upload = False
                 else:
@@ -302,12 +344,17 @@ async def _extract_stage(
 
                 artifact.extracted_save_path = extracted_save_path
                 artifact.remove_extracted_after_upload = remove_extracted_after_upload
-                artifact.exported_list = await extract_asset_bundle(
+                extracted_outputs = await extract_asset_bundle(
                     artifact.bundle_save_path,
                     artifact.bundle,
                     extracted_save_path,
                     unity_version=config.UNITY_VERSION,
                     config=config,
+                    bundle_cache_root=bundle_cache_root,
+                )
+                artifact.exported_list = _validate_artifact_outputs(
+                    extracted_save_path,
+                    extracted_outputs,
                 )
                 logger.debug(
                     "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
@@ -326,12 +373,13 @@ async def _extract_stage(
                     name,
                     label,
                 )
+                upload_succeeded = True
                 async with failed_lock:
                     failed_tasks.append((artifact.url, artifact.bundle))
                 await _cleanup_artifact(
                     artifact,
                     remove_bundle=True,
-                    remove_extracted=True,
+                    remove_extracted=upload_succeeded,
                 )
         finally:
             extract_queue.task_done()
@@ -360,6 +408,7 @@ async def _upload_stage(
                 label,
             )
 
+            upload_succeeded = False
             try:
                 if config.ASSET_REMOTE_STORAGE:
                     if artifact.extracted_save_path is None:
@@ -381,6 +430,7 @@ async def _upload_stage(
                     name,
                     label,
                 )
+                upload_succeeded = True
             except Exception:
                 logger.exception(
                     "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
@@ -394,7 +444,7 @@ async def _upload_stage(
                 await _cleanup_artifact(
                     artifact,
                     remove_bundle=True,
-                    remove_extracted=True,
+                    remove_extracted=upload_succeeded,
                 )
         finally:
             upload_queue.task_done()

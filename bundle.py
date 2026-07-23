@@ -1117,7 +1117,10 @@ def _resolve_shared_audio_outputs_sync(
         f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
     }
     return [
-        path
+        validate_contained_file(
+            output_root,
+            path.relative_to(output_root).as_posix(),
+        )
         for path in output_root.rglob("*")
         if (
             path.is_file()
@@ -1154,18 +1157,36 @@ def _extract_acb_from_cached_bundles_sync(
     acb_textasset_filename: str,
     acb_output_path: StdPath,
     unity_version: str | None,
+    bundle_cache_root: StdPath | None = None,
 ) -> bool:
-    bundle_cache_root = bundle_save_path
-    for _ in bundle_save_path.parts:
-        if bundle_cache_root.name == "bundle":
-            break
-        if bundle_cache_root.parent == bundle_cache_root:
-            return False
-        bundle_cache_root = bundle_cache_root.parent
+    if bundle_cache_root is None:
+        return False
+
+    bundle_cache_root = _canonical_root(bundle_cache_root)
+    if not bundle_cache_root.is_dir():
+        return False
+    bundle_path = _canonical_root(bundle_save_path)
+    output_root = _canonical_root(acb_output_path.parent)
+    validate_output_target(output_root, acb_output_path)
 
     expected_textasset_name = acb_textasset_filename.lower()
     for cached_bundle_path in bundle_cache_root.rglob("*"):
-        if not cached_bundle_path.is_file() or cached_bundle_path == bundle_save_path:
+        try:
+            cached_bundle_path.resolve().relative_to(output_root)
+        except ValueError:
+            pass
+        else:
+            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
+            continue
+        try:
+            cached_bundle_path = validate_contained_file(
+                bundle_cache_root,
+                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
+            )
+        except (FileNotFoundError, ValueError, SecurityError):
+            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
+            continue
+        if cached_bundle_path.resolve() == bundle_path:
             continue
 
         try:
@@ -1261,6 +1282,7 @@ def _extract_bundle_files_sync(
     extracted_save_path: str,
     unity_version: str | None,
     texture_output_formats: tuple[str, ...],
+    bundle_cache_root: str | None = None,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
     UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
 
@@ -1422,6 +1444,7 @@ def _extract_bundle_files_sync(
                         acb_textasset_filename,
                         acb_output_path,
                         unity_version,
+                        StdPath(bundle_cache_root) if bundle_cache_root else None,
                     ):
                         pass
                     else:
@@ -1556,23 +1579,25 @@ def _extract_bundle_files_sync(
                     )
                     cue_name = acb_cue_sheet_name if acb_cue_sheet_name != acb_asset_name else None
                     acb_stage_dir = StdPath(tempfile.mkdtemp(prefix=".acb-", dir=save_dir))
-                    staged_acb = acb_stage_dir / acb_output_path.name
-                    staged_acb.write_bytes(acb_data)
-                    extracted_audio_files = extract_acb(
-                        BytesIO(acb_data),
-                        acb_stage_dir.as_posix(),
-                        staged_acb.as_posix(),
-                        cue_name,
-                    )
-
                     promoted_audio = []
-                    for extracted_audio_file in extracted_audio_files:
-                        produced = secure_existing_output(acb_stage_dir, extracted_audio_file)
-                        final_audio = _resolve_generated_child_path(save_dir, produced.name)
-                        validate_output_target(save_dir, final_audio)
-                        os.replace(produced, final_audio)
-                        promoted_audio.append(final_audio.as_posix())
-                    shutil.rmtree(acb_stage_dir, ignore_errors=True)
+                    try:
+                        staged_acb = acb_stage_dir / acb_output_path.name
+                        staged_acb.write_bytes(acb_data)
+                        extracted_audio_files = extract_acb(
+                            BytesIO(acb_data),
+                            acb_stage_dir.as_posix(),
+                            staged_acb.as_posix(),
+                            cue_name,
+                        )
+
+                        for extracted_audio_file in extracted_audio_files:
+                            produced = secure_existing_output(acb_stage_dir, extracted_audio_file)
+                            final_audio = _resolve_generated_child_path(save_dir, produced.name)
+                            validate_output_target(save_dir, final_audio)
+                            os.replace(produced, final_audio)
+                            promoted_audio.append(final_audio.as_posix())
+                    finally:
+                        shutil.rmtree(acb_stage_dir, ignore_errors=True)
 
                 acb_output_path.unlink()
                 logger.debug("Removed %s", acb_output_path)
@@ -1637,8 +1662,15 @@ def _extract_bundle_files_sync(
         if usm_output_path.exists():
             video_jobs.append(usm_output_path.as_posix())
 
+    validated_exported_files = [
+        validate_contained_file(
+            output_root,
+            path.relative_to(output_root).as_posix(),
+        )
+        for path in exported_files
+    ]
     return (
-        [path.as_posix() for path in exported_files],
+        [path.as_posix() for path in validated_exported_files],
         audio_jobs,
         video_jobs,
     )
@@ -1741,6 +1773,7 @@ async def extract_asset_bundle(
     extracted_save_path: Path,
     unity_version: str = None,
     config=None,
+    bundle_cache_root: Path | None = None,
 ) -> List[Path]:
     """Extract the asset bundle to the specified directory."""
     loop = asyncio.get_running_loop()
@@ -1752,6 +1785,12 @@ async def extract_asset_bundle(
         extracted_save_path.as_posix(),
         unity_version,
         _get_texture_output_formats(config),
+        (
+            bundle_cache_root.as_posix()
+            if bundle_cache_root is not None
+            else getattr(config, "ASSET_LOCAL_BUNDLE_CACHE_DIR", None)
+            and Path(getattr(config, "ASSET_LOCAL_BUNDLE_CACHE_DIR")).as_posix()
+        ),
     )
 
     exported_files: List[Path] = [Path(path) for path in exported_paths]
@@ -1772,14 +1811,40 @@ async def extract_asset_bundle(
         ]
         audio_results = await asyncio.gather(*audio_tasks)
         for audio_files in audio_results:
-            exported_files.extend(audio_files)
+            for audio_file in audio_files:
+                exported_files.append(
+                    Path(
+                        validate_contained_file(
+                            StdPath(extracted_save_path.as_posix()),
+                            StdPath(audio_file.as_posix())
+                            .relative_to(StdPath(extracted_save_path.as_posix()))
+                            .as_posix(),
+                        ).as_posix()
+                    )
+                )
 
     for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
-        exported_files.extend(video_files)
+        for video_file in video_files:
+            exported_files.append(
+                Path(
+                    validate_contained_file(
+                        StdPath(extracted_save_path.as_posix()),
+                        StdPath(video_file.as_posix())
+                        .relative_to(StdPath(extracted_save_path.as_posix()))
+                        .as_posix(),
+                    ).as_posix()
+                )
+            )
         for discarded_file in discarded_files:
             _discard_exported_file(exported_files, discarded_file)
 
     for file in exported_files[:]:
+        validate_contained_file(
+            StdPath(extracted_save_path.as_posix()),
+            StdPath(file.as_posix())
+            .relative_to(StdPath(extracted_save_path.as_posix()))
+            .as_posix(),
+        )
         if file.suffix in [".bytes", ".acb", ".usm"]:
             await file.unlink()
             logger.debug("Removed %s in cleanup stage", file)
