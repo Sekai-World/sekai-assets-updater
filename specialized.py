@@ -9,6 +9,7 @@ import orjson as json
 from anyio import Path
 
 from helpers import upload_directory
+from helpers import get_request_timeout
 from utils.chart import get_json_url, get_list, render_chart
 from utils.live2d import restore_live2d_motions
 
@@ -19,6 +20,8 @@ SPECIALIZED_BUNDLE_PREFIXES = {
     "live2d": ("live2d/",),
     "charts": (),
 }
+CHART_SOURCE_CONCURRENCY = 4
+CHART_SOURCE_TERMINATE_TIMEOUT = 5
 
 
 def mode_uses_bundle_pipeline(mode: str) -> bool:
@@ -140,7 +143,29 @@ async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> No
             process = await asyncio.create_subprocess_exec(
                 storage["program"], *args
             )
-            await process.wait()
+            timeout = get_request_timeout(config).total
+            try:
+                await asyncio.wait_for(process.wait(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                logger.warning(
+                    "Timed out loading chart sources from normal storage %s",
+                    storage.get("base", "<unknown>"),
+                )
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(
+                        process.wait(), timeout=CHART_SOURCE_TERMINATE_TIMEOUT
+                    )
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+                raise RuntimeError("command timed out") from exc
             if process.returncode != 0:
                 raise RuntimeError(
                     f"command exited with status {process.returncode}"
@@ -165,7 +190,7 @@ def music_id_from_score_path(score_path: StdPath) -> int:
     return int(score_path.parent.name.split("_", 1)[0])
 
 
-async def _render_charts(config, extracted_dir: Path) -> None:
+async def _render_charts(config, extracted_dir: StdPath) -> None:
     score_files = collect_score_files(extracted_dir)
     if not score_files:
         logger.info("No music score TextAssets found")
@@ -174,22 +199,31 @@ async def _render_charts(config, extracted_dir: Path) -> None:
     music_info = await get_list(get_json_url(_region_name(config), "musics"))
     music_by_id = {music["id"]: music for music in music_info}
     region = _region_name(config)
-    for score_file in score_files:
-        music_id = music_id_from_score_path(score_file)
+    semaphore = asyncio.Semaphore(CHART_SOURCE_CONCURRENCY)
+
+    async def render_score(score_file: StdPath) -> None:
+        try:
+            music_id = music_id_from_score_path(score_file)
+        except ValueError:
+            logger.warning("Skipping chart %s: invalid music id", score_file)
+            return
         music = music_by_id.get(music_id)
         if music is None:
             logger.warning("Skipping chart %s: music id %s is not in musics.json", score_file, music_id)
-            continue
+            return
         padded_id = str(music_id).zfill(3)
         chart_path = extracted_dir / "charts" / region / str(music_id) / f"{score_file.stem}.svg"
         chart_path.parent.mkdir(parents=True, exist_ok=True)
-        await render_chart(
-            score_file.as_posix(),
-            chart_path.as_posix(),
-            music,
-            f"https://storage.sekai.best/sekai-{region}-assets/music/jacket/jacket_s_{padded_id}/jacket_s_{padded_id}.png",
-        )
+        async with semaphore:
+            await render_chart(
+                score_file.as_posix(),
+                chart_path.as_posix(),
+                music,
+                f"https://storage.sekai.best/sekai-{region}-assets/music/jacket/jacket_s_{padded_id}/jacket_s_{padded_id}.png",
+            )
         logger.info("Rendered chart for %s to %s", score_file, chart_path)
+
+    await asyncio.gather(*(render_score(score_file) for score_file in score_files))
 
 
 async def run_specialized_postprocess(

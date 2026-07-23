@@ -13,6 +13,7 @@ from helpers import (
     ensure_dir_exists,
     filter_bundles_for_mode,
     filter_download_items_for_mode,
+    get_mode_bundle_prefixes,
     get_download_list,
     dedupe_download_items,
     select_bundles_for_download,
@@ -35,6 +36,20 @@ DownloadItem = Tuple[str, Dict[str, Any]]
 
 
 config: Optional[ConfigLike] = None
+
+
+def _pending_items_outside_mode(
+    items: List[DownloadItem], mode: str
+) -> List[DownloadItem]:
+    """Keep pending entries for other bundle namespaces when rewriting the cache."""
+    prefixes = get_mode_bundle_prefixes(mode)
+    if not prefixes:
+        return []
+    return [
+        item
+        for item in items
+        if not (item[1].get("bundleName") or "").startswith(prefixes)
+    ]
 
 
 def require_config() -> ConfigLike:
@@ -207,15 +222,19 @@ async def _run_main(
     # If there are pending items from a previous interrupted run, merge them:
     # existing pending items come first so they are retried, new items follow.
     # Items that already appear in the pending list are not duplicated.
+    cached_pending_list: List[DownloadItem] = []
     pending_list: List[DownloadItem] = []
     if (not force_full_download) and await cfg.DL_LIST_CACHE_PATH.exists():
         async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-            pending_list = filter_download_items_for_mode(json.loads(await f.read()), mode)
+            cached_pending_list = json.loads(await f.read())
+            pending_list = filter_download_items_for_mode(cached_pending_list, mode)
         logger.info(
             "RUN | action=load_pending | count=%d | path=%s",
             len(pending_list),
             cfg.DL_LIST_CACHE_PATH,
         )
+
+    pending_items_outside_mode = _pending_items_outside_mode(cached_pending_list, mode)
 
     if pending_list and new_download_list:
         pending_bundle_names = {
@@ -244,6 +263,11 @@ async def _run_main(
 
     if not download_list:
         logger.info("RUN | result=noop | reason=no_items | postprocess=true")
+        if pending_items_outside_mode:
+            async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
+                await f.write(
+                    json.dumps(pending_items_outside_mode, option=json.OPT_INDENT_2)
+                )
         is_success = await do_download([], config=cfg, headers=headers, cookie=cookie)
         if is_success:
             for specialized_mode in get_enabled_specialized_modes(mode, cfg):
@@ -260,11 +284,33 @@ async def _run_main(
     # Persist the (merged) list so a mid-run crash can be resumed
     logger.info("RUN | step=3/4 | action=persist_queue | path=%s", cfg.DL_LIST_CACHE_PATH)
     async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
-        await f.write(json.dumps(download_list, option=json.OPT_INDENT_2))
+        await f.write(
+            json.dumps(
+                dedupe_download_items(pending_items_outside_mode + download_list),
+                option=json.OPT_INDENT_2,
+            )
+        )
 
     is_success = await do_download(
         download_list, config=cfg, headers=headers, cookie=cookie
     )
+
+    if not is_success and pending_items_outside_mode:
+        failed_current_list: List[DownloadItem] = []
+        if await cfg.DL_LIST_CACHE_PATH.exists():
+            async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
+                failed_current_list = filter_download_items_for_mode(
+                    json.loads(await f.read()), mode
+                )
+        async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
+            await f.write(
+                json.dumps(
+                    dedupe_download_items(
+                        pending_items_outside_mode + failed_current_list
+                    ),
+                    option=json.OPT_INDENT_2,
+                )
+            )
 
     if is_success:
         for specialized_mode in get_enabled_specialized_modes(mode, cfg):
@@ -276,7 +322,15 @@ async def _run_main(
 
     # remove the cached download list
     if is_success and len(download_list) > 0:
-        await cfg.DL_LIST_CACHE_PATH.unlink()
+        if pending_items_outside_mode:
+            async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
+                await f.write(
+                    json.dumps(
+                        pending_items_outside_mode, option=json.OPT_INDENT_2
+                    )
+                )
+        else:
+            await cfg.DL_LIST_CACHE_PATH.unlink()
         logger.debug(
             "Cleanup complete: removed pending list cache %s",
             cfg.DL_LIST_CACHE_PATH,

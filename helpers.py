@@ -360,7 +360,8 @@ async def get_download_list(
         exclude_list=exclude_list,
         automatic_prefixes=automatic_prefixes,
     )
-    assert current_bundles, "No bundles found after filtering"
+    if not current_bundles:
+        raise ValueError("No bundles found after filtering")
     async def select_changed_bundles(cached_bundles: Dict[str, Dict]) -> list[Dict]:
         changed_bundles = []
         for bundle in current_bundles.values():

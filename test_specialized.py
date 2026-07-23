@@ -95,6 +95,10 @@ class SpecializedHelpersTest(unittest.TestCase):
             "other": {"bundleName": "music/a"},
         }
         self.assertEqual(get_mode_bundle_prefixes("live2d"), ("live2d/",))
+        self.assertEqual(
+            filter_bundles_for_mode(bundles, "live2d"),
+            {"live": bundles["live"]},
+        )
         self.assertEqual(list(filter_bundles_for_mode(bundles, "charts")), list(bundles))
         self.assertEqual(list(filter_bundles_for_mode(bundles, "assets")), list(bundles))
 

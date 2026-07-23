@@ -436,7 +436,7 @@ requires-dist = [
     { name = "olefile", specifier = "==0.47" },
     { name = "orjson", specifier = "==3.11.6" },
     { name = "pillow", specifier = "==12.2.0" },
-    { name = "pjsekai-scores-rs-skia-image" },
+    { name = "pjsekai-scores-rs-skia-image", specifier = "==0.5.0" },
     { name = "pycryptodome", specifier = "==3.22.0" },
     { name = "u-msgpack-python", specifier = "==2.8.0" },
     { name = "unitypy", specifier = "==1.22.5" },

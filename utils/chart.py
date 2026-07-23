@@ -1,5 +1,6 @@
 import ctypes
 import ctypes.util
+import asyncio
 import logging
 import tempfile
 import sys
@@ -31,7 +32,7 @@ def _load_scores_module():
                 logger.debug("Failed to preload %s", freetype, exc_info=True)
 
     try:
-        import pjsekai_scores_rs as scores  # noqa: WPS433
+        import pjsekai_scores_rs as scores
     except ImportError as exc:
         raise ImportError(
             "Failed to import pjsekai_scores_rs. On Linux, a freetype library "
@@ -68,7 +69,7 @@ async def render_chart(
     score_path: str, chart_path: str, music: dict, jacket: str
 ):
     scores = _load_scores_module()
-    score = scores.Score.open_sus(score_path)
+    score = await asyncio.to_thread(scores.Score.open_sus, score_path)
     jacket_uri, jacket_tmpdir = await _prepare_jacket(jacket)
     try:
         score.set_meta(title=music["title"], jacket=jacket_uri)
@@ -80,11 +81,11 @@ async def render_chart(
 
         png_path = chart_path.replace(".svg", ".png")
 
-        svg = drawing.svg(score)
+        svg = await asyncio.to_thread(drawing.svg, score)
         async with await open_file(chart_path, "wb") as f:
             await f.write(svg.encode("utf-8"))
 
-        png = drawing.png(score)
+        png = await asyncio.to_thread(drawing.png, score)
         async with await open_file(png_path, "wb") as f:
             await f.write(png)
     finally:

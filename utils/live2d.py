@@ -166,10 +166,10 @@ def read_streamed_data(
     idx = curve_key.index
     try:
         target, bone_name = binding_info_lookup[idx]
-    except IndexError:
+    except IndexError as exc:
         raise RuntimeError(
             f"Failed to find binding constant for {idx}"
-        )
+        ) from exc
     if bone_name:
         track = track_by_name.get(bone_name)
         if not track:
@@ -212,10 +212,10 @@ def read_curve_data(
 ):
     try:
         target, bone_name = binding_info_lookup[idx]
-    except IndexError:
+    except IndexError as exc:
         raise RuntimeError(
             f"Failed to find binding constant for {idx}"
-        )
+        ) from exc
     if bone_name:
         track = track_by_name.get(bone_name)
         if not track:
