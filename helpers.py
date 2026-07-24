@@ -29,6 +29,8 @@ logger = logging.getLogger("asset_updater")
 
 DEFAULT_REQUEST_TIMEOUT = 30 * 60
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
+DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
+DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
 DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
 
@@ -180,6 +182,24 @@ def get_download_max_retries(config=None) -> int:
         )
         retries = DEFAULT_DOWNLOAD_MAX_RETRIES
     return max(1, retries)
+
+
+def get_download_retry_base_delay(config=None) -> float:
+    value = getattr(config, "DOWNLOAD_RETRY_BASE_DELAY", DEFAULT_DOWNLOAD_RETRY_BASE_DELAY)
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        delay = DEFAULT_DOWNLOAD_RETRY_BASE_DELAY
+    return max(0.0, delay)
+
+
+def get_download_retry_max_delay(config=None) -> float:
+    value = getattr(config, "DOWNLOAD_RETRY_MAX_DELAY", DEFAULT_DOWNLOAD_RETRY_MAX_DELAY)
+    try:
+        delay = float(value)
+    except (TypeError, ValueError):
+        delay = DEFAULT_DOWNLOAD_RETRY_MAX_DELAY
+    return max(0.0, delay)
 
 
 def get_min_free_disk_bytes(config=None) -> int:

@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from bundle import download_deobfuscate_bundle, extract_asset_bundle
+from bundle import (
+    _resolve_expected_bundle_size,
+    download_deobfuscate_bundle,
+    extract_asset_bundle,
+)
 from helpers import (
     DownloadDiskSpaceGate,
     get_request_timeout,
@@ -84,11 +88,7 @@ def get_stage_queue_size(config, downstream_concurrency: int) -> int:
 
 
 def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
-    value = bundle.get("fileSize", 0)
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
+    return _resolve_expected_bundle_size(bundle) or 0
 
 
 def _bundle_staging_identity(bundle_name: Any) -> str:
@@ -156,6 +156,20 @@ async def _cleanup_artifact(
             )
         finally:
             artifact.tmp_extracted_save_dir = None
+
+
+async def _cleanup_queued_artifacts(queue: asyncio.Queue) -> None:
+    """Remove durable temporary artifacts that cannot survive a cancelled run."""
+    while True:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        try:
+            if isinstance(item, PipelineArtifact):
+                await _cleanup_artifact(item, remove_bundle=True, remove_extracted=True)
+        finally:
+            queue.task_done()
 
 
 async def _put_sentinels(queue: asyncio.Queue, count: int) -> None:
@@ -247,6 +261,7 @@ async def _download_stage(
                             headers=worker_headers,
                             config=config,
                             session=session,
+                            expected_bundle=bundle,
                         )
                 else:
                     assert download_root is not None
@@ -258,6 +273,7 @@ async def _download_stage(
                         headers=worker_headers,
                         config=config,
                         session=session,
+                        expected_bundle=bundle,
                     )
 
                 await extract_queue.put(
@@ -269,6 +285,12 @@ async def _download_stage(
                         remove_bundle_after_extract=remove_bundle_after_extract,
                     )
                 )
+            except asyncio.CancelledError:
+                if tmp_bundle_save_file:
+                    tmp_bundle_save_file.close()
+                if bundle_save_path and remove_bundle_after_extract:
+                    await bundle_save_path.unlink(missing_ok=True)
+                raise
             except Exception:
                 if tmp_bundle_save_file:
                     tmp_bundle_save_file.close()
@@ -310,7 +332,7 @@ async def _extract_stage(
                 label,
             )
 
-            upload_succeeded = False
+            handed_to_upload = False
             try:
                 bundle_cache_root = None
                 configured_bundle_cache_root = getattr(
@@ -366,6 +388,15 @@ async def _extract_stage(
 
                 await _cleanup_artifact(artifact, remove_bundle=True)
                 await upload_queue.put(artifact)
+                handed_to_upload = True
+            except asyncio.CancelledError:
+                if not handed_to_upload:
+                    await _cleanup_artifact(
+                        artifact,
+                        remove_bundle=True,
+                        remove_extracted=True,
+                    )
+                raise
             except Exception:
                 logger.exception(
                     "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s",
@@ -431,6 +462,9 @@ async def _upload_stage(
                     label,
                 )
                 upload_succeeded = True
+            except asyncio.CancelledError:
+                await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
+                raise
             except Exception:
                 logger.exception(
                     "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
@@ -444,7 +478,7 @@ async def _upload_stage(
                 await _cleanup_artifact(
                     artifact,
                     remove_bundle=True,
-                    remove_extracted=upload_succeeded,
+                    remove_extracted=True,
                 )
         finally:
             upload_queue.task_done()
@@ -538,21 +572,25 @@ async def run_pipeline(
             for worker_id in range(upload_concurrency)
         ]
 
-        await download_queue.join()
-        logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
-        await _put_sentinels(extract_queue, extract_concurrency)
-        await extract_queue.join()
-        logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
-        await _put_sentinels(upload_queue, upload_concurrency)
-        await upload_queue.join()
-        logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
+        all_tasks = download_tasks + extract_tasks + upload_tasks
+        try:
+            await download_queue.join()
+            logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
+            await _put_sentinels(extract_queue, extract_concurrency)
+            await extract_queue.join()
+            logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
+            await _put_sentinels(upload_queue, upload_concurrency)
+            await upload_queue.join()
+            logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
 
-        await asyncio.gather(
-            *download_tasks,
-            *extract_tasks,
-            *upload_tasks,
-            return_exceptions=False,
-        )
+            await asyncio.gather(*all_tasks, return_exceptions=False)
+        except asyncio.CancelledError:
+            for task in all_tasks:
+                task.cancel()
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+            await _cleanup_queued_artifacts(extract_queue)
+            await _cleanup_queued_artifacts(upload_queue)
+            raise
 
     succeeded = total_items - len(failed_tasks)
     logger.info(

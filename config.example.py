@@ -18,6 +18,11 @@ USER_AGENT = None
 REQUEST_TIMEOUT = 180
 # Number of download retry attempts on timeout or connection errors
 DOWNLOAD_MAX_RETRIES = 3
+# Retry delay uses capped exponential full jitter: random delay in [0, cap].
+# Numeric Retry-After hints for HTTP 429/503 take precedence, are capped at the
+# maximum, and are themselves used as the full-jitter upper bound.
+DOWNLOAD_RETRY_BASE_DELAY = 1.0
+DOWNLOAD_RETRY_MAX_DELAY = 30.0
 # Minimum free bytes to keep on the download filesystem before starting a new download
 MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 # How often blocked downloads recheck free disk space

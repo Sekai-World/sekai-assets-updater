@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,15 @@ def test_download_fixture_serves_and_deobfuscates_a_bundle(
     temp_dir: Path,
     local_aiohttp_server,
 ) -> None:
-    payload = b"\x20\x00\x00\x00UnityFS\x00synthetic bundle"
+    fields = b"2024.1\0rev\0"
+    plain_bundle = (
+        b"UnityFS\0"
+        + struct.pack(">I", 6)
+        + fields
+        + struct.pack(">QIII", 8 + 4 + len(fields) + 20 + 1, 1, 1, 0)
+        + b"I"
+    )
+    payload = b"\x20\x00\x00\x00" + plain_bundle
 
     def bundle_handler(_request: web.Request) -> web.Response:
         return web.Response(body=payload)

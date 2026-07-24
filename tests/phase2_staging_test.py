@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from anyio import Path as AnyioPath
 
 import worker
@@ -247,7 +248,7 @@ def test_upload_stage_isolates_same_relative_output_and_content(
     assert not asyncio.run(second_out.extracted_save_path.exists())
 
 
-def test_upload_failure_retains_temporary_root_and_records_failure(tmp_path: Path, monkeypatch) -> None:
+def test_upload_failure_cleans_temporary_root_and_records_failure(tmp_path: Path, monkeypatch) -> None:
     failing = worker.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "a"))
     sibling = worker.PipelineArtifact("b", {"bundleName": "b"}, AnyioPath(tmp_path / "b"))
     failing_out, _ = _run_extract_stage(failing, _config(None), monkeypatch, "same.txt", b"failure")
@@ -275,7 +276,7 @@ def test_upload_failure_retains_temporary_root_and_records_failure(tmp_path: Pat
         await worker._upload_stage("phase2", "upload", queue, config, failures, asyncio.Lock())
 
     asyncio.run(run())
-    assert asyncio.run(failing_root.exists())
+    assert not asyncio.run(failing_root.exists())
     assert not asyncio.run(sibling_root.exists())
     assert failures == [("a", {"bundleName": "a"})]
 
@@ -317,3 +318,82 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -
     assert sibling_out.url == "b"
     assert asyncio.run(sibling_out.extracted_save_path.exists())
     assert asyncio.run(sibling_out.extracted_save_path.joinpath("same.txt").read_bytes()) == b"sibling"
+
+
+def test_extract_cancellation_cleans_owned_temporary_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    started = asyncio.Event()
+    artifact = worker.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "bundle"))
+    artifact.remove_bundle_after_extract = True
+    asyncio.run(artifact.bundle_save_path.write_bytes(b"bundle"))
+
+    async def blocked_extract(_bundle_path, _bundle, output_root, **_kwargs):
+        output = output_root / "partial.txt"
+        await output.write_bytes(b"partial")
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "extract_asset_bundle", blocked_extract)
+    extract_queue: asyncio.Queue = asyncio.Queue()
+    upload_queue: asyncio.Queue = asyncio.Queue()
+    extract_queue.put_nowait(artifact)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            worker._extract_stage(
+                "phase2", "extract", extract_queue, upload_queue,
+                _config(None), [], asyncio.Lock()
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert artifact.extracted_save_path is not None
+    assert not asyncio.run(artifact.extracted_save_path.exists())
+    assert not asyncio.run(artifact.bundle_save_path.exists())
+    assert upload_queue.empty()
+
+
+def test_extract_cancellation_while_put_blocked_cleans_owned_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    started = asyncio.Event()
+    artifact = worker.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "bundle"))
+    artifact.remove_bundle_after_extract = True
+    asyncio.run(artifact.bundle_save_path.write_bytes(b"bundle"))
+
+    async def fake_extract(_bundle_path, _bundle, output_root, **_kwargs):
+        output = output_root / "ready.txt"
+        await output.write_bytes(b"ready")
+        return [output]
+
+    class BlockingQueue(asyncio.Queue):
+        async def put(self, item):
+            started.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(worker, "extract_asset_bundle", fake_extract)
+    extract_queue: asyncio.Queue = asyncio.Queue()
+    upload_queue = BlockingQueue()
+    extract_queue.put_nowait(artifact)
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            worker._extract_stage(
+                "phase2", "extract", extract_queue, upload_queue,
+                _config(None), [], asyncio.Lock()
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert artifact.extracted_save_path is not None
+    assert not asyncio.run(artifact.extracted_save_path.exists())
+    assert not asyncio.run(artifact.bundle_save_path.exists())

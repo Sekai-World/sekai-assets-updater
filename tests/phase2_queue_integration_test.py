@@ -102,7 +102,7 @@ def test_run_pipeline_isolates_same_name_outputs_and_finishes_all_stage_workers(
         assert not uploads[1][1].exists()
 
 
-def test_run_pipeline_upload_failure_preserves_only_failed_temporary_root(
+def test_run_pipeline_upload_failure_cleans_temporary_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     uploads: list[tuple[str, Path, Path, bytes]] = []
@@ -119,7 +119,7 @@ def test_run_pipeline_upload_failure_preserves_only_failed_temporary_root(
     assert failed == [("failed-url", {"bundleName": "failed"})]
     failed_upload = next(item for item in uploads if item[3] == b"failed bytes")
     successful_upload = next(item for item in uploads if item[3] == b"second bytes")
-    assert failed_upload[1].exists()
+    assert not failed_upload[1].exists()
     assert not successful_upload[1].exists()
     assert failed_upload[1] != successful_upload[1]
     assert failed_upload[2].parent == failed_upload[1]
