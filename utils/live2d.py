@@ -118,29 +118,22 @@ def build_binding_info_lookup(
     return lookup
 
 
-def process_streamed_clip(streamed_clip: List[int]) -> List:
-    _b = struct.pack("I" * len(streamed_clip), *streamed_clip)
-    bs = BinaryStream(BytesIO(_b))
-
-    ret = []
-    # key_list = []
-    while bs.base_stream.tell() < len(_b):
+def _read_streamed_frames(bs: BinaryStream, payload_len: int) -> List:
+    frames = []
+    while bs.base_stream.tell() < payload_len:
         time = bs.readFloat()
-
         num_keys = bs.readUInt32()
-        key_list = []
-
-        for _ in range(num_keys):
-            key_list.append(StreamedCurveKey(bs))
-
+        key_list = [StreamedCurveKey(bs) for _ in range(num_keys)]
         assert len(key_list) == num_keys
-        if time < 0:
-            continue
-        ret.append({"time": time, "keyList": key_list})
+        if not time < 0:
+            frames.append({"time": time, "keyList": key_list})
+    return frames
 
+
+def _apply_streamed_in_slopes(frames: List) -> None:
     previous_curve_by_index = {}
-    for k, frame in enumerate(ret):
-        if k >= 2 and k != len(ret) - 1:
+    for k, frame in enumerate(frames):
+        if k >= 2 and k != len(frames) - 1:
             for curve_key in frame["keyList"]:
                 previous_curve = previous_curve_by_index.get(curve_key.index)
                 if previous_curve:
@@ -153,7 +146,12 @@ def process_streamed_clip(streamed_clip: List[int]) -> List:
             for curve_key in frame["keyList"]:
                 previous_curve_by_index[curve_key.index] = (frame["time"], curve_key)
 
-    return ret
+
+def process_streamed_clip(streamed_clip: List[int]) -> List:
+    _b = struct.pack("I" * len(streamed_clip), *streamed_clip)
+    frames = _read_streamed_frames(BinaryStream(BytesIO(_b)), len(_b))
+    _apply_streamed_in_slopes(frames)
+    return frames
 
 
 def read_streamed_data(
@@ -247,27 +245,180 @@ def read_curve_data(
             )
 
 
-def restore_unity_object_to_motion3(unity_object) -> Tuple | None:
-    """Restore unity game object to motion3 json format"""
+def _load_animation_clip(unity_object):
     asset_name = unity_object.ClipAssetName
-
-    # Read the animation clip
-    # Only allow in-file animation clips
     if unity_object.Clip.m_PathID != 0 and unity_object.Clip.m_FileID == 0:
         animation_clip: UnityPy.classes.AnimationClip = unity_object.Clip.deref().read()
         if not isinstance(animation_clip, UnityPy.classes.AnimationClip):
             raise RuntimeError(
                 f"Failed to read animation clip {asset_name}, expected AnimationClip, got {type(animation_clip)}"
             )
-    else:
-        logger.warning(
-            "Clip path id is empty or file id is not 0, reading %s for %s",
-            unity_object.Clip,
-            asset_name,
+        return animation_clip
+
+    logger.warning(
+        "Clip path id is empty or file id is not 0, reading %s for %s",
+        unity_object.Clip,
+        asset_name,
+    )
+    return None
+
+
+def _fill_motion_tracks(
+    motion: Dict,
+    animation_clip: UnityPy.classes.AnimationClip,
+    asset_name: str,
+) -> None:
+    streamed_frames = process_streamed_clip(
+        animation_clip.m_MuscleClip.m_Clip.data.m_StreamedClip.data
+    )
+    clip_binding_constant = animation_clip.m_ClipBindingConstant
+    if not clip_binding_constant:
+        raise RuntimeError(f"Failed to read clip binding constant {asset_name}")
+    binding_info_lookup = build_binding_info_lookup(clip_binding_constant.genericBindings)
+    track_by_name: Dict[str, Dict] = {}
+
+    for frame in streamed_frames:
+        time = frame["time"]
+        for curve_key in frame["keyList"]:
+            read_streamed_data(motion, binding_info_lookup, track_by_name, time, curve_key)
+
+    dense_clip = animation_clip.m_MuscleClip.m_Clip.data.m_DenseClip
+    stream_count = animation_clip.m_MuscleClip.m_Clip.data.m_StreamedClip.curveCount
+    for frame_idx in range(dense_clip.m_FrameCount):
+        time = dense_clip.m_BeginTime + frame_idx / dense_clip.m_SampleRate
+        for curve_idx in range(dense_clip.m_CurveCount):
+            read_curve_data(
+                motion,
+                binding_info_lookup,
+                track_by_name,
+                stream_count + curve_idx,
+                time,
+                dense_clip.m_SampleArray,
+                curve_idx,
+            )
+
+    constant_clip = animation_clip.m_MuscleClip.m_Clip.data.m_ConstantClip
+    dense_count = dense_clip.m_CurveCount
+    time = 0.0
+    for _ in range(2):
+        for curve_idx in range(len(constant_clip.data)):
+            read_curve_data(
+                motion,
+                binding_info_lookup,
+                track_by_name,
+                stream_count + dense_count + curve_idx,
+                time,
+                constant_clip.data,
+                curve_idx,
+            )
+        time = animation_clip.m_MuscleClip.m_StopTime
+
+    for ev in animation_clip.m_Events:
+        motion["Events"].append({"time": ev.time, "value": ev.data})
+
+
+def _append_curve_segment(
+    segments: List,
+    curve: Dict,
+    pre_curve: Dict,
+    track_curves: List,
+    index: int,
+) -> Tuple[int, int]:
+    if (
+        index + 1 < len(track_curves)
+        and abs(curve["time"] - pre_curve["time"] - 0.01) < 0.0001
+        and track_curves[index + 1]["value"] == curve["value"]
+    ):
+        next_curve = track_curves[index + 1]
+        segments.extend(
+            [3, format_float(next_curve["time"]), format_float(next_curve["value"])]
         )
+        return 1, 1
+
+    if curve["inSlope"] == float("inf"):
+        segments.extend([2, format_float(curve["time"]), format_float(curve["value"])])
+        return 1, 1
+
+    if pre_curve["outSlope"] == 0.0 and abs(curve["inSlope"]) < 0.0001:
+        segments.extend([0, format_float(curve["time"]), format_float(curve["value"])])
+        return 1, 1
+
+    tangent_len = (curve["time"] - pre_curve["time"]) / 3.0
+    segments.extend(
+        [
+            1,
+            format_float(pre_curve["time"] + tangent_len),
+            format_float(pre_curve["outSlope"] * tangent_len + pre_curve["value"]),
+            format_float(curve["time"] - tangent_len),
+            format_float(curve["value"] - curve["inSlope"] * tangent_len),
+            format_float(curve["time"]),
+            format_float(curve["value"]),
+        ]
+    )
+    return 3, 1
+
+
+def _build_motion3_curves(motion: Dict) -> Tuple[List, int, int]:
+    curves = []
+    total_segment_count = 0
+    total_point_count = 0
+    for idx, track in enumerate(motion["TrackList"]):
+        track_curves = track["Curve"]
+        segments = [0, format_float(track_curves[0]["value"])]
+        total_segment_count += 1
+        total_point_count += 1
+        for j in range(1, len(track_curves)):
+            point_delta, segment_delta = _append_curve_segment(
+                segments, track_curves[j], track_curves[j - 1], track_curves, j
+            )
+            total_point_count += point_delta
+            total_segment_count += segment_delta
+        curves.append({
+            "Target": track["Target"],
+            "Id": track["Name"],
+            "Segments": segments,
+        })
+    return curves, total_segment_count, total_point_count
+
+
+def _build_motion3_user_data(motion: Dict) -> Tuple[List, int]:
+    user_data = []
+    total_user_data_size = sum(len(ev["value"]) for ev in motion["Events"])
+    for ev in motion["Events"]:
+        user_data.append({
+            "Time": format_float(ev["time"]),
+            "Value": ev["value"],
+        })
+    return user_data, total_user_data_size
+
+
+def _build_restored_motion3(motion: Dict, duration, sample_rate) -> Dict:
+    curves, total_segment_count, total_point_count = _build_motion3_curves(motion)
+    user_data, total_user_data_size = _build_motion3_user_data(motion)
+    return {
+        "Version": 3,
+        "Meta": {
+            "Duration": duration,
+            "Fps": sample_rate,
+            "Loop": True,
+            "AreBeziersRestricted": True,
+            "CurveCount": len(motion["TrackList"]),
+            "UserDataCount": len(motion["Events"]),
+            "TotalSegmentCount": total_segment_count,
+            "TotalPointCount": total_point_count,
+            "TotalUserDataSize": total_user_data_size,
+        },
+        "Curves": curves,
+        "UserData": user_data,
+    }
+
+
+def restore_unity_object_to_motion3(unity_object) -> Tuple | None:
+    """Restore unity game object to motion3 json format"""
+    animation_clip = _load_animation_clip(unity_object)
+    if animation_clip is None:
         return
 
-    # Read meta data from facial_anim
     name = animation_clip.m_Name
     sample_rate = animation_clip.m_SampleRate
     duration = format_float(animation_clip.m_MuscleClip.m_StopTime)
@@ -278,165 +429,14 @@ def restore_unity_object_to_motion3(unity_object) -> Tuple | None:
         "TrackList": [],
         "Events": [],
     }
-
     assert (
         name == animation_clip.m_Name
     ), f"Name mismatch {name} != {animation_clip.m_Name}"
-
     logger.debug(
         "Restoring %s with sample rate %s and duration %s", name, sample_rate, duration
     )
-
-    # Read streamed frames
-    streamed_frames = process_streamed_clip(
-        animation_clip.m_MuscleClip.m_Clip.data.m_StreamedClip.data
-    )
-    # Read the clip binding constant
-    clip_binding_constant = animation_clip.m_ClipBindingConstant
-    if not clip_binding_constant:
-        raise RuntimeError(f"Failed to read clip binding constant {asset_name}")
-    binding_info_lookup = build_binding_info_lookup(clip_binding_constant.genericBindings)
-    track_by_name: Dict[str, Dict] = {}
-
-    # Fill streamed frames
-    for frame in streamed_frames:
-        time = frame["time"]
-        for curve_key in frame["keyList"]:
-            read_streamed_data(motion, binding_info_lookup, track_by_name, time, curve_key)
-
-    # Read dense clip
-    dense_clip = animation_clip.m_MuscleClip.m_Clip.data.m_DenseClip
-    # Read streamed clip count
-    stream_count = animation_clip.m_MuscleClip.m_Clip.data.m_StreamedClip.curveCount
-
-    # Fill curve data
-    for frame_idx in range(dense_clip.m_FrameCount):
-        time = dense_clip.m_BeginTime + frame_idx / dense_clip.m_SampleRate
-        for curve_idx in range(dense_clip.m_CurveCount):
-            idx = stream_count + curve_idx
-            read_curve_data(
-                motion,
-                binding_info_lookup,
-                track_by_name,
-                idx,
-                time,
-                dense_clip.m_SampleArray,
-                curve_idx,
-            )
-
-    # Read constant clip
-    constant_clip = animation_clip.m_MuscleClip.m_Clip.data.m_ConstantClip
-    # Read dense clip count
-    dense_count = dense_clip.m_CurveCount
-    # Time correction
-    time2 = 0.0
-    for _ in range(2):
-        for curve_idx in range(len(constant_clip.data)):
-            idx = stream_count + dense_count + curve_idx
-            read_curve_data(
-                motion,
-                binding_info_lookup,
-                track_by_name,
-                idx,
-                time2,
-                constant_clip.data,
-                curve_idx,
-            )
-        time2 = animation_clip.m_MuscleClip.m_StopTime
-
-    # Fill events
-    for ev in animation_clip.m_Events:
-        motion["Events"].append({"time": ev.time, "value": ev.data})
-
-    # Base motion3 structure
-    restored_motion3 = {
-        "Version": 3,
-        "Meta": {
-            "Duration": duration,
-            "Fps": sample_rate,
-            "Loop": True,
-            "AreBeziersRestricted": True,
-            "CurveCount": len(motion["TrackList"]),
-            "UserDataCount": len(motion["Events"]),
-        },
-        "Curves": [None] * len(motion["TrackList"]),
-        "UserData": [None] * len(motion["Events"]),
-    }
-
-    total_segment_count = 0
-    total_point_count = 0
-
-    for idx, track in enumerate(motion["TrackList"]):
-        restored_motion3["Curves"][idx] = {
-            "Target": track["Target"],
-            "Id": track["Name"],
-            "Segments": [0, format_float(track["Curve"][0]["value"])],
-        }
-        total_segment_count += 1
-        total_point_count += 1
-
-        for j in range(1, len(track["Curve"])):
-            curve = track["Curve"][j]
-            pre_curve = track["Curve"][j - 1]
-
-            if (
-                j + 1 < len(track["Curve"])
-                and abs(curve["time"] - pre_curve["time"] - 0.01) < 0.0001
-            ):
-                next_curve = track["Curve"][j + 1]
-                if next_curve["value"] == curve["value"]:
-                    restored_motion3["Curves"][idx]["Segments"].extend(
-                        [
-                            3,
-                            format_float(next_curve["time"]),
-                            format_float(next_curve["value"]),
-                        ]
-                    )
-                    total_point_count += 1
-                    total_segment_count += 1
-                    continue
-
-            if curve["inSlope"] == float("inf"):
-                restored_motion3["Curves"][idx]["Segments"].extend(
-                    [2, format_float(curve["time"]), format_float(curve["value"])]
-                )
-            elif pre_curve["outSlope"] == 0.0 and abs(curve["inSlope"]) < 0.0001:
-                restored_motion3["Curves"][idx]["Segments"].extend(
-                    [0, format_float(curve["time"]), format_float(curve["value"])]
-                )
-            else:
-                tangent_len = (curve["time"] - pre_curve["time"]) / 3.0
-                restored_motion3["Curves"][idx]["Segments"].extend(
-                    [
-                        1,
-                        format_float(pre_curve["time"] + tangent_len),
-                        format_float(
-                            pre_curve["outSlope"] * tangent_len + pre_curve["value"]
-                        ),
-                        format_float(curve["time"] - tangent_len),
-                        format_float(curve["value"] - curve["inSlope"] * tangent_len),
-                        format_float(curve["time"]),
-                        format_float(curve["value"]),
-                    ]
-                )
-                total_point_count += 2
-
-            total_point_count += 1
-            total_segment_count += 1
-
-    restored_motion3["Meta"]["TotalSegmentCount"] = total_segment_count
-    restored_motion3["Meta"]["TotalPointCount"] = total_point_count
-
-    total_user_data_size = sum(len(ev["value"]) for ev in motion["Events"])
-    for idx, ev in enumerate(motion["Events"]):
-        restored_motion3["UserData"][idx] = {
-            "Time": format_float(ev["time"]),
-            "Value": ev["value"],
-        }
-
-    restored_motion3["Meta"]["TotalUserDataSize"] = total_user_data_size
-
-    return name, restored_motion3
+    _fill_motion_tracks(motion, animation_clip, unity_object.ClipAssetName)
+    return name, _build_restored_motion3(motion, duration, sample_rate)
 
 
 def correct_param_ids(motions: List[Tuple[str, Dict]], param_id_map: Dict[str, str]):
@@ -539,18 +539,8 @@ def _build_motion_save_dir(
     return local_live2d_motion_extracted_dir.joinpath(*rel_parts)
 
 
-def _restore_motion_base_bundle_sync(
-    motion_base_bundle_path: str,
-    local_live2d_motion_extracted_dir: str,
-    param_id_map: Dict[str, str],
-) -> str:
-    motion_bundle_path = StdPath(motion_base_bundle_path)
-    motion_base = UnityPy.load(motion_base_bundle_path)
-    if not motion_base:
-        raise RuntimeError(f"Failed to load motion bundle {motion_bundle_path}")
-
-    container_items = list(motion_base.container.items())
-    buildmotiondata_path, buildmotiondata = next(
+def _find_buildmotiondata(container_items):
+    return next(
         (
             (asset_path, obj.read())
             for asset_path, obj in container_items
@@ -559,60 +549,52 @@ def _restore_motion_base_bundle_sync(
         ),
         (None, None),
     )
-    if not buildmotiondata_path or not buildmotiondata:
-        raise RuntimeError(f"Failed to find buildmotiondata in {motion_bundle_path}")
 
-    facials = [
-        restore_unity_object_to_motion3(facial)
-        for facial in buildmotiondata.Facials
+
+def _find_container_animation_items(container_items, parent_name: str):
+    return [
+        Live2DBuildMotion(StdPath(asset_path).stem, pptr)
+        for asset_path, pptr in container_items
+        if PurePosixPath(asset_path).parent.name == parent_name
+        and PurePosixPath(asset_path).suffix == ".anim"
     ]
-    if not facials and not buildmotiondata.Motions:
-        logger.warning(
-            "No facials found in %s, try searching container items",
-            motion_bundle_path,
-        )
-        container_facials = [
-            Live2DBuildMotion(StdPath(asset_path).stem, pptr)
-            for asset_path, pptr in container_items
-            if PurePosixPath(asset_path).parent.name == "facial"
-            and PurePosixPath(asset_path).suffix == ".anim"
-        ]
-        if not container_facials:
-            raise RuntimeError(f"Failed to find facials in {motion_bundle_path}")
-        facials = [
-            restore_unity_object_to_motion3(facial) for facial in container_facials
-        ]
-    facials = [facial for facial in facials if facial is not None]
-    correct_param_ids(facials, param_id_map)
 
-    motions = [
-        restore_unity_object_to_motion3(motion)
-        for motion in buildmotiondata.Motions
-    ]
-    if not motions and not buildmotiondata.Motions:
-        logger.warning(
-            "No motions found in %s, try searching container items",
-            motion_bundle_path,
-        )
-        container_motions = [
-            Live2DBuildMotion(StdPath(asset_path).stem, pptr)
-            for asset_path, pptr in container_items
-            if PurePosixPath(asset_path).parent.name == "motion"
-            and PurePosixPath(asset_path).suffix == ".anim"
-        ]
-        if not container_motions:
-            raise RuntimeError(f"Failed to find motions in {motion_bundle_path}")
-        motions = [
-            restore_unity_object_to_motion3(motion) for motion in container_motions
-        ]
-    motions = [motion for motion in motions if motion is not None]
-    correct_param_ids(motions, param_id_map)
 
-    save_dir = _build_motion_save_dir(
-        buildmotiondata_path,
-        StdPath(local_live2d_motion_extracted_dir),
+def _restore_motion_entries(entries, param_id_map: Dict[str, str]):
+    restored = [restore_unity_object_to_motion3(entry) for entry in entries]
+    restored = [entry for entry in restored if entry is not None]
+    correct_param_ids(restored, param_id_map)
+    return restored
+
+
+def _restore_motion_group(
+    buildmotiondata,
+    container_items,
+    group_name: str,
+    param_id_map: Dict[str, str],
+    motion_bundle_path: StdPath,
+):
+    entries = getattr(buildmotiondata, group_name)
+    restored = _restore_motion_entries(entries, param_id_map)
+    # Match original gating: only fall back to container .anim items when the
+    # primary group is empty and BuildMotionData.Motions is also empty.
+    if restored or buildmotiondata.Motions:
+        return restored
+
+    label = "facials" if group_name == "Facials" else "motions"
+    parent_name = "facial" if group_name == "Facials" else "motion"
+    logger.warning(
+        "No %s found in %s, try searching container items",
+        label,
+        motion_bundle_path,
     )
+    container_entries = _find_container_animation_items(container_items, parent_name)
+    if not container_entries:
+        raise RuntimeError(f"Failed to find {label} in {motion_bundle_path}")
+    return _restore_motion_entries(container_entries, param_id_map)
 
+
+def _write_restored_motions(save_dir, facials, motions):
     all_motion_names = {
         "expressions": [name for name, _ in facials],
         "motions": [name for name, _ in motions],
@@ -636,6 +618,42 @@ def _restore_motion_base_bundle_sync(
             json.dumps(motion, option=json.OPT_INDENT_2)
         )
 
+
+def _restore_motion_base_bundle_sync(
+    motion_base_bundle_path: str,
+    local_live2d_motion_extracted_dir: str,
+    param_id_map: Dict[str, str],
+) -> str:
+    motion_bundle_path = StdPath(motion_base_bundle_path)
+    motion_base = UnityPy.load(motion_base_bundle_path)
+    if not motion_base:
+        raise RuntimeError(f"Failed to load motion bundle {motion_bundle_path}")
+
+    container_items = list(motion_base.container.items())
+    buildmotiondata_path, buildmotiondata = _find_buildmotiondata(container_items)
+    if not buildmotiondata_path or not buildmotiondata:
+        raise RuntimeError(f"Failed to find buildmotiondata in {motion_bundle_path}")
+
+    facials = _restore_motion_group(
+        buildmotiondata,
+        container_items,
+        "Facials",
+        param_id_map,
+        motion_bundle_path,
+    )
+    motions = _restore_motion_group(
+        buildmotiondata,
+        container_items,
+        "Motions",
+        param_id_map,
+        motion_bundle_path,
+    )
+
+    save_dir = _build_motion_save_dir(
+        buildmotiondata_path,
+        StdPath(local_live2d_motion_extracted_dir),
+    )
+    _write_restored_motions(save_dir, facials, motions)
     return save_dir.as_posix()
 
 

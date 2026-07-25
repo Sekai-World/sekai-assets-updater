@@ -112,6 +112,308 @@ async def do_download(
         return True
 
 
+async def _write_json_cache(path, data) -> None:
+    async with await open_file(path, "wb") as f:
+        await f.write(json.dumps(data, option=json.OPT_INDENT_2))
+
+
+async def _read_json_cache(path):
+    async with await open_file(path, "r") as f:
+        return json.loads(await f.read())
+
+
+async def _ensure_run_cache_dirs(cfg: ConfigLike) -> None:
+    await ensure_dir_exists(cfg.DL_LIST_CACHE_PATH.parent)
+    await ensure_dir_exists(cfg.ASSET_BUNDLE_INFO_CACHE_PATH.parent)
+    await ensure_dir_exists(cfg.GAME_VERSION_JSON_CACHE_PATH.parent)
+
+
+async def _write_metadata_only_cache(
+    cfg: ConfigLike,
+    mode: str,
+    automatic_prefixes,
+    asset_bundle_info: Dict[str, Any],
+    game_version_json,
+    start_time: float,
+) -> None:
+    logger.info("RUN | step=2/2 | action=write_metadata_cache")
+    current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
+    if not current_bundles:
+        raise ValueError("bundles must be set in asset bundle info")
+
+    current_bundles = select_bundles_for_download(
+        filter_bundles_for_mode(current_bundles, mode),
+        include_list=cfg.DL_INCLUDE_LIST,
+        exclude_list=cfg.DL_EXCLUDE_LIST,
+        automatic_prefixes=automatic_prefixes,
+    )
+    if not current_bundles:
+        raise ValueError("No bundles found after filtering")
+
+    await _write_json_cache(
+        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
+        {
+            "version": asset_bundle_info.get("version", ""),
+            "os": asset_bundle_info.get("os", ""),
+            "bundles": current_bundles,
+        },
+    )
+    await _write_json_cache(cfg.GAME_VERSION_JSON_CACHE_PATH, game_version_json)
+    logger.info(
+        "RUN | result=metadata_updated | path=%s | filtered_bundles=%d",
+        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
+        len(current_bundles),
+    )
+    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+
+
+async def _build_new_download_list(
+    cfg: ConfigLike,
+    mode: str,
+    automatic_prefixes,
+    asset_bundle_info: Dict[str, Any],
+    game_version_json,
+    asset_ver,
+    assetbundle_host_hash,
+    force_full_download: bool,
+) -> List[DownloadItem]:
+    logger.info("RUN | step=2/4 | action=build_download_list")
+    # get_download_list applies the user filters and writes the metadata cache;
+    # the mandatory mode scope is applied both before and after it so it cannot
+    # be bypassed by a cached queue or a broad include expression.
+    scoped_info = dict(asset_bundle_info)
+    scoped_info["bundles"] = filter_bundles_for_mode(
+        scoped_info.get("bundles", {}), mode
+    )
+    new_download_list: List[DownloadItem] = await get_download_list(
+        scoped_info,
+        game_version_json,
+        config=cfg,
+        assetver=asset_ver,
+        assetbundle_host_hash=assetbundle_host_hash,
+        include_list=cfg.DL_INCLUDE_LIST,
+        exclude_list=cfg.DL_EXCLUDE_LIST,
+        priority_list=cfg.DL_PRIORITY_LIST,
+        force_full_download=force_full_download,
+        automatic_prefixes=automatic_prefixes,
+        bundle_cache_path_resolver=lambda bundle: get_bundle_cache_path(cfg, bundle),
+    )
+    new_download_list = filter_download_items_for_mode(new_download_list, mode)
+    logger.debug("New download candidates: %d item(s)", len(new_download_list))
+    return new_download_list
+
+
+async def _load_pending_download_lists(
+    cfg: ConfigLike,
+    mode: str,
+    force_full_download: bool,
+) -> Tuple[List[DownloadItem], List[DownloadItem]]:
+    """Load cached pending items and the subset belonging to the current mode."""
+    if force_full_download or not await cfg.DL_LIST_CACHE_PATH.exists():
+        return [], []
+
+    cached_pending_list = await _read_json_cache(cfg.DL_LIST_CACHE_PATH)
+    pending_list = filter_download_items_for_mode(cached_pending_list, mode)
+    logger.info(
+        "RUN | action=load_pending | count=%d | path=%s",
+        len(pending_list),
+        cfg.DL_LIST_CACHE_PATH,
+    )
+    return cached_pending_list, pending_list
+
+
+def _merge_pending_and_new_download_lists(
+    pending_list: List[DownloadItem],
+    new_download_list: List[DownloadItem],
+) -> List[DownloadItem]:
+    """Merge pending retries ahead of new candidates without duplicates."""
+    if pending_list and new_download_list:
+        pending_bundle_names = {
+            bundle.get("bundleName") for _, bundle in pending_list
+        }
+        deduped_new = [
+            item
+            for item in new_download_list
+            if item[1].get("bundleName") not in pending_bundle_names
+        ]
+        download_list = dedupe_download_items(pending_list + deduped_new)
+        logger.info(
+            "RUN | action=merge_download_list | pending=%d | new=%d | total=%d",
+            len(pending_list),
+            len(deduped_new),
+            len(download_list),
+        )
+        return download_list
+    if pending_list:
+        logger.info(
+            "RUN | action=retry_pending_only | count=%d", len(pending_list)
+        )
+        return pending_list
+    return new_download_list
+
+
+async def _run_enabled_specialized_postprocess(
+    mode: str,
+    cfg: ConfigLike,
+    extracted_dir_is_temporary: bool,
+) -> None:
+    for specialized_mode in get_enabled_specialized_modes(mode, cfg):
+        await run_specialized_postprocess(
+            specialized_mode,
+            cfg,
+            extracted_dir_is_temporary=extracted_dir_is_temporary,
+        )
+
+
+async def _restore_pending_cache_on_failure(
+    cfg: ConfigLike,
+    mode: str,
+    pending_items_outside_mode: List[DownloadItem],
+) -> None:
+    """Keep other-mode pending items when the current mode partially fails."""
+    if not pending_items_outside_mode:
+        return
+
+    failed_current_list: List[DownloadItem] = []
+    if await cfg.DL_LIST_CACHE_PATH.exists():
+        failed_current_list = filter_download_items_for_mode(
+            await _read_json_cache(cfg.DL_LIST_CACHE_PATH), mode
+        )
+    await _write_json_cache(
+        cfg.DL_LIST_CACHE_PATH,
+        dedupe_download_items(pending_items_outside_mode + failed_current_list),
+    )
+
+
+async def _cleanup_pending_cache_on_success(
+    cfg: ConfigLike,
+    download_list: List[DownloadItem],
+    pending_items_outside_mode: List[DownloadItem],
+) -> None:
+    """Drop current-mode pending items while retaining other modes' queue."""
+    if not download_list:
+        return
+
+    if pending_items_outside_mode:
+        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
+    else:
+        await cfg.DL_LIST_CACHE_PATH.unlink()
+    logger.debug(
+        "Cleanup complete: removed pending list cache %s",
+        cfg.DL_LIST_CACHE_PATH,
+    )
+
+
+async def _complete_with_empty_download_list(
+    cfg: ConfigLike,
+    mode: str,
+    headers: Dict[str, str],
+    cookie,
+    pending_items_outside_mode: List[DownloadItem],
+    extracted_dir_is_temporary: bool,
+    start_time: float,
+) -> None:
+    logger.info("RUN | result=noop | reason=no_items | postprocess=true")
+    if pending_items_outside_mode:
+        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
+    is_success = await do_download([], config=cfg, headers=headers, cookie=cookie)
+    if is_success:
+        await _run_enabled_specialized_postprocess(
+            mode, cfg, extracted_dir_is_temporary
+        )
+    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+
+
+async def _complete_with_download_list(
+    cfg: ConfigLike,
+    mode: str,
+    headers: Dict[str, str],
+    cookie,
+    download_list: List[DownloadItem],
+    pending_items_outside_mode: List[DownloadItem],
+    extracted_dir_is_temporary: bool,
+    start_time: float,
+) -> None:
+    logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
+
+    # Persist the (merged) list so a mid-run crash can be resumed
+    logger.info("RUN | step=3/4 | action=persist_queue | path=%s", cfg.DL_LIST_CACHE_PATH)
+    await _write_json_cache(
+        cfg.DL_LIST_CACHE_PATH,
+        dedupe_download_items(pending_items_outside_mode + download_list),
+    )
+
+    is_success = await do_download(
+        download_list, config=cfg, headers=headers, cookie=cookie
+    )
+    if not is_success:
+        await _restore_pending_cache_on_failure(
+            cfg, mode, pending_items_outside_mode
+        )
+    else:
+        await _run_enabled_specialized_postprocess(
+            mode, cfg, extracted_dir_is_temporary
+        )
+        await _cleanup_pending_cache_on_success(
+            cfg, download_list, pending_items_outside_mode
+        )
+
+    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+
+
+async def _run_full_download_pipeline(
+    cfg: ConfigLike,
+    mode: str,
+    force_full_download: bool,
+    extracted_dir_is_temporary: bool,
+    automatic_prefixes,
+    fetch_result,
+    start_time: float,
+) -> None:
+    # Charts consume extracted scores from local/normal remote storage and do
+    # not participate in the asset-bundle download pipeline at all.
+    new_download_list = await _build_new_download_list(
+        cfg,
+        mode,
+        automatic_prefixes,
+        fetch_result.asset_bundle_info,
+        fetch_result.game_version_json,
+        fetch_result.asset_ver,
+        fetch_result.assetbundle_host_hash,
+        force_full_download,
+    )
+    cached_pending_list, pending_list = await _load_pending_download_lists(
+        cfg, mode, force_full_download
+    )
+    pending_items_outside_mode = _pending_items_outside_mode(cached_pending_list, mode)
+    download_list = _merge_pending_and_new_download_lists(
+        pending_list, new_download_list
+    )
+
+    if not download_list:
+        await _complete_with_empty_download_list(
+            cfg,
+            mode,
+            fetch_result.headers,
+            fetch_result.cookie,
+            pending_items_outside_mode,
+            extracted_dir_is_temporary,
+            start_time,
+        )
+        return
+
+    await _complete_with_download_list(
+        cfg,
+        mode,
+        fetch_result.headers,
+        fetch_result.cookie,
+        download_list,
+        pending_items_outside_mode,
+        extracted_dir_is_temporary,
+        start_time,
+    )
+
+
 async def _run_main(
     update_asset_bundle_info_only: bool = False,
     force_full_download: bool = False,
@@ -130,10 +432,7 @@ async def _run_main(
         force_full_download,
     )
 
-    # ensure required directories exist
-    await ensure_dir_exists(cfg.DL_LIST_CACHE_PATH.parent)
-    await ensure_dir_exists(cfg.ASSET_BUNDLE_INFO_CACHE_PATH.parent)
-    await ensure_dir_exists(cfg.GAME_VERSION_JSON_CACHE_PATH.parent)
+    await _ensure_run_cache_dirs(cfg)
     headers, cookie = await build_request_headers(cfg)
 
     if force_full_download:
@@ -143,200 +442,33 @@ async def _run_main(
 
     logger.info("RUN | step=1/4 | action=fetch_metadata")
     fetch_result = await fetch_asset_bundle_info(cfg, headers=headers, cookie=cookie)
-    headers = fetch_result.headers
-    cookie = fetch_result.cookie
-    game_version_json = fetch_result.game_version_json
-    asset_ver = fetch_result.asset_ver
-    assetbundle_host_hash = fetch_result.assetbundle_host_hash
-    asset_bundle_info = fetch_result.asset_bundle_info
-
     logger.info(
         "RUN | action=metadata_fetched | asset_ver=%s | bundle_count=%d",
-        asset_ver,
-        len(asset_bundle_info.get("bundles", {})),
+        fetch_result.asset_ver,
+        len(fetch_result.asset_bundle_info.get("bundles", {})),
     )
 
     if update_asset_bundle_info_only:
-        logger.info("RUN | step=2/2 | action=write_metadata_cache")
-        current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
-        if not current_bundles:
-            raise ValueError("bundles must be set in asset bundle info")
-
-        current_bundles = select_bundles_for_download(
-            filter_bundles_for_mode(current_bundles, mode),
-            include_list=cfg.DL_INCLUDE_LIST,
-            exclude_list=cfg.DL_EXCLUDE_LIST,
-            automatic_prefixes=automatic_prefixes,
+        await _write_metadata_only_cache(
+            cfg,
+            mode,
+            automatic_prefixes,
+            fetch_result.asset_bundle_info,
+            fetch_result.game_version_json,
+            start_time,
         )
-        if not current_bundles:
-            raise ValueError("No bundles found after filtering")
-
-        async with await open_file(cfg.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
-            await f.write(
-                json.dumps(
-                    {
-                        "version": asset_bundle_info.get("version", ""),
-                        "os": asset_bundle_info.get("os", ""),
-                        "bundles": current_bundles,
-                    },
-                    option=json.OPT_INDENT_2,
-                )
-            )
-        async with await open_file(cfg.GAME_VERSION_JSON_CACHE_PATH, "wb") as f:
-            await f.write(json.dumps(game_version_json, option=json.OPT_INDENT_2))
-        logger.info(
-            "RUN | result=metadata_updated | path=%s | filtered_bundles=%d",
-            cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
-            len(current_bundles),
-        )
-        logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
         return
 
-    # Charts consume extracted scores from local/normal remote storage and do
-    # not participate in the asset-bundle download pipeline at all.
-    # Generate the download list from the latest version info
-    logger.info("RUN | step=2/4 | action=build_download_list")
-    # get_download_list applies the user filters and writes the metadata cache;
-    # the mandatory mode scope is applied both before and after it so it cannot
-    # be bypassed by a cached queue or a broad include expression.
-    asset_bundle_info = dict(asset_bundle_info)
-    asset_bundle_info["bundles"] = filter_bundles_for_mode(
-        asset_bundle_info.get("bundles", {}), mode
-    )
-    new_download_list: List[DownloadItem] = await get_download_list(
-        asset_bundle_info,
-        game_version_json,
-        config=cfg,
-        assetver=asset_ver,
-        assetbundle_host_hash=assetbundle_host_hash,
-        include_list=cfg.DL_INCLUDE_LIST,
-        exclude_list=cfg.DL_EXCLUDE_LIST,
-        priority_list=cfg.DL_PRIORITY_LIST,
-        force_full_download=force_full_download,
-        automatic_prefixes=automatic_prefixes,
-        bundle_cache_path_resolver=lambda bundle: get_bundle_cache_path(cfg, bundle),
-    )
-    new_download_list = filter_download_items_for_mode(new_download_list, mode)
-    logger.debug("New download candidates: %d item(s)", len(new_download_list))
-
-    # If there are pending items from a previous interrupted run, merge them:
-    # existing pending items come first so they are retried, new items follow.
-    # Items that already appear in the pending list are not duplicated.
-    cached_pending_list: List[DownloadItem] = []
-    pending_list: List[DownloadItem] = []
-    if (not force_full_download) and await cfg.DL_LIST_CACHE_PATH.exists():
-        async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-            cached_pending_list = json.loads(await f.read())
-            pending_list = filter_download_items_for_mode(cached_pending_list, mode)
-        logger.info(
-            "RUN | action=load_pending | count=%d | path=%s",
-            len(pending_list),
-            cfg.DL_LIST_CACHE_PATH,
-        )
-
-    pending_items_outside_mode = _pending_items_outside_mode(cached_pending_list, mode)
-
-    if pending_list and new_download_list:
-        pending_bundle_names = {
-            bundle.get("bundleName") for _, bundle in pending_list
-        }
-        deduped_new = [
-            item for item in new_download_list
-            if item[1].get("bundleName") not in pending_bundle_names
-        ]
-        download_list: List[DownloadItem] = dedupe_download_items(
-            pending_list + deduped_new
-        )
-        logger.info(
-            "RUN | action=merge_download_list | pending=%d | new=%d | total=%d",
-            len(pending_list),
-            len(deduped_new),
-            len(download_list),
-        )
-    elif pending_list:
-        download_list = pending_list
-        logger.info(
-            "RUN | action=retry_pending_only | count=%d", len(pending_list)
-        )
-    else:
-        download_list = new_download_list
-
-    if not download_list:
-        logger.info("RUN | result=noop | reason=no_items | postprocess=true")
-        if pending_items_outside_mode:
-            async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
-                await f.write(
-                    json.dumps(pending_items_outside_mode, option=json.OPT_INDENT_2)
-                )
-        is_success = await do_download([], config=cfg, headers=headers, cookie=cookie)
-        if is_success:
-            for specialized_mode in get_enabled_specialized_modes(mode, cfg):
-                await run_specialized_postprocess(
-                    specialized_mode,
-                    cfg,
-                    extracted_dir_is_temporary=extracted_dir_is_temporary,
-                )
-        logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
-        return
-
-    logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
-
-    # Persist the (merged) list so a mid-run crash can be resumed
-    logger.info("RUN | step=3/4 | action=persist_queue | path=%s", cfg.DL_LIST_CACHE_PATH)
-    async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
-        await f.write(
-            json.dumps(
-                dedupe_download_items(pending_items_outside_mode + download_list),
-                option=json.OPT_INDENT_2,
-            )
-        )
-
-    is_success = await do_download(
-        download_list, config=cfg, headers=headers, cookie=cookie
+    await _run_full_download_pipeline(
+        cfg,
+        mode,
+        force_full_download,
+        extracted_dir_is_temporary,
+        automatic_prefixes,
+        fetch_result,
+        start_time,
     )
 
-    if not is_success and pending_items_outside_mode:
-        failed_current_list: List[DownloadItem] = []
-        if await cfg.DL_LIST_CACHE_PATH.exists():
-            async with await open_file(cfg.DL_LIST_CACHE_PATH, "r") as f:
-                failed_current_list = filter_download_items_for_mode(
-                    json.loads(await f.read()), mode
-                )
-        async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
-            await f.write(
-                json.dumps(
-                    dedupe_download_items(
-                        pending_items_outside_mode + failed_current_list
-                    ),
-                    option=json.OPT_INDENT_2,
-                )
-            )
-
-    if is_success:
-        for specialized_mode in get_enabled_specialized_modes(mode, cfg):
-            await run_specialized_postprocess(
-                specialized_mode,
-                cfg,
-                extracted_dir_is_temporary=extracted_dir_is_temporary,
-            )
-
-    # remove the cached download list
-    if is_success and len(download_list) > 0:
-        if pending_items_outside_mode:
-            async with await open_file(cfg.DL_LIST_CACHE_PATH, "wb") as f:
-                await f.write(
-                    json.dumps(
-                        pending_items_outside_mode, option=json.OPT_INDENT_2
-                    )
-                )
-        else:
-            await cfg.DL_LIST_CACHE_PATH.unlink()
-        logger.debug(
-            "Cleanup complete: removed pending list cache %s",
-            cfg.DL_LIST_CACHE_PATH,
-        )
-
-    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
 
 async def main(

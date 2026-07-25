@@ -129,47 +129,59 @@ def _storage_source_path(storage: dict) -> StdPath:
     return StdPath(storage["base"]) / "music" / "music_score"
 
 
+async def _stop_chart_source_process(process) -> None:
+    """Terminate a timed-out chart source process, escalating to kill if needed."""
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        await asyncio.wait_for(
+            process.wait(), timeout=CHART_SOURCE_TERMINATE_TIMEOUT
+        )
+    except (asyncio.TimeoutError, ProcessLookupError):
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        await process.wait()
+
+
+async def _copy_chart_sources_from_one_storage(
+    storage: dict,
+    target_dir: StdPath,
+    config,
+) -> None:
+    """Run one normal-storage chart source copy and enforce success."""
+    source_dir = _storage_source_path(storage)
+    args = storage["args"][:]
+    args[args.index("src")] = str(source_dir)
+    args[args.index("dst")] = str(target_dir)
+    process = await asyncio.create_subprocess_exec(storage["program"], *args)
+    timeout = get_request_timeout(config).total
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        logger.warning(
+            "Timed out loading chart sources from normal storage %s",
+            storage.get("base", "<unknown>"),
+        )
+        await _stop_chart_source_process(process)
+        raise RuntimeError("command timed out") from exc
+    if process.returncode != 0:
+        raise RuntimeError(f"command exited with status {process.returncode}")
+
+
 async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> None:
     """Copy chart sources from the first successful normal asset mirror."""
     target_dir = extracted_dir / "music" / "music_score"
     target_dir.mkdir(parents=True, exist_ok=True)
     errors = []
     for storage in get_normal_storage_candidates(config):
-        source_dir = _storage_source_path(storage)
         try:
-            args = storage["args"][:]
-            args[args.index("src")] = str(source_dir)
-            args[args.index("dst")] = str(target_dir)
-            process = await asyncio.create_subprocess_exec(
-                storage["program"], *args
+            await _copy_chart_sources_from_one_storage(
+                storage, target_dir, config
             )
-            timeout = get_request_timeout(config).total
-            try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
-            except asyncio.TimeoutError as exc:
-                logger.warning(
-                    "Timed out loading chart sources from normal storage %s",
-                    storage.get("base", "<unknown>"),
-                )
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    await asyncio.wait_for(
-                        process.wait(), timeout=CHART_SOURCE_TERMINATE_TIMEOUT
-                    )
-                except (asyncio.TimeoutError, ProcessLookupError):
-                    try:
-                        process.kill()
-                    except ProcessLookupError:
-                        pass
-                    await process.wait()
-                raise RuntimeError("command timed out") from exc
-            if process.returncode != 0:
-                raise RuntimeError(
-                    f"command exited with status {process.returncode}"
-                )
             if not has_local_chart_sources(extracted_dir):
                 raise RuntimeError("storage did not provide any chart .txt files")
             logger.info("Loaded chart sources from normal storage %s", storage["base"])
