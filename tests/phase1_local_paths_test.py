@@ -188,5 +188,15 @@ def test_worker_disk_gate_supports_temporary_bundle_download(
     _, root, relative, *_ = download_mock.await_args.args
     assert Path(root).is_dir()
     assert relative.startswith("tmp")
-    assert Path(root) / relative == Path(root) / relative
+    destination = Path(root) / relative
+    assert destination.parent == Path(root)
+    assert destination.name == relative
+    assert destination.is_relative_to(Path(root))
     assert not failed_tasks
+
+
+def test_worker_download_destination_guard_is_explicit() -> None:
+    """Download path setup must not rely on assert (disabled under -O)."""
+    source = Path(worker.__file__).read_text(encoding="utf-8")
+    assert "assert download_root is not None" not in source
+    assert "assert download_relative_path is not None" not in source

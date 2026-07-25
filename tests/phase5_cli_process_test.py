@@ -16,11 +16,14 @@ class _HangingProcess:
         self.returncode: int | None = None
         self.terminate_called = False
         self.kill_called = False
+        self.terminate_calls = 0
+        self.wait_calls = 0
         self._terminate_exits = terminate_exits
         self._exited = asyncio.Event()
 
     def terminate(self) -> None:
         self.terminate_called = True
+        self.terminate_calls += 1
         if self._terminate_exits:
             self.returncode = -15
             self._exited.set()
@@ -31,8 +34,13 @@ class _HangingProcess:
         self._exited.set()
 
     async def wait(self) -> int:
+        self.wait_calls += 1
         await self._exited.wait()
         return self.returncode or 0
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await self._exited.wait()
+        return b"", b""
 
 
 class _ArtifactProcess:
@@ -83,6 +91,36 @@ def test_wait_cancellation_terminates_before_reraising() -> None:
 
     async def scenario() -> None:
         task = asyncio.create_task(bundle._wait_for_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert process.terminate_called
+    assert process.returncode is not None
+
+
+def test_helpers_wait_cancellation_terminates_before_reraising() -> None:
+    process = _HangingProcess(terminate_exits=True)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(helpers._wait_for_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert process.terminate_called
+    assert process.returncode is not None
+
+
+def test_communicate_cancellation_terminates_before_reraising() -> None:
+    process = _HangingProcess(terminate_exits=True)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -316,3 +354,199 @@ def test_validate_config_requires_selected_executables(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="vgmstream-cli"):
         main.validate_config(config)  # type: ignore[arg-type]
+
+
+def test_repeated_cancel_during_terminate_runs_single_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated cancellation must not start concurrent terminate sequences."""
+    process = _HangingProcess(terminate_exits=True)
+    calls = {"n": 0}
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_terminate = bundle._terminate_process
+
+    async def slow_terminate(proc) -> None:
+        calls["n"] += 1
+        started.set()
+        await release.wait()
+        await original_terminate(proc)
+
+    monkeypatch.setattr(bundle, "_terminate_process", slow_terminate)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(bundle._wait_for_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert calls["n"] == 1
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 2  # initial wait + terminate reap wait
+    assert process.returncode is not None
+
+
+def test_helpers_repeated_cancel_during_terminate_runs_single_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _HangingProcess(terminate_exits=True)
+    calls = {"n": 0}
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_terminate = helpers._terminate_process
+
+    async def slow_terminate(proc) -> None:
+        calls["n"] += 1
+        started.set()
+        await release.wait()
+        await original_terminate(proc)
+
+    monkeypatch.setattr(helpers, "_terminate_process", slow_terminate)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(helpers._wait_for_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert calls["n"] == 1
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 2
+    assert process.returncode is not None
+
+
+def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _HangingProcess(terminate_exits=True)
+    calls = {"n": 0}
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original_terminate = bundle._terminate_process
+
+    async def slow_terminate(proc) -> None:
+        calls["n"] += 1
+        started.set()
+        await release.wait()
+        await original_terminate(proc)
+
+    monkeypatch.setattr(bundle, "_terminate_process", slow_terminate)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    assert calls["n"] == 1
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 1  # communicate path reaps via wait only in terminate
+    assert process.returncode is not None
+
+
+@pytest.mark.parametrize(
+    ("module", "waiter", "task_attribute"),
+    [
+        (bundle, bundle._wait_for_process, "_bundle_terminate_task"),
+        (helpers, helpers._wait_for_process, "_helpers_terminate_task"),
+    ],
+)
+def test_cancelled_wait_preserves_cancellation_when_termination_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    module,
+    waiter,
+    task_attribute: str,
+) -> None:
+    process = _HangingProcess(terminate_exits=True)
+    termination_started = asyncio.Event()
+    fail_termination = asyncio.Event()
+    terminate_calls = {"count": 0}
+
+    async def failing_terminate(proc) -> None:
+        terminate_calls["count"] += 1
+        termination_started.set()
+        await fail_termination.wait()
+        raise RuntimeError("termination failed")
+
+    monkeypatch.setattr(module, "_terminate_process", failing_terminate)
+
+    async def scenario() -> asyncio.CancelledError:
+        task = asyncio.create_task(waiter(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        await termination_started.wait()
+        task.cancel()
+        fail_termination.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        return caught.value
+
+    cancellation = asyncio.run(scenario())
+    assert cancellation.__cause__ is None
+    assert cancellation.__suppress_context__
+    assert cancellation.__context__ is None
+    assert terminate_calls["count"] == 1
+    assert process.terminate_calls == 0
+    assert process._terminate_exits
+    termination_task = getattr(process, task_attribute)
+    assert termination_task.done()
+    assert termination_task.exception() is not None
+
+
+def test_cancelled_communicate_preserves_cancellation_when_termination_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _HangingProcess(terminate_exits=True)
+    termination_started = asyncio.Event()
+    fail_termination = asyncio.Event()
+    terminate_calls = {"count": 0}
+
+    async def failing_terminate(_proc) -> None:
+        terminate_calls["count"] += 1
+        termination_started.set()
+        await fail_termination.wait()
+        raise RuntimeError("termination failed")
+
+    monkeypatch.setattr(bundle, "_terminate_process", failing_terminate)
+
+    async def scenario() -> asyncio.CancelledError:
+        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
+        await asyncio.sleep(0)
+        task.cancel()
+        await termination_started.wait()
+        task.cancel()
+        fail_termination.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await task
+        return caught.value
+
+    cancellation = asyncio.run(scenario())
+    assert cancellation.__cause__ is None
+    assert cancellation.__suppress_context__
+    assert cancellation.__context__ is None
+    assert terminate_calls["count"] == 1
+    assert process.terminate_calls == 0
+    termination_task = getattr(process, "_bundle_terminate_task")
+    assert termination_task.done()
+    assert termination_task.exception() is not None

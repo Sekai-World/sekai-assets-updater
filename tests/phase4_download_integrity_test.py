@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -552,3 +553,53 @@ def test_run_pipeline_cancellation_cleans_inflight_temporary_destination(monkeyp
 
     asyncio.run(run())
     assert not captured["path"].exists()
+
+
+def test_download_uses_async_open_file_for_temp_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _unityfs()
+    target = tmp_path / "bundle"
+    target.write_bytes(b"old")
+    response = _Response(data)
+    config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
+    created_descriptors: list[int] = []
+    original_mkstemp = bundle.tempfile.mkstemp
+    open_file_calls: list[object] = []
+    original_open_file = bundle.open_file
+
+    def record_mkstemp(*args, **kwargs):
+        descriptor, temporary_name = original_mkstemp(*args, **kwargs)
+        created_descriptors.append(descriptor)
+        return descriptor, temporary_name
+
+    async def record_open_file(file, *args, **kwargs):
+        open_file_calls.append(file)
+        return await original_open_file(file, *args, **kwargs)
+
+    monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(bundle, "open_file", record_open_file)
+
+    def fail_fdopen(*_args, **_kwargs):
+        raise AssertionError("sync os.fdopen used in async download path")
+
+    monkeypatch.setattr(bundle.os, "fdopen", fail_fdopen)
+
+    asyncio.run(
+        bundle.download_deobfuscate_bundle(
+            "https://example.test/bundle",
+            AnyioPath(tmp_path),
+            "bundle",
+            {},
+            config=config,
+            session=_Session(response),
+        )
+    )
+
+    assert target.read_bytes() == data
+    assert open_file_calls
+    assert open_file_calls[0] in created_descriptors
+    for descriptor in created_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert not list(tmp_path.glob(".bundle.*.tmp"))

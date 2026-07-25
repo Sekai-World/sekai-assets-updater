@@ -330,15 +330,66 @@ async def _terminate_process(process) -> None:
         await process.wait()
 
 
+async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
+    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
+    task = getattr(process, "_helpers_terminate_task", None)
+    if task is None:
+        task = asyncio.create_task(_terminate_process(process))
+        process._helpers_terminate_task = task
+
+    cancellation_seen = False
+    cleanup_error: BaseException | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            # Keep waiting on the same shielded task. Never start a second
+            # termination sequence while the first one is still in progress.
+            cancellation_seen = True
+            if task.done():
+                break
+        except BaseException as exc:
+            cleanup_error = exc
+            break
+
+    if task.done():
+        try:
+            task.result()
+        except asyncio.CancelledError as exc:
+            if not cancellation_seen:
+                cleanup_error = exc
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if cancellation_seen:
+        if cleanup_error is not None:
+            logger.error(
+                "Process termination cleanup failed while propagating cancellation: %s",
+                cleanup_error,
+            )
+        return None, True
+    return cleanup_error, False
+
+
 async def _wait_for_process(process, timeout: float) -> int:
+    original_error: BaseException | None = None
+    cancellation = False
     try:
         return await asyncio.wait_for(process.wait(), timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        try:
-            await asyncio.shield(_terminate_process(process))
-        except asyncio.CancelledError:
-            await _terminate_process(process)
-        raise
+    except asyncio.CancelledError as exc:
+        original_error = exc
+        cancellation = True
+    except asyncio.TimeoutError as exc:
+        original_error = exc
+
+    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    if cancellation or cleanup_cancelled:
+        raise asyncio.CancelledError() from None
+    if cleanup_error is not None:
+        raise cleanup_error from None
+    raise original_error
 
 
 def build_metadata_headers(config) -> dict[str, str]:

@@ -212,8 +212,8 @@ async def _download_stage(
             bundle_save_path: Union[Path, None] = None
             tmp_bundle_save_file = None
             remove_bundle_after_extract = False
-            download_root: Path | None = None
-            download_relative_path: str | None = None
+            download_root: Path
+            download_relative_path: str
 
             try:
                 if worker_cookie:
@@ -248,8 +248,6 @@ async def _download_stage(
                     download_relative_path = bundle_save_path.name
 
                 if download_disk_space_gate is not None:
-                    assert download_root is not None
-                    assert download_relative_path is not None
                     async with download_disk_space_gate.reserve(
                         required_download_bytes,
                         label,
@@ -264,8 +262,6 @@ async def _download_stage(
                             expected_bundle=bundle,
                         )
                 else:
-                    assert download_root is not None
-                    assert download_relative_path is not None
                     await download_deobfuscate_bundle(
                         url,
                         download_root,

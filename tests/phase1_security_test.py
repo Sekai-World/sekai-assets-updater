@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+import bundle
 import security
 
 
@@ -125,3 +128,33 @@ def test_atomic_write_bytes_cleans_temp_file_when_replace_fails(
 
     assert target.read_bytes() == b"old"
     assert list(tmp_path.glob(".payload.bin.*.tmp")) == []
+
+
+def test_save_image_formats_uses_closed_race_safe_tempfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_path = tmp_path / "texture.asset"
+    created_descriptors: list[int] = []
+    original_mkstemp = bundle.tempfile.mkstemp
+
+    def record_mkstemp(*args, **kwargs):
+        descriptor, temporary_name = original_mkstemp(*args, **kwargs)
+        created_descriptors.append(descriptor)
+        return descriptor, temporary_name
+
+    monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(
+        bundle.tempfile,
+        "mktemp",
+        lambda *args, **kwargs: pytest.fail("insecure tempfile.mktemp was called"),
+    )
+
+    with Image.new("RGBA", (1, 1), (255, 0, 0, 255)) as image:
+        saved_paths = bundle._save_image_formats(image, save_path, ("PNG",))
+
+    assert saved_paths == [tmp_path / "texture.PNG"]
+    for descriptor in created_descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert saved_paths[0].read_bytes()
+    assert list(tmp_path.glob(".texture.PNG.*.tmp")) == []

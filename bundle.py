@@ -179,28 +179,87 @@ async def _terminate_process(process) -> None:
         await process.wait()
 
 
+async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
+    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
+    task = getattr(process, "_bundle_terminate_task", None)
+    if task is None:
+        task = asyncio.create_task(_terminate_process(process))
+        process._bundle_terminate_task = task
+
+    cancellation_seen = False
+    cleanup_error: BaseException | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError as exc:
+            # Keep waiting on the same shielded task. Never start a second
+            # termination sequence while the first one is still in progress.
+            cancellation_seen = True
+            if task.done():
+                break
+        except BaseException as exc:
+            cleanup_error = exc
+            break
+
+    if task.done():
+        try:
+            task.result()
+        except asyncio.CancelledError as exc:
+            if not cancellation_seen:
+                cleanup_error = exc
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if cancellation_seen:
+        if cleanup_error is not None:
+            logger.error(
+                "Process termination cleanup failed while propagating cancellation: %s",
+                cleanup_error,
+            )
+        return None, True
+    return cleanup_error, False
+
+
 async def _wait_for_process(process, timeout: float) -> int:
+    original_error: BaseException | None = None
+    cancellation = False
     try:
         return await asyncio.wait_for(process.wait(), timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        try:
-            await asyncio.shield(_terminate_process(process))
-        except asyncio.CancelledError:
-            await _terminate_process(process)
-        _cleanup_process_output(process, remove_direct_output=True)
-        raise
+    except asyncio.CancelledError as exc:
+        original_error = exc
+        cancellation = True
+    except asyncio.TimeoutError as exc:
+        original_error = exc
+
+    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    _cleanup_process_output(process, remove_direct_output=True)
+    if cancellation or cleanup_cancelled:
+        raise asyncio.CancelledError() from None
+    if cleanup_error is not None:
+        raise cleanup_error from None
+    raise original_error
 
 
 async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
+    original_error: BaseException | None = None
+    cancellation = False
     try:
         return await asyncio.wait_for(process.communicate(), timeout)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        try:
-            await asyncio.shield(_terminate_process(process))
-        except asyncio.CancelledError:
-            await _terminate_process(process)
-        _cleanup_process_output(process, remove_direct_output=True)
-        raise
+    except asyncio.CancelledError as exc:
+        original_error = exc
+        cancellation = True
+    except asyncio.TimeoutError as exc:
+        original_error = exc
+
+    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    _cleanup_process_output(process, remove_direct_output=True)
+    if cancellation or cleanup_cancelled:
+        raise asyncio.CancelledError() from None
+    if cleanup_error is not None:
+        raise cleanup_error from None
+    raise original_error
 
 
 def _set_process_output_paths(process, output_path: StdPath, staging_dir: StdPath) -> None:
@@ -1459,14 +1518,27 @@ def _save_image_formats(
         logger.debug("Saving texture to %s", output_path)
         if output_path.exists() and output_path.is_symlink():
             raise SecurityError(f"image output must not be a symlink: {output_path}")
-        temporary_path = StdPath(
-            tempfile.mktemp(prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent)
-        )
+        temporary_path: StdPath | None = None
+        descriptor: int | None = None
         try:
-            image.save(temporary_path, format=image_format)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{output_path.name}.",
+                suffix=".tmp",
+                dir=output_path.parent,
+            )
+            temporary_path = StdPath(temporary_name)
+            with os.fdopen(descriptor, "w+b") as temporary_file:
+                descriptor = None
+                image.save(temporary_file, format=image_format)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
             os.replace(temporary_path, output_path)
+            temporary_path = None
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if descriptor is not None:
+                os.close(descriptor)
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         saved_paths.append(output_path)
     return saved_paths
 
@@ -1907,6 +1979,7 @@ async def download_deobfuscate_bundle(
                     )
                 raise DownloadIntegrityError(f"download returned HTTP status {response.status}")
             temporary_path: StdPath | None = None
+            descriptor: int | None = None
             raw_bytes = 0
             stored_bytes = 0
             header = bytearray()
@@ -1966,14 +2039,15 @@ async def download_deobfuscate_bundle(
                     prefix=f".{bundle_save_path.name}.", suffix=".tmp", dir=bundle_save_path.parent
                 )
                 temporary_path = StdPath(temporary_name)
-                with os.fdopen(descriptor, "wb") as output:
+                async with await open_file(descriptor, "wb") as output:
+                    descriptor = None
                     async for raw_chunk in response.content.iter_chunked(1024 * 1024):
                         raw_bytes += len(raw_chunk)
                         for output_chunk in transform_chunk(raw_chunk):
-                            output.write(output_chunk)
+                            await output.write(output_chunk)
                             stored_bytes += len(output_chunk)
-                    output.flush()
-                    os.fsync(output.fileno())
+                    await output.flush()
+                    await asyncio.to_thread(os.fsync, output.wrapped.fileno())
                 if header_mode == "obfuscated" and len(header) < 132:
                     raise DownloadIntegrityError("truncated obfuscated header")
                 content_length = response.headers.get("Content-Length")
@@ -1991,6 +2065,11 @@ async def download_deobfuscate_bundle(
                 os.replace(temporary_path, StdPath(bundle_save_path.as_posix()))
                 temporary_path = None
             finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
                 if temporary_path is not None:
                     try:
                         temporary_path.unlink(missing_ok=True)
