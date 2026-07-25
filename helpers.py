@@ -12,7 +12,8 @@ from http.cookies import SimpleCookie
 from logging.handlers import QueueHandler, QueueListener
 from queue import SimpleQueue
 from string import Formatter
-from typing import AsyncIterator, Dict, List, Tuple
+from typing import AsyncIterator, Dict, List, Mapping, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import orjson as json
@@ -33,6 +34,58 @@ DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
 DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
 DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
+DEFAULT_EXTERNAL_PROCESS_TIMEOUT = 300.0
+_EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
+
+_SENSITIVE_HEADER_RE = re.compile(
+    r"(?:^|[-_])(authorization|cookie|set-cookie|api[-_]?key|api[-_]?token|"
+    r"access[-_]?token|refresh[-_]?token|auth[-_]?token|client[-_]?secret|"
+    r"secret|credential)(?:$|[-_])",
+    re.IGNORECASE,
+)
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(?:^|[-_])(signature|sig|token|access[-_]?token|auth|authorization|"
+    r"api[-_]?key|secret|credential|policy|key|key[-_]?id|access[-_]?key|"
+    r"aws[-_]?access[-_]?key[-_]?id|expires|date)(?:$|[-_])|"
+    r"^(?:x[-_]amz|cloudfront)[-_]",
+    re.IGNORECASE,
+)
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?<![\w-])"
+    r"(?P<prefix>(?:token|api[-_]key|api[-_]token|access[-_]token|refresh[-_]token|"
+    r"auth[-_]token|authorization|proxy[-_]authorization|client[-_]secret|"
+    r"secret|credential|body|response[-_]body)\b\s*[:=]\s*)"
+    r"(?:(?P<single>'(?P<single_value>[^']*)')|"
+    r"(?P<double>\"(?P<double_value>[^\"]*)\")|"
+    r"(?P<bare>[^\s,;]+))",
+    re.IGNORECASE,
+)
+_TOKEN_HEADER_ASSIGNMENT_RE = re.compile(
+    r"(?P<prefix>\bX[-_](?:Api[-_]Token|Access[-_]Token)\b\s*[:=]\s*)"
+    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_API_KEY_HEADER_ASSIGNMENT_RE = re.compile(
+    r"(?P<prefix>\bX[-_]Api[-_]Key\b\s*[:=]\s*)"
+    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
+    r"(?P<prefix>\b(?:authorization|proxy[-_]authorization)\b\s*[:=]\s*)"
+    r"(?:(?:Bearer|Basic)\s+)?"
+    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
+    re.IGNORECASE,
+)
+_COOKIE_MORSEL_RE = re.compile(
+    r"(?P<name>[^\s=;,]+)(?P<separator>\s*=\s*)"
+    r"(?:(?P<single>'[^']*')|(?P<double>\"[^\"]*\")|(?P<bare>[^;\s,]+))",
+)
+_COOKIE_TEXT_RE = re.compile(
+    r"(?P<prefix>\bCookie\b\s*[:=]\s*)(?P<value>[^\r\n]*)",
+    re.IGNORECASE,
+)
+_REDACTED = "<redacted>"
 
 
 @dataclass(frozen=True)
@@ -132,7 +185,7 @@ def get_template_placeholders(template: str) -> set[str]:
     }
 
 
-def format_url_template(template: str, **values: str) -> str:
+def format_url_template(template: str, **values: str | None) -> str:
     placeholders = get_template_placeholders(template)
     missing_placeholders = [
         name for name in placeholders if name not in values or values[name] is None
@@ -141,11 +194,86 @@ def format_url_template(template: str, **values: str) -> str:
         missing_fields = ", ".join(sorted(missing_placeholders))
         raise ValueError(f"Missing format values for {missing_fields}: {template}")
 
-    normalized_values = {
-        name: values[name].strip() if isinstance(values[name], str) else values[name]
-        for name in placeholders
-    }
+    normalized_values = {}
+    for name in placeholders:
+        value = values[name]
+        if isinstance(value, str):
+            normalized_values[name] = value.strip()
+        else:
+            normalized_values[name] = value
     return template.format(**normalized_values)
+
+
+def sanitize_headers(headers: Mapping | None) -> dict[str, str]:
+    """Return headers safe to include in logs.
+
+    Header names are treated case-insensitively.  In particular, this avoids
+    accidentally exposing credentials when a caller uses a differently cased
+    spelling of ``Cookie`` or an API key header.
+    """
+    if not headers:
+        return {}
+    sanitized = {}
+    for name, value in headers.items():
+        name_text = str(name)
+        if name_text.casefold() == "cookie":
+            sanitized[name_text] = _sanitize_cookie_value(str(value))
+        else:
+            sanitized[name_text] = (
+                _REDACTED if _SENSITIVE_HEADER_RE.search(name_text) else str(value)
+            )
+    return sanitized
+
+
+def _sanitize_cookie_value(value: str) -> str:
+    sanitized = _COOKIE_MORSEL_RE.sub(
+        lambda match: f"{match.group('name')}{match.group('separator')}{_REDACTED}",
+        value,
+    )
+    return sanitized if sanitized != value else _REDACTED
+
+
+def _sanitize_assignment(match: re.Match[str]) -> str:
+    return f"{match.group('prefix')}{_REDACTED}"
+
+
+def sanitize_url(url: str) -> str:
+    """Redact signed and credential-bearing query values without hiding the URL."""
+    try:
+        parts = urlsplit(str(url))
+        query = urlencode(
+            [
+                (key, _REDACTED if _SENSITIVE_QUERY_RE.search(key) else value)
+                for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            ]
+        )
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+    except (TypeError, ValueError):
+        # Logging must not turn an otherwise useful error into a second error.
+        return "<invalid-url>"
+
+
+def sanitize_http_log_value(value):
+    """Sanitize common HTTP values before they are passed to a logger."""
+    if isinstance(value, Mapping):
+        return sanitize_headers(value)
+    if isinstance(value, str) and "://" in value:
+        value = _HTTP_URL_RE.sub(lambda match: sanitize_url(match.group(0)), value)
+    if isinstance(value, str):
+        value = _COOKIE_TEXT_RE.sub(
+            lambda match: f"{match.group('prefix')}{_sanitize_cookie_value(match.group('value'))}",
+            value,
+        )
+        value = _API_KEY_HEADER_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
+        value = _TOKEN_HEADER_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
+        value = _AUTHORIZATION_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
+        value = _SENSITIVE_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
+    return value
+
+
+def sanitize_log_label(value) -> str:
+    """Return a safe, printable label for pipeline diagnostics."""
+    return str(sanitize_http_log_value(str(value)))
 
 
 def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
@@ -168,6 +296,75 @@ def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
         return aiohttp.ClientTimeout(total=None)
 
     return aiohttp.ClientTimeout(total=timeout_seconds)
+
+
+def get_http_session_options(config=None) -> dict[str, object]:
+    """Build the common aiohttp session options for configured HTTP requests."""
+    return {
+        "proxy": getattr(config, "PROXY_URL", None),
+        "timeout": get_request_timeout(config),
+    }
+
+
+def _get_external_process_timeout(config=None) -> float:
+    value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", DEFAULT_EXTERNAL_PROCESS_TIMEOUT)
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}") from None
+    if timeout <= 0:
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}")
+    return timeout
+
+
+async def _terminate_process(process) -> None:
+    """Terminate a child, kill it after the grace period, and await exit."""
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), _EXTERNAL_PROCESS_TERMINATE_GRACE)
+    except asyncio.TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+async def _wait_for_process(process, timeout: float) -> int:
+    try:
+        return await asyncio.wait_for(process.wait(), timeout)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        try:
+            await asyncio.shield(_terminate_process(process))
+        except asyncio.CancelledError:
+            await _terminate_process(process)
+        raise
+
+
+def build_metadata_headers(config) -> dict[str, str]:
+    """Headers allowed on metadata and game API requests."""
+    headers = {
+        "Accept": "*/*",
+        "X-Unity-Version": config.UNITY_VERSION,
+    }
+    if config.USER_AGENT:
+        headers["User-Agent"] = config.USER_AGENT
+    return headers
+
+
+def build_cookie_request_headers() -> dict[str, str]:
+    """Cookie acquisition must not receive public or credential-bearing headers."""
+    return {}
+
+
+def build_cdn_headers(cookie: str | None = None) -> dict[str, str]:
+    """Build headers for a CDN request without adding public API headers.
+
+    This is intentionally separate from :func:`build_metadata_headers` so
+    future download callers cannot accidentally send Unity/API headers to a
+    signed CDN endpoint.
+    """
+    return {"Cookie": cookie} if cookie else {}
 
 
 def get_download_max_retries(config=None) -> int:
@@ -371,12 +568,8 @@ async def get_download_list(
     cached_asset_bundle_info = None
     cached_game_version_json = None
     assert config, "Config must be provided to get_download_list"
-    assert config.ASSET_BUNDLE_INFO_CACHE_PATH, (
-        "ASSET_BUNDLE_INFO_CACHE_PATH must be set in config"
-    )
-    assert config.GAME_VERSION_JSON_CACHE_PATH, (
-        "GAME_VERSION_JSON_CACHE_PATH must be set in config"
-    )
+    assert config.ASSET_BUNDLE_INFO_CACHE_PATH, "ASSET_BUNDLE_INFO_CACHE_PATH must be set in config"
+    assert config.GAME_VERSION_JSON_CACHE_PATH, "GAME_VERSION_JSON_CACHE_PATH must be set in config"
     if not force_full_download:
         try:
             cached_asset_bundle_info = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
@@ -403,46 +596,42 @@ async def get_download_list(
     assert current_bundles, "No bundles found after filtering"
     if cached_asset_bundle_info and cached_game_version_json:
         if assetver:
-            cached_assetver = cached_game_version_json.get("assetver", None)
-            if cached_assetver != assetver:
-                cached_bundles: Dict[str, Dict] = (
-                    cached_asset_bundle_info.get("bundles") or {}
-                )
+            # Nuverse's assetver identifies the metadata endpoint, but it is
+            # not a sufficient change signal for the bundles themselves.
+            # Compare checksums even when the fetched assetver is unchanged;
+            # conversely, an assetver change alone must not redownload all
+            # bundles.
+            cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
 
-                changed_bundles = [
-                    bundle
-                    for bundle in current_bundles.values()
-                    if bundle_has_changed(
-                        bundle,
-                        cached_bundles.get(bundle.get("bundleName", ""), {}),
-                    )
-                ]
+            changed_bundles = [
+                bundle
+                for bundle in current_bundles.values()
+                if bundle_has_changed(
+                    bundle,
+                    cached_bundles.get(bundle.get("bundleName", ""), {}),
+                )
+            ]
 
-                # Generate the download list from changed bundles
-                app_version: str = (
-                    config.APP_VERSION_OVERRIDE
-                    or game_version_json.get("appVersion")
-                    or ""
+            # Generate the download list from changed bundles
+            app_version: str = (
+                config.APP_VERSION_OVERRIDE or game_version_json.get("appVersion") or ""
+            )
+            assert app_version, "App version must be set in game version json or config"
+            download_list = [
+                (
+                    format_url_template(
+                        config.ASSET_BUNDLE_URL,
+                        appVersion=app_version,
+                        bundleName=bundle.get("bundleName"),
+                        downloadPath=bundle.get("downloadPath"),
+                    ),
+                    bundle,
                 )
-                assert app_version, (
-                    "App version must be set in game version json or config"
-                )
-                download_list = [
-                    (
-                        config.ASSET_BUNDLE_URL.format(
-                            appVersion=app_version,
-                            bundleName=bundle.get("bundleName"),
-                            downloadPath=bundle.get("downloadPath"),
-                        ),
-                        bundle,
-                    )
-                    for bundle in changed_bundles
-                ]
+                for bundle in changed_bundles
+            ]
         else:
             # Colorful Palette servers
-            cached_bundles: Dict[str, Dict] = (
-                cached_asset_bundle_info.get("bundles") or {}
-            )
+            cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
 
             # Compare each bundle checksum and include new bundles as well.
             changed_bundles = [
@@ -480,7 +669,11 @@ async def get_download_list(
     else:
         # Get the download list for a full download
         asset_hash: str = game_version_json.get("assetHash", "")
-        app_version: str = getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
+        app_version: str = (
+            getattr(config, "APP_VERSION_OVERRIDE", None)
+            or game_version_json.get("appVersion")
+            or ""
+        )
         assert app_version, "App version must be set in game version json or config"
         asset_bundle_url_args = {
             "assetbundleHostHash": assetbundle_host_hash,
@@ -530,10 +723,7 @@ async def filter_bundles(
         bundles = {
             key: value
             for key, value in bundles.items()
-            if any(
-                re.match(test_name, value.get("bundleName") or "")
-                for test_name in include_list
-            )
+            if any(re.match(test_name, value.get("bundleName") or "") for test_name in include_list)
         }
 
     if exclude_list:
@@ -541,8 +731,7 @@ async def filter_bundles(
             key: value
             for key, value in bundles.items()
             if not any(
-                re.match(test_name, value.get("bundleName") or "")
-                for test_name in exclude_list
+                re.match(test_name, value.get("bundleName") or "") for test_name in exclude_list
             )
         }
 
@@ -559,15 +748,20 @@ async def sort_download_list(
         key=lambda item: item[1].get("bundleName") or "",
     )
 
-    # If a priority list is provided, sort the download list based on it
+    # If a priority list is provided, sort matching groups in declaration order
+    # and leave unmatched bundles at the end.  The initial name sort provides a
+    # deterministic order for bundles in the same group.
     if priority_list:
         download_list = sorted(
             download_list,
-            key=lambda item: [
-                i
-                for i, test_name in enumerate(priority_list)
-                if re.match(test_name, item[1].get("bundleName") or "")
-            ],
+            key=lambda item: next(
+                (
+                    index
+                    for index, test_name in enumerate(priority_list)
+                    if re.match(test_name, item[1].get("bundleName") or "")
+                ),
+                len(priority_list),
+            ),
         )
 
     return download_list
@@ -579,9 +773,7 @@ def build_cookie_header(set_cookie_headers: List[str]) -> str:
     for header in set_cookie_headers:
         cookie.load(header)
 
-    return "; ".join(
-        f"{key}={morsel.value}" for key, morsel in cookie.items() if morsel.value
-    )
+    return "; ".join(f"{key}={morsel.value}" for key, morsel in cookie.items() if morsel.value)
 
 
 def get_cookie_value(cookie_header: str, cookie_name: str) -> str | None:
@@ -612,12 +804,7 @@ def get_cookie_expire_time(cookie_header: str) -> int | None:
     if not statements:
         return None
 
-    return (
-        statements[0]
-        .get("Condition", {})
-        .get("DateLessThan", {})
-        .get("AWS:EpochTime")
-    )
+    return statements[0].get("Condition", {}).get("DateLessThan", {}).get("AWS:EpochTime")
 
 
 def _derive_storage_remote_path(remote_base: str, relative_key: str) -> str:
@@ -648,29 +835,33 @@ async def refresh_cookie(
     """Refresh the cookie using the GAME_COOKIE_URL."""
     if cookie:
         cookie_expire_time = get_cookie_expire_time(cookie)
-        if (
-            isinstance(cookie_expire_time, int)
-            and cookie_expire_time > int(time.time()) + 3600
-        ):
+        if isinstance(cookie_expire_time, int) and cookie_expire_time > int(time.time()) + 3600:
             headers["Cookie"] = cookie
             return headers, cookie
 
     # If the cookie is expired or not set, fetch a new one
     if config.GAME_COOKIE_URL:
-        async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
-            async with session.post(
-                config.GAME_COOKIE_URL, headers=headers
-            ) as response:
-                if response.status == 200:
-                    cookie = build_cookie_header(
-                        response.headers.getall("Set-Cookie", [])
-                    )
-                    assert cookie, "Cookie is empty"
-                    headers["Cookie"] = cookie
-                else:
-                    raise RuntimeError(
-                        f"Failed to fetch cookie from {config.GAME_COOKIE_URL}"
-                    )
+        transport_error = None
+        try:
+            async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
+                async with session.post(
+                    config.GAME_COOKIE_URL, headers=build_cookie_request_headers()
+                ) as response:
+                    if response.status == 200:
+                        cookie = build_cookie_header(response.headers.getall("Set-Cookie", []))
+                        assert cookie, "Cookie is empty"
+                        headers["Cookie"] = cookie
+                    else:
+                        raise RuntimeError(
+                            f"Failed to fetch cookie from {sanitize_url(config.GAME_COOKIE_URL)}"
+                        )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            transport_error = RuntimeError(
+                "Failed to fetch cookie from "
+                f"{sanitize_url(config.GAME_COOKIE_URL)} ({type(exc).__name__})"
+            )
+        if transport_error is not None:
+            raise transport_error
     else:
         raise ValueError("GAME_COOKIE_URL is not set in the config")
 
@@ -683,9 +874,7 @@ async def deobfuscate(data: bytes) -> bytes:
         data = data[4:]
     elif data[:4] == b"\x10\x00\x00\x00":
         data = data[4:]
-        header = bytes(
-            a ^ b for a, b in zip(data[:128], (b"\xff" * 5 + b"\x00" * 3) * 16)
-        )
+        header = bytes(a ^ b for a, b in zip(data[:128], (b"\xff" * 5 + b"\x00" * 3) * 16))
         data = header + data[128:]
     return data
 
@@ -697,6 +886,7 @@ async def upload_to_storage(
     upload_program: str,
     upload_args: List[str],
     max_concurrent_uploads: int = 5,
+    config=None,
 ):
     """Upload the extracted assets to remote storage with concurrency"""
 
@@ -721,24 +911,32 @@ async def upload_to_storage(
             args: list[str] = upload_args[:]
             args[args.index("src")] = str(file_path)
             args[args.index("dst")] = remote_path
+            process_timeout = _get_external_process_timeout(config)
             logger.debug(
-                "Uploading %s to %s using command: %s %s",
+                "Uploading %s to %s",
                 file_path,
-                remote_path,
-                program,
-                " ".join(args),
+                sanitize_url(remote_path),
             )
 
             # Execute the command
             upload_process = await asyncio.create_subprocess_exec(program, *args)
-            await upload_process.wait()
-            if upload_process.returncode != 0:
-                logger.error("Failed to upload %s to %s", file_path, remote_path)
-                raise RuntimeError(
-                    f"Failed to upload {file_path} to {remote_path} using command: {program} {' '.join(args)}"
+            try:
+                await _wait_for_process(
+                    upload_process,
+                    process_timeout,
                 )
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                raise
+            if upload_process.returncode != 0:
+                safe_remote_path = sanitize_url(remote_path)
+                logger.error("Failed to upload %s to %s", file_path, safe_remote_path)
+                raise RuntimeError(f"Failed to upload {file_path} to {safe_remote_path}")
             else:
-                logger.info("Successfully uploaded %s to %s", file_path, remote_path)
+                logger.info(
+                    "Successfully uploaded %s to %s",
+                    file_path,
+                    sanitize_url(remote_path),
+                )
 
     # Run uploads concurrently and fail the worker if any upload fails.
     results = await asyncio.gather(
@@ -747,6 +945,6 @@ async def upload_to_storage(
     )
     errors = [result for result in results if isinstance(result, Exception)]
     if errors:
-        raise RuntimeError(
-            f"{len(errors)} upload(s) failed; first error: {errors[0]}"
-        ) from errors[0]
+        raise RuntimeError(f"{len(errors)} upload(s) failed; first error: {errors[0]}") from errors[
+            0
+        ]

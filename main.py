@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import shutil
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
 
@@ -10,6 +12,7 @@ from helpers import (
     ensure_dir_exists,
     filter_bundles,
     get_download_list,
+    sanitize_http_log_value,
     setup_logging_queue,
 )
 from model import ConfigLike
@@ -46,6 +49,66 @@ def require_config() -> ConfigLike:
     return config
 
 
+def validate_config(cfg: ConfigLike) -> None:
+    """Reject unsafe or unusable runtime settings before starting the pipeline."""
+    concurrency_names = (
+        "MAX_CONCURRENCY",
+        "MAX_CONCURRENCY_DOWNLOADS",
+        "MAX_CONCURRENCY_EXTRACTS",
+        "MAX_CONCURRENCY_UPLOAD_STAGE",
+        "PIPELINE_STAGE_QUEUE_SIZE",
+        "MAX_CONCURRENT_AUDIO_FILES",
+        "MAX_CONCURRENCY_HCA_DECODES",
+        "MAX_CONCURRENCY_AUDIO_ENCODERS",
+        "MAX_CONCURRENCY_AUDIO_TRANSCODES",
+        "MAX_CONCURRENCY_VIDEO_TRANSCODES",
+        "MAX_CONCURRENCY_USM_DEMUXES",
+        "MAX_CONCURRENCY_UPLOADS",
+    )
+    errors: list[str] = []
+    for name in concurrency_names:
+        value = getattr(cfg, name, None)
+        if type(value) is not int or value <= 0:
+            errors.append(f"{name} must be a positive integer (got {value!r})")
+
+    timeout = getattr(cfg, "EXTERNAL_PROCESS_TIMEOUT", None)
+    try:
+        valid_timeout = float(timeout) > 0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        valid_timeout = False
+    if not valid_timeout:
+        errors.append(f"EXTERNAL_PROCESS_TIMEOUT must be a positive number (got {timeout!r})")
+
+    key = getattr(cfg, "AES_KEY", None)
+    iv = getattr(cfg, "AES_IV", None)
+    if not isinstance(key, bytes) or len(key) not in {16, 24, 32}:
+        errors.append("AES_KEY must be bytes with length 16, 24, or 32")
+    if not isinstance(iv, bytes) or len(iv) != 16:
+        errors.append("AES_IV must be bytes with length 16")
+
+    def require_program(program: object, label: str) -> None:
+        if not program:
+            errors.append(f"{label} executable is not configured")
+        elif not isinstance(program, str):
+            errors.append(f"{label} executable must be a string")
+        elif shutil.which(program) is None and not (
+            os.path.isfile(program) and os.access(program, os.X_OK)
+        ):
+            errors.append(f"{label} executable not found: {program}")
+
+    require_program("ffmpeg", "ffmpeg")
+    backend = str(getattr(cfg, "HCA_DECODE_BACKEND", "auto")).strip().lower()
+    if backend == "vgmstream":
+        require_program(os.environ.get("VGMSTREAM_CLI", "vgmstream-cli"), "vgmstream-cli")
+    if getattr(cfg, "ASSET_REMOTE_STORAGE", None):
+        for index, storage in enumerate(cfg.ASSET_REMOTE_STORAGE):
+            if storage.get("type") == "normal":
+                require_program(storage.get("program"), f"upload storage {index}")
+
+    if errors:
+        raise ValueError("Invalid configuration:\n- " + "\n- ".join(errors))
+
+
 async def do_download(
     dl_list: List[DownloadItem],
     config: ConfigLike,
@@ -67,6 +130,8 @@ async def do_download(
             download_disk_space_gate.min_free_bytes,
         )
 
+    pipeline_error = None
+    failed_tasks = []
     try:
         failed_tasks = await run_pipeline(
             dl_list,
@@ -77,12 +142,15 @@ async def do_download(
         )
     except asyncio.CancelledError:
         raise
-    except Exception:
-        logger.exception(
+    except Exception as exc:
+        logger.error(
             "ERROR | stage=pipeline | action=crash | preserve_pending=true | items=%d",
             len(dl_list),
         )
-        raise
+        pipeline_error = RuntimeError(sanitize_http_log_value(str(exc)))
+
+    if pipeline_error is not None:
+        raise pipeline_error
 
     # Replace the original download list with the failed tasks
     if failed_tasks:
@@ -234,13 +302,17 @@ async def main(
                 paths.queue,
             )
 
-        current_by_name = {bundle.get("bundleName"): (url, bundle) for url, bundle in plan.candidates}
+        current_by_name = {
+            bundle.get("bundleName"): (url, bundle) for url, bundle in plan.candidates
+        }
         pending_names = {bundle.get("bundleName") for _, bundle in pending_list}
         ordered_pending = [
             current_by_name.get(bundle.get("bundleName"), (url, bundle))
             for url, bundle in pending_list
         ]
-        deduped_new = [item for item in plan.candidates if item[1].get("bundleName") not in pending_names]
+        deduped_new = [
+            item for item in plan.candidates if item[1].get("bundleName") not in pending_names
+        ]
         download_list: List[DownloadItem] = ordered_pending + deduped_new
         if pending_list:
             logger.info(
@@ -284,9 +356,7 @@ def cli():
     # Accept command line arguments
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Start the asset updater with given config."
-    )
+    parser = argparse.ArgumentParser(description="Start the asset updater with given config.")
     parser.add_argument(
         "-c",
         "--config",
@@ -294,9 +364,7 @@ def cli():
         help="Path to the config python file.",
         required=True,
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose logging."
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging.")
     parser.add_argument(
         "-q",
         "--quiet",
@@ -335,6 +403,7 @@ def cli():
     spec.loader.exec_module(loaded_config)
     sys.modules["config"] = loaded_config
     config = cast(ConfigLike, loaded_config)
+    validate_config(config)
 
     # Set the logging level
     log_level = logging.INFO

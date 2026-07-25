@@ -43,6 +43,9 @@ Important fields:
 - `ASSET_BUNDLE_URL`
 - `MIN_FREE_DISK_BYTES`: minimum free disk space to keep before a new download starts
 - `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL`: how often blocked downloads recheck free space
+- `EXTERNAL_PROCESS_TIMEOUT`: maximum seconds for each selected external codec or upload
+  command. A timed-out process is terminated and given a 2-second grace period before it
+  is killed; configuration must be a positive number.
 
 Disk space gate:
 
@@ -81,6 +84,9 @@ Storage:
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
 - `ASSET_LOCAL_BUNDLE_CACHE_DIR`: keep downloaded bundles locally; if `None`, use a temp file
 - `ASSET_REMOTE_STORAGE`: upload extracted files after processing; set to `[]` to disable uploads
+
+Startup validates all configured concurrency values, AES key/IV lengths, the external process
+timeout, and executables required by the selected decoder and upload backends.
 
 Cache files:
 

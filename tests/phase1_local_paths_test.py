@@ -93,8 +93,17 @@ def test_worker_rejects_bundle_name_before_download_and_cache_symlink(
 
     async def run() -> None:
         await worker._download_stage(
-            "test", "download", input_queue, extract_queue, config, {}, None,
-            failed_tasks, asyncio.Lock(), None, AsyncMock()
+            "test",
+            "download",
+            input_queue,
+            extract_queue,
+            config,
+            {},
+            None,
+            failed_tasks,
+            asyncio.Lock(),
+            None,
+            AsyncMock(),
         )
 
     asyncio.run(run())
@@ -114,8 +123,9 @@ def test_worker_rejects_precreated_extraction_root_symlink(tmp_path: Path) -> No
         UNITY_VERSION=None,
     )
     artifact = worker.PipelineArtifact(
-        "http://example.test/bundle", {"bundleName": "music/example"},
-        AnyioPath(tmp_path / "bundle")
+        "http://example.test/bundle",
+        {"bundleName": "music/example"},
+        AnyioPath(tmp_path / "bundle"),
     )
     extract_queue: asyncio.Queue = asyncio.Queue()
     upload_queue: asyncio.Queue = asyncio.Queue()
@@ -125,8 +135,7 @@ def test_worker_rejects_precreated_extraction_root_symlink(tmp_path: Path) -> No
 
     async def run() -> None:
         await worker._extract_stage(
-            "test", "extract", extract_queue, upload_queue, config,
-            failed_tasks, asyncio.Lock()
+            "test", "extract", extract_queue, upload_queue, config, failed_tasks, asyncio.Lock()
         )
 
     asyncio.run(run())
@@ -161,8 +170,17 @@ def test_worker_disk_gate_supports_temporary_bundle_download(
 
     async def run() -> None:
         await worker._download_stage(
-            "test", "download", input_queue, extract_queue, config, {}, None,
-            failed_tasks, asyncio.Lock(), Gate(), AsyncMock()
+            "test",
+            "download",
+            input_queue,
+            extract_queue,
+            config,
+            {},
+            None,
+            failed_tasks,
+            asyncio.Lock(),
+            Gate(),
+            AsyncMock(),
         )
 
     asyncio.run(run())

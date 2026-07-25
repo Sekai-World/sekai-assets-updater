@@ -131,9 +131,7 @@ def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
             _fail(f"{path}.crc must be non-empty when present")
         normalized["crc"] = str(crc)
     for field in {"fileSize", "size"}:
-        if field in normalized and (
-            type(normalized[field]) is not int or normalized[field] < 0
-        ):
+        if field in normalized and (type(normalized[field]) is not int or normalized[field] < 0):
             _fail(f"{path}.{field} must be a non-negative integer")
     _validate_json_value(normalized, path)
     return normalized
@@ -381,10 +379,16 @@ def derive_state_paths(
     """Derive journal/lock siblings; no backup or alternate-path selection occurs."""
 
     queue = Path(dl_list_cache_path).resolve(strict=False)
-    metadata = Path(asset_metadata_path).resolve(strict=False) if asset_metadata_path else queue.with_name(
-        "asset_bundle_info.json"
+    metadata = (
+        Path(asset_metadata_path).resolve(strict=False)
+        if asset_metadata_path
+        else queue.with_name("asset_bundle_info.json")
     )
-    version = Path(game_version_path).resolve(strict=False) if game_version_path else queue.with_name("version.json")
+    version = (
+        Path(game_version_path).resolve(strict=False)
+        if game_version_path
+        else queue.with_name("version.json")
+    )
     paths = StatePaths(
         queue=queue,
         asset_metadata=metadata,
@@ -398,7 +402,10 @@ def derive_state_paths(
 def _validate_journal(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _JOURNAL_KEYS:
         _fail("journal envelope has unknown or missing fields")
-    if type(value["schema_version"]) is not int or value["schema_version"] != JOURNAL_SCHEMA_VERSION:
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != JOURNAL_SCHEMA_VERSION
+    ):
         _fail(f"unknown journal schema version: {value['schema_version']!r}")
     if not isinstance(value["transaction_id"], str) or not value["transaction_id"].strip():
         _fail("journal transaction_id must be non-empty")
@@ -457,9 +464,7 @@ def create_journal(
     except (TypeError, ValueError) as exc:
         raise StateValidationError(f"journal is not serializable: {exc}") from exc
     if not journal_path.parent.is_dir():
-        raise StatePersistenceError(
-            f"state parent directory does not exist: {journal_path.parent}"
-        )
+        raise StatePersistenceError(f"state parent directory does not exist: {journal_path.parent}")
     temporary_path: Path | None = None
     descriptor: int | None = None
     try:
@@ -477,9 +482,7 @@ def create_journal(
         except FileExistsError as exc:
             raise StateAlreadyExistsError(f"journal already exists: {journal_path}") from exc
         except OSError as exc:
-            raise StatePersistenceError(
-                f"cannot publish journal {journal_path}: {exc}"
-            ) from exc
+            raise StatePersistenceError(f"cannot publish journal {journal_path}: {exc}") from exc
         temporary_path.unlink()
         temporary_path = None
         _fsync_parent(journal_path.parent)
@@ -545,9 +548,7 @@ def replay_journal(
         _state_set(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
     else:
         if any(path is None for path in (queue_path, asset_metadata_path, game_version_path)):
-            raise StateValidationError(
-                "replay_journal requires queue, metadata, and version paths"
-            )
+            raise StateValidationError("replay_journal requires queue, metadata, and version paths")
         paths = _state_set(
             journal_path,
             queue_path,  # type: ignore[arg-type]

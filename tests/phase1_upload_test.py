@@ -66,9 +66,7 @@ def test_storage_remote_path_preserves_trailing_separator() -> None:
     )
 
 
-def test_upload_rejects_outside_source_before_subprocess(
-    tmp_path: Path, fake_subprocess
-) -> None:
+def test_upload_rejects_outside_source_before_subprocess(tmp_path: Path, fake_subprocess) -> None:
     outside_path = tmp_path.parent / f"{tmp_path.name}-outside.mp3"
     outside_path.write_bytes(b"outside")
     fake_process = fake_subprocess()
@@ -87,9 +85,7 @@ def test_upload_rejects_outside_source_before_subprocess(
     assert fake_process.calls == []
 
 
-def test_upload_rejects_symlink_source_before_subprocess(
-    tmp_path: Path, fake_subprocess
-) -> None:
+def test_upload_rejects_symlink_source_before_subprocess(tmp_path: Path, fake_subprocess) -> None:
     outside_path = tmp_path.parent / f"{tmp_path.name}-target.mp3"
     outside_path.write_bytes(b"outside")
     symlink_path = tmp_path / "song.mp3"
@@ -110,9 +106,7 @@ def test_upload_rejects_symlink_source_before_subprocess(
     assert fake_process.calls == []
 
 
-def test_upload_rejects_filename_with_non_posix_separator(
-    tmp_path: Path, fake_subprocess
-) -> None:
+def test_upload_rejects_filename_with_non_posix_separator(tmp_path: Path, fake_subprocess) -> None:
     exported_path = tmp_path / "bad\\name.mp3"
     exported_path.write_bytes(b"audio")
     fake_process = fake_subprocess()
@@ -142,9 +136,7 @@ def test_storage_remote_path_rejects_malicious_local_relative_key(
         _derive_storage_remote_path("sftp:/absolute/path", relative_key)
 
 
-def test_upload_aggregates_failures_from_all_jobs(
-    tmp_path: Path, fake_subprocess
-) -> None:
+def test_upload_aggregates_failures_from_all_jobs(tmp_path: Path, fake_subprocess) -> None:
     first_path = tmp_path / "first.mp3"
     second_path = tmp_path / "second.mp3"
     first_path.write_bytes(b"first")

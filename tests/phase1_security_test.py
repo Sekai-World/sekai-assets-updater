@@ -15,7 +15,18 @@ def test_resolve_secure_path_accepts_nested_relative_path(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["", ".", "..", "../outside", "assets/../outside", "/absolute", "assets//song", "assets/", "assets\\song", "C:/outside"],
+    [
+        "",
+        ".",
+        "..",
+        "../outside",
+        "assets/../outside",
+        "/absolute",
+        "assets//song",
+        "assets/",
+        "assets\\song",
+        "C:/outside",
+    ],
 )
 def test_resolve_secure_path_rejects_unsafe_relative_paths(
     tmp_path: Path, relative_path: str

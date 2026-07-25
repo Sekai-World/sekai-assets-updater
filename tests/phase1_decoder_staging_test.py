@@ -28,9 +28,7 @@ def test_hca_decoder_uses_private_staging_and_promotes_output(
     monkeypatch.setattr(bundle, "decode_hca_file", fake_decode_hca)
     try:
         decoded = asyncio.run(
-            bundle._run_hca_to_wav_with_cridecoder(
-                input_path, output_path, SimpleNamespace()
-            )
+            bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
         )
     finally:
         executor.shutdown(wait=True)
@@ -83,7 +81,9 @@ def test_acb_extractor_uses_private_staging_and_promotes_result(
             "assets/sekai/assetbundle/resources/audio/voice.asset": FakeUnityObject(
                 "MonoBehaviour", acb_tree
             ),
-            "assets/sekai/assetbundle/resources/audio/voice.acb.bytes": FakeUnityObject("TextAsset"),
+            "assets/sekai/assetbundle/resources/audio/voice.acb.bytes": FakeUnityObject(
+                "TextAsset"
+            ),
         }
     )
 

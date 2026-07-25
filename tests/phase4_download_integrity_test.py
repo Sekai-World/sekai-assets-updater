@@ -233,9 +233,7 @@ def _successful_response() -> _Response:
 
 
 def _connector_error() -> aiohttp.ClientConnectorError:
-    key = aiohttp.client_reqrep.ConnectionKey(
-        "example.test", 443, True, False, None, None, None
-    )
+    key = aiohttp.client_reqrep.ConnectionKey("example.test", 443, True, False, None, None, None)
     return aiohttp.ClientConnectorError(key, OSError("connection refused"))
 
 
@@ -256,8 +254,12 @@ def test_retryable_failures_retry_and_then_succeed(
     target.write_bytes(b"old")
     asyncio.run(
         bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle", tmp_path, "bundle", {},
-            config=_retry_config(), session=session,
+            "https://example.test/bundle",
+            tmp_path,
+            "bundle",
+            {},
+            config=_retry_config(),
+            session=session,
         )
     )
     assert session.calls == 2
@@ -288,8 +290,12 @@ def test_retryable_connection_failures_retry_and_then_succeed(
     monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
     asyncio.run(
         bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle", tmp_path, "bundle", {},
-            config=_retry_config(), session=session,
+            "https://example.test/bundle",
+            tmp_path,
+            "bundle",
+            {},
+            config=_retry_config(),
+            session=session,
         )
     )
     assert session.calls == 2
@@ -307,8 +313,12 @@ def test_http_408_response_is_retried_then_succeeds(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
     asyncio.run(
         bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle", tmp_path, "bundle", {},
-            config=_retry_config(), session=session,
+            "https://example.test/bundle",
+            tmp_path,
+            "bundle",
+            {},
+            config=_retry_config(),
+            session=session,
         )
     )
     assert session.calls == 2
@@ -324,8 +334,12 @@ def test_permanent_http_errors_are_single_attempt(tmp_path: Path, status: int) -
     with pytest.raises(bundle.DownloadIntegrityError):
         asyncio.run(
             bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle", tmp_path, "bundle", {},
-                config=_retry_config(), session=session,
+                "https://example.test/bundle",
+                tmp_path,
+                "bundle",
+                {},
+                config=_retry_config(),
+                session=session,
             )
         )
     assert session.calls == 1
@@ -337,8 +351,12 @@ def test_integrity_error_is_single_attempt(tmp_path: Path) -> None:
     with pytest.raises(bundle.DownloadIntegrityError):
         asyncio.run(
             bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle", tmp_path, "bundle", {},
-                config=_retry_config(), session=session,
+                "https://example.test/bundle",
+                tmp_path,
+                "bundle",
+                {},
+                config=_retry_config(),
+                session=session,
             )
         )
     assert session.calls == 1
@@ -355,8 +373,12 @@ def test_retry_exhaustion_uses_total_attempt_semantics(tmp_path: Path, monkeypat
     with pytest.raises(bundle.RetryableDownloadError):
         asyncio.run(
             bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle", tmp_path, "bundle", {},
-                config=_retry_config(DOWNLOAD_MAX_RETRIES=3), session=session,
+                "https://example.test/bundle",
+                tmp_path,
+                "bundle",
+                {},
+                config=_retry_config(DOWNLOAD_MAX_RETRIES=3),
+                session=session,
             )
         )
     assert session.calls == 3
@@ -381,8 +403,12 @@ def test_full_jitter_bounds_follow_capped_exponential_schedule(tmp_path: Path, m
     monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
     asyncio.run(
         bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle", tmp_path, "bundle", {},
-            config=_retry_config(DOWNLOAD_MAX_RETRIES=4), session=session,
+            "https://example.test/bundle",
+            tmp_path,
+            "bundle",
+            {},
+            config=_retry_config(DOWNLOAD_MAX_RETRIES=4),
+            session=session,
         )
     )
     assert bounds == [(0.0, 1.0), (0.0, 2.0), (0.0, 4.0)]
@@ -398,7 +424,9 @@ def test_retry_after_is_capped_and_used_as_jitter_upper_bound(
     )
     bounds = []
     sleeps = []
-    monkeypatch.setattr(bundle.random, "uniform", lambda low, high: bounds.append((low, high)) or high)
+    monkeypatch.setattr(
+        bundle.random, "uniform", lambda low, high: bounds.append((low, high)) or high
+    )
 
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
@@ -406,15 +434,21 @@ def test_retry_after_is_capped_and_used_as_jitter_upper_bound(
     monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
     asyncio.run(
         bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle", tmp_path, "bundle", {},
-            config=_retry_config(DOWNLOAD_RETRY_MAX_DELAY=3), session=session,
+            "https://example.test/bundle",
+            tmp_path,
+            "bundle",
+            {},
+            config=_retry_config(DOWNLOAD_RETRY_MAX_DELAY=3),
+            session=session,
         )
     )
     assert bounds == [(0.0, 3.0)]
     assert sleeps == [3.0]
 
 
-def test_cancellation_during_backoff_does_not_make_next_request(tmp_path: Path, monkeypatch) -> None:
+def test_cancellation_during_backoff_does_not_make_next_request(
+    tmp_path: Path, monkeypatch
+) -> None:
     session = _SequenceSession([aiohttp.ClientConnectionError("down"), _successful_response()])
     target = tmp_path / "bundle"
     target.write_bytes(b"old")
@@ -426,8 +460,12 @@ def test_cancellation_during_backoff_does_not_make_next_request(tmp_path: Path, 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(
             bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle", tmp_path, "bundle", {},
-                config=_retry_config(), session=session,
+                "https://example.test/bundle",
+                tmp_path,
+                "bundle",
+                {},
+                config=_retry_config(),
+                session=session,
             )
         )
     assert session.calls == 1
@@ -465,11 +503,21 @@ def test_download_stage_cancellation_removes_temporary_destination(monkeypatch) 
     queue = asyncio.Queue()
     output = asyncio.Queue()
     queue.put_nowait(("url", {"bundleName": "bundle"}))
+
     async def run():
         task = asyncio.create_task(
             worker._download_stage(
-                "id", "download", queue, output, _worker_config(), {}, None,
-                [], asyncio.Lock(), None, object()
+                "id",
+                "download",
+                queue,
+                output,
+                _worker_config(),
+                {},
+                None,
+                [],
+                asyncio.Lock(),
+                None,
+                object(),
             )
         )
         await started.wait()

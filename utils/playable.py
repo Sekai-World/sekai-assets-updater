@@ -121,9 +121,7 @@ def extract_talk_clip(clip_timing: dict, asset_data: dict, character_name: str) 
     }
 
 
-def extract_motion_clip(
-    clip_timing: dict, asset_data: dict, character_name: str
-) -> dict:
+def extract_motion_clip(clip_timing: dict, asset_data: dict, character_name: str) -> dict:
     """Extract a motion/facial clip."""
     return {
         "type": "motion",
@@ -136,9 +134,7 @@ def extract_motion_clip(
     }
 
 
-def extract_lookat_clip(
-    clip_timing: dict, asset_data: dict, character_name: str
-) -> dict:
+def extract_lookat_clip(clip_timing: dict, asset_data: dict, character_name: str) -> dict:
     """Extract a look-at clip."""
     target_type_names = {0: "position", 1: "direction", 2: "character"}
     target_type = asset_data.get("targetType", 0)
@@ -171,9 +167,7 @@ def extract_move_clip(clip_timing: dict, asset_data: dict, character_name: str) 
     }
 
 
-def extract_rotate_clip(
-    clip_timing: dict, asset_data: dict, character_name: str
-) -> dict:
+def extract_rotate_clip(clip_timing: dict, asset_data: dict, character_name: str) -> dict:
     """Extract a rotate clip."""
     return {
         "type": "rotate",
@@ -186,9 +180,7 @@ def extract_rotate_clip(
     }
 
 
-def extract_spawn_clip(
-    clip_timing: dict, asset_data: dict, character_name: str
-) -> dict:
+def extract_spawn_clip(clip_timing: dict, asset_data: dict, character_name: str) -> dict:
     """Extract a spawn (enter) clip."""
     return {
         "type": "spawn",
@@ -203,9 +195,7 @@ def extract_spawn_clip(
     }
 
 
-def extract_unspawn_clip(
-    clip_timing: dict, _asset_data: dict, character_name: str
-) -> dict:
+def extract_unspawn_clip(clip_timing: dict, _asset_data: dict, character_name: str) -> dict:
     """Extract an unspawn (exit) clip."""
     return {
         "type": "unspawn",
@@ -216,9 +206,7 @@ def extract_unspawn_clip(
     }
 
 
-def extract_light_clip(
-    clip_timing: dict, asset_data: dict, character_name: str
-) -> dict:
+def extract_light_clip(clip_timing: dict, asset_data: dict, character_name: str) -> dict:
     """Extract a light clip."""
     target_type_names = {0: "global", 1: "character"}
     return {
@@ -233,9 +221,7 @@ def extract_light_clip(
     }
 
 
-def extract_comment_clip(
-    clip_timing: dict, asset_data: dict, _character_name: str
-) -> dict:
+def extract_comment_clip(clip_timing: dict, asset_data: dict, _character_name: str) -> dict:
     """Extract a director/comment clip."""
     return {
         "type": "comment",
@@ -257,9 +243,7 @@ def extract_se_clip(clip_timing: dict, asset_data: dict, _character_name: str) -
     }
 
 
-def extract_cheer_clip(
-    clip_timing: dict, asset_data: dict, _character_name: str
-) -> dict:
+def extract_cheer_clip(clip_timing: dict, asset_data: dict, _character_name: str) -> dict:
     """Extract a cheer (audience) clip."""
     return {
         "type": "cheer",
@@ -271,9 +255,7 @@ def extract_cheer_clip(
     }
 
 
-def extract_audience_clip(
-    clip_timing: dict, asset_data: dict, _character_name: str
-) -> dict:
+def extract_audience_clip(clip_timing: dict, asset_data: dict, _character_name: str) -> dict:
     """Extract an audience animation clip."""
     return {
         "type": "audience",
@@ -284,9 +266,7 @@ def extract_audience_clip(
     }
 
 
-def extract_spotlight_clip(
-    clip_timing: dict, asset_data: dict, _character_name: str
-) -> dict:
+def extract_spotlight_clip(clip_timing: dict, asset_data: dict, _character_name: str) -> dict:
     """Extract a spotlight clip."""
     return {
         "type": "spotlight",
@@ -299,9 +279,7 @@ def extract_spotlight_clip(
     }
 
 
-def extract_stage_object_clip(
-    clip_timing: dict, asset_data: dict, _character_name: str
-) -> dict:
+def extract_stage_object_clip(clip_timing: dict, asset_data: dict, _character_name: str) -> dict:
     """Extract a stage object clip."""
     return {
         "type": "stageObject",
@@ -427,9 +405,7 @@ def extract_playable(env: UnityPy.load, container_path: str) -> dict:
         extractor, needs_character = TRACK_EXTRACTORS[cls]
         character_id = d.get("CharacterId", 0)
         track_name = d.get("m_Name", "")
-        character_name = (
-            char_map.get(character_id, track_name) if needs_character else ""
-        )
+        character_name = char_map.get(character_id, track_name) if needs_character else ""
         clips = d.get("m_Clips", [])
         if not clips:
             continue
@@ -502,9 +478,7 @@ if __name__ == "__main__":
     UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.21f1"
     env = UnityPy.load(Path(input_file).read_bytes())
 
-    playables = {
-        path: obj for path, obj in env.container.items() if path.endswith(".playable")
-    }
+    playables = {path: obj for path, obj in env.container.items() if path.endswith(".playable")}
 
     if not playables:
         print("[!] No .playable entries found in container")
@@ -588,9 +562,7 @@ if __name__ == "__main__":
             extractor, needs_character = TRACK_EXTRACTORS[cls]
             character_id = d.get("CharacterId", 0)
             track_name = d.get("m_Name", "")
-            character_name = (
-                char_map.get(character_id, track_name) if needs_character else ""
-            )
+            character_name = char_map.get(character_id, track_name) if needs_character else ""
             clips = d.get("m_Clips", [])
             if not clips:
                 continue

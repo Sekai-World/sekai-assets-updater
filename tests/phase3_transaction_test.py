@@ -175,7 +175,9 @@ def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "get_download_list", fake_plan)
-    monkeypatch.setattr(main, "do_download", lambda *_args, **_kwargs: asyncio.sleep(0, result=True))
+    monkeypatch.setattr(
+        main, "do_download", lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+    )
     asyncio.run(main.main())
     assert fetched
     assert not paths.queue.exists()
@@ -212,7 +214,9 @@ def test_pipeline_exception_or_cancellation_preserves_complete_queue(
     ]
 
 
-def test_partial_failure_replaces_queue_and_success_deletes_queue(tmp_path: Path, monkeypatch) -> None:
+def test_partial_failure_replaces_queue_and_success_deletes_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
     config = _config(tmp_path)
     main.config = config
     paths = state.derive_state_paths(
@@ -230,7 +234,9 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(tmp_path: Path
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "run_pipeline", failed_pipeline)
     asyncio.run(main.main(force_full_download=True))
-    assert state.load_pending_queue(paths.queue) == [["url", {"bundleName": "current", "hash": "new"}]]
+    assert state.load_pending_queue(paths.queue) == [
+        ["url", {"bundleName": "current", "hash": "new"}]
+    ]
 
     async def successful_pipeline(*_args, **_kwargs):
         return []

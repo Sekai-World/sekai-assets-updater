@@ -122,9 +122,7 @@ def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue
     assert not paths.journal.exists()
 
 
-def test_success_clears_queue_only_after_pipeline_success(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_success_clears_queue_only_after_pipeline_success(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     main.config = config
     seen_queue_exists: list[bool] = []

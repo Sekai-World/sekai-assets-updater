@@ -16,9 +16,7 @@ def _config(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         ASSET_LOCAL_EXTRACTED_DIR=AnyioPath(extracted_root) if extracted_root else None,
-        ASSET_LOCAL_BUNDLE_CACHE_DIR=(
-            AnyioPath(bundle_cache_root) if bundle_cache_root else None
-        ),
+        ASSET_LOCAL_BUNDLE_CACHE_DIR=(AnyioPath(bundle_cache_root) if bundle_cache_root else None),
         ASSET_REMOTE_STORAGE=[],
         UNITY_VERSION=None,
         MAX_CONCURRENCY_UPLOADS=1,
@@ -63,9 +61,7 @@ def _run_extract_stage(
     return upload_queue.get_nowait(), failures
 
 
-def test_extract_stage_passes_configured_bundle_cache_root(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_extract_stage_passes_configured_bundle_cache_root(tmp_path: Path, monkeypatch) -> None:
     cache_root = tmp_path / "bundle-cache"
     calls: list[dict] = []
     artifact = worker.PipelineArtifact(
@@ -111,9 +107,7 @@ def test_extract_stage_passes_no_bundle_cache_root_without_cache_configuration(
     assert calls[0]["bundle_cache_root"] is None
 
 
-def test_configured_bundle_outputs_use_distinct_retained_roots(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_configured_bundle_outputs_use_distinct_retained_roots(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "extracted"
     first = worker.PipelineArtifact("a", {"bundleName": "music/song"}, AnyioPath(tmp_path / "a"))
     second = worker.PipelineArtifact("b", {"bundleName": "music/song"}, AnyioPath(tmp_path / "b"))
@@ -123,7 +117,9 @@ def test_configured_bundle_outputs_use_distinct_retained_roots(
 
     assert not first_failures and not second_failures
     assert first_out.extracted_save_path != second_out.extracted_save_path
-    assert first_out.extracted_save_path.parent.parent == second_out.extracted_save_path.parent.parent
+    assert (
+        first_out.extracted_save_path.parent.parent == second_out.extracted_save_path.parent.parent
+    )
     assert asyncio.run(first_out.extracted_save_path.exists())
     assert asyncio.run(second_out.extracted_save_path.exists())
     assert first_out.exported_list[0].parent == first_out.extracted_save_path
@@ -136,7 +132,9 @@ def test_configured_output_is_retained_and_upload_uses_only_its_root(
     artifact = worker.PipelineArtifact(
         "a", {"bundleName": "music/song"}, AnyioPath(tmp_path / "bundle")
     )
-    output_artifact, failures = _run_extract_stage(artifact, _config(tmp_path / "root"), monkeypatch, "song.txt")
+    output_artifact, failures = _run_extract_stage(
+        artifact, _config(tmp_path / "root"), monkeypatch, "song.txt"
+    )
     seen: list[tuple[list[Path], Path]] = []
 
     async def fake_upload(files, root, *_args, **_kwargs):
@@ -248,7 +246,9 @@ def test_upload_stage_isolates_same_relative_output_and_content(
     assert not asyncio.run(second_out.extracted_save_path.exists())
 
 
-def test_upload_failure_cleans_temporary_root_and_records_failure(tmp_path: Path, monkeypatch) -> None:
+def test_upload_failure_cleans_temporary_root_and_records_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
     failing = worker.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "a"))
     sibling = worker.PipelineArtifact("b", {"bundleName": "b"}, AnyioPath(tmp_path / "b"))
     failing_out, _ = _run_extract_stage(failing, _config(None), monkeypatch, "same.txt", b"failure")
@@ -307,7 +307,13 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -
 
     async def run() -> None:
         await worker._extract_stage(
-            "phase2", "extract", extract_queue, upload_queue, _config(None), failures, asyncio.Lock()
+            "phase2",
+            "extract",
+            extract_queue,
+            upload_queue,
+            _config(None),
+            failures,
+            asyncio.Lock(),
         )
 
     asyncio.run(run())
@@ -317,12 +323,12 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -
     sibling_out = upload_queue.get_nowait()
     assert sibling_out.url == "b"
     assert asyncio.run(sibling_out.extracted_save_path.exists())
-    assert asyncio.run(sibling_out.extracted_save_path.joinpath("same.txt").read_bytes()) == b"sibling"
+    assert (
+        asyncio.run(sibling_out.extracted_save_path.joinpath("same.txt").read_bytes()) == b"sibling"
+    )
 
 
-def test_extract_cancellation_cleans_owned_temporary_artifacts(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_extract_cancellation_cleans_owned_temporary_artifacts(tmp_path: Path, monkeypatch) -> None:
     started = asyncio.Event()
     artifact = worker.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "bundle"))
     artifact.remove_bundle_after_extract = True
@@ -342,8 +348,7 @@ def test_extract_cancellation_cleans_owned_temporary_artifacts(
     async def run() -> None:
         task = asyncio.create_task(
             worker._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue,
-                _config(None), [], asyncio.Lock()
+                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
             )
         )
         await started.wait()
@@ -384,8 +389,7 @@ def test_extract_cancellation_while_put_blocked_cleans_owned_root(
     async def run() -> None:
         task = asyncio.create_task(
             worker._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue,
-                _config(None), [], asyncio.Lock()
+                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
             )
         )
         await started.wait()

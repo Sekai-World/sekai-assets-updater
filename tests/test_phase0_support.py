@@ -89,8 +89,10 @@ def test_synthetic_unityfs_paths_map_to_the_extraction_root(
     for name, path in synthetic_unityfs_paths.items():
         assert bundle._build_unityfs_save_path(path, temp_dir) == expected[name]
 
-    assert unityfs_path("characters", "unit.prefab").as_posix().endswith(
-        "resources/characters/unit.prefab"
+    assert (
+        unityfs_path("characters", "unit.prefab")
+        .as_posix()
+        .endswith("resources/characters/unit.prefab")
     )
 
 

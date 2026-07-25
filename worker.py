@@ -15,9 +15,11 @@ from bundle import (
     extract_asset_bundle,
 )
 from helpers import (
+    build_cdn_headers,
     DownloadDiskSpaceGate,
-    get_request_timeout,
+    get_http_session_options,
     refresh_cookie,
+    sanitize_log_label,
     upload_to_storage,
 )
 from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
@@ -71,9 +73,7 @@ def get_extract_stage_concurrency(config) -> int:
 
 
 def get_upload_stage_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1)
-    )
+    return _sanitize_concurrency(getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1))
 
 
 def get_stage_queue_size(config, downstream_concurrency: int) -> int:
@@ -128,7 +128,7 @@ async def _cleanup_artifact(
                 await artifact.bundle_save_path.unlink(missing_ok=True)
             logger.debug("Removed temporary bundle %s", artifact.bundle_save_path)
         except OSError:
-            logger.exception(
+            logger.error(
                 "Failed to remove temporary bundle %s",
                 artifact.bundle_save_path,
             )
@@ -150,7 +150,7 @@ async def _cleanup_artifact(
                 artifact.extracted_save_path,
             )
         except OSError:
-            logger.exception(
+            logger.error(
                 "Failed to remove temporary extracted dir %s",
                 artifact.extracted_save_path,
             )
@@ -200,7 +200,7 @@ async def _download_stage(
                 return
 
             url, bundle = item
-            label = bundle.get("bundleName", url)
+            label = sanitize_log_label(bundle.get("bundleName", url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=download | action=start_item | item=%s",
                 pipeline_id,
@@ -258,7 +258,7 @@ async def _download_stage(
                             url,
                             download_root,
                             download_relative_path,
-                            headers=worker_headers,
+                            headers=build_cdn_headers(worker_cookie),
                             config=config,
                             session=session,
                             expected_bundle=bundle,
@@ -270,7 +270,7 @@ async def _download_stage(
                         url,
                         download_root,
                         download_relative_path,
-                        headers=worker_headers,
+                        headers=build_cdn_headers(worker_cookie),
                         config=config,
                         session=session,
                         expected_bundle=bundle,
@@ -296,7 +296,7 @@ async def _download_stage(
                     tmp_bundle_save_file.close()
                 if bundle_save_path and remove_bundle_after_extract:
                     await bundle_save_path.unlink(missing_ok=True)
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=download | item=%s",
                     pipeline_id,
                     name,
@@ -324,7 +324,7 @@ async def _extract_stage(
                 return
 
             artifact = item
-            label = artifact.bundle.get("bundleName", artifact.url)
+            label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=extract | action=start_item | item=%s",
                 pipeline_id,
@@ -342,9 +342,7 @@ async def _extract_stage(
                 )
                 if isinstance(configured_bundle_cache_root, Path):
                     bundle_cache_root = Path(
-                        prepare_secure_directory(
-                            configured_bundle_cache_root
-                        ).as_posix()
+                        prepare_secure_directory(configured_bundle_cache_root).as_posix()
                     )
 
                 if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
@@ -398,7 +396,7 @@ async def _extract_stage(
                     )
                 raise
             except Exception:
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s",
                     pipeline_id,
                     name,
@@ -431,7 +429,7 @@ async def _upload_stage(
                 return
 
             artifact = item
-            label = artifact.bundle.get("bundleName", artifact.url)
+            label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=upload | action=start_item | item=%s",
                 pipeline_id,
@@ -454,6 +452,7 @@ async def _upload_stage(
                                 storage["program"],
                                 storage["args"],
                                 max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
+                                config=config,
                             )
                 logger.debug(
                     "PIPELINE | id=%s | worker=%s | stage=upload | action=done_item | item=%s",
@@ -466,7 +465,7 @@ async def _upload_stage(
                 await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
                 raise
             except Exception:
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
                     pipeline_id,
                     name,
@@ -525,7 +524,7 @@ async def run_pipeline(
         upload_queue_size,
     )
 
-    async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
+    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
         download_tasks = [
             asyncio.create_task(
                 _download_stage(
@@ -623,5 +622,6 @@ async def worker(
     if failed_tasks:
         _, bundle = dl_info
         raise RuntimeError(
-            f"{name} failed processing {bundle.get('bundleName', dl_info[0])}"
+            f"{sanitize_log_label(name)} failed processing "
+            f"{sanitize_log_label(bundle.get('bundleName', dl_info[0]))}"
         )

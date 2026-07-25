@@ -138,9 +138,7 @@ def temp_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def local_aiohttp_server() -> Generator[
-    Callable[..., LocalAiohttpServer], None, None
-]:
+def local_aiohttp_server() -> Generator[Callable[..., LocalAiohttpServer], None, None]:
     """Create one or more localhost aiohttp servers and clean them up after a test."""
 
     servers: list[LocalAiohttpServer] = []

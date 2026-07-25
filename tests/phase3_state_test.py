@@ -70,9 +70,7 @@ def test_metadata_and_version_validation_is_strict() -> None:
             {"version": "v1", "os": "ios", "bundles": {"key": {"bundleName": "other"}}}
         )
     with pytest.raises(state.StateValidationError):
-        state.validate_asset_metadata(
-            {"version": 1, "bundles": {"a": {"bundleName": "a"}}}
-        )
+        state.validate_asset_metadata({"version": 1, "bundles": {"a": {"bundleName": "a"}}})
     with pytest.raises(state.StateValidationError):
         state.validate_game_version({"appVersion": "1", "assetVersion": 2})
     with pytest.raises(state.StateValidationError):
@@ -108,13 +106,19 @@ def test_missing_and_unreadable_state_are_distinct(tmp_path: Path, monkeypatch) 
         state.load_pending_queue(target)
 
 
-def test_atomic_write_flushes_file_and_parent_and_replaces_json(tmp_path: Path, monkeypatch) -> None:
+def test_atomic_write_flushes_file_and_parent_and_replaces_json(
+    tmp_path: Path, monkeypatch
+) -> None:
     target = tmp_path / "state.json"
     target.write_text("old")
     fsync_calls: list[int] = []
     events: list[str] = []
     real_replace = state.os.replace
-    monkeypatch.setattr(state.os, "fsync", lambda descriptor: (fsync_calls.append(descriptor), events.append("fsync")))
+    monkeypatch.setattr(
+        state.os,
+        "fsync",
+        lambda descriptor: (fsync_calls.append(descriptor), events.append("fsync")),
+    )
 
     def recording_replace(source, destination):
         events.append("replace")
@@ -135,7 +139,9 @@ def test_atomic_write_file_fsync_failure_preserves_old_target_and_cleans_temp(
 ) -> None:
     target = tmp_path / "state.json"
     target.write_text('[["old", {"bundleName": "old"}]]')
-    monkeypatch.setattr(state.os, "fsync", lambda _descriptor: (_ for _ in ()).throw(OSError("fsync")))
+    monkeypatch.setattr(
+        state.os, "fsync", lambda _descriptor: (_ for _ in ()).throw(OSError("fsync"))
+    )
     with pytest.raises(state.StatePersistenceError):
         state.atomic_write_json(target, _queue(), state.validate_pending_queue)
     assert target.read_text() == '[["old", {"bundleName": "old"}]]'
@@ -203,9 +209,9 @@ def test_durable_unlink_directory_fsync_failure_reports_uncertain_durability(
     target = tmp_path / "state.json"
     target.write_text("state")
     monkeypatch.setattr(
-        state, "_fsync_parent", lambda _path: (_ for _ in ()).throw(
-            state.StatePersistenceError("directory fsync")
-        )
+        state,
+        "_fsync_parent",
+        lambda _path: (_ for _ in ()).throw(state.StatePersistenceError("directory fsync")),
     )
     with pytest.raises(state.StatePersistenceError, match="directory fsync"):
         state.durable_unlink(target)
@@ -231,7 +237,9 @@ def test_state_paths_reject_cross_directory_and_alias_sets(tmp_path: Path) -> No
         state.derive_state_paths(tmp_path / "dl.json", alias / "dl.json")
 
 
-def test_journal_replay_repairs_corrupt_targets_in_required_order(tmp_path: Path, monkeypatch) -> None:
+def test_journal_replay_repairs_corrupt_targets_in_required_order(
+    tmp_path: Path, monkeypatch
+) -> None:
     paths = state.derive_state_paths(
         tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
     )
@@ -253,7 +261,9 @@ def test_journal_replay_repairs_corrupt_targets_in_required_order(tmp_path: Path
 
     monkeypatch.setattr(state, "atomic_write_json", recording_write)
     monkeypatch.setattr(state, "durable_unlink", recording_unlink)
-    assert state.replay_journal(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
+    assert state.replay_journal(
+        paths.journal, paths.queue, paths.asset_metadata, paths.game_version
+    )
     assert order == ["dl.json", "metadata.json", "version.json", "dl.json.journal"]
     assert state.load_pending_queue(paths.queue) == _queue()
     assert state.load_asset_metadata(paths.asset_metadata) == _metadata()
@@ -272,7 +282,9 @@ def test_create_journal_rejects_every_existing_journal(tmp_path: Path) -> None:
         journal.unlink()
 
 
-def test_create_journal_file_fsync_failure_leaves_no_partial_journal(tmp_path: Path, monkeypatch) -> None:
+def test_create_journal_file_fsync_failure_leaves_no_partial_journal(
+    tmp_path: Path, monkeypatch
+) -> None:
     journal = tmp_path / "journal.json"
     monkeypatch.setattr(
         state.os,
@@ -285,7 +297,9 @@ def test_create_journal_file_fsync_failure_leaves_no_partial_journal(tmp_path: P
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 
 
-def test_create_journal_publication_failure_leaves_no_partial_journal(tmp_path: Path, monkeypatch) -> None:
+def test_create_journal_publication_failure_leaves_no_partial_journal(
+    tmp_path: Path, monkeypatch
+) -> None:
     journal = tmp_path / "journal.json"
     monkeypatch.setattr(
         state.os,
@@ -310,7 +324,9 @@ def test_create_journal_collision_preserves_existing_bytes_and_cleans_temp(
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 
 
-def test_create_journal_parent_fsync_failure_leaves_full_journal(tmp_path: Path, monkeypatch) -> None:
+def test_create_journal_parent_fsync_failure_leaves_full_journal(
+    tmp_path: Path, monkeypatch
+) -> None:
     journal = tmp_path / "journal.json"
     monkeypatch.setattr(
         state,
@@ -347,7 +363,9 @@ def test_replay_target_failure_preserves_journal_and_later_replay_repairs(
         state.replay_journal(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
     assert paths.journal.exists()
     monkeypatch.setattr(state, "atomic_write_json", original)
-    assert state.replay_journal(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
+    assert state.replay_journal(
+        paths.journal, paths.queue, paths.asset_metadata, paths.game_version
+    )
     assert state.load_pending_queue(paths.queue) == _queue()
     assert state.load_asset_metadata(paths.asset_metadata) == _metadata()
     assert state.load_game_version(paths.game_version) == _version()
@@ -402,9 +420,11 @@ def test_replay_unlink_failure_leaves_journal(tmp_path: Path, monkeypatch) -> No
         tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
     )
     state.create_journal(paths.journal, _queue(), _metadata(), _version(), "tx")
-    monkeypatch.setattr(state, "durable_unlink", lambda _path: (_ for _ in ()).throw(
-        state.StatePersistenceError("unlink fault")
-    ))
+    monkeypatch.setattr(
+        state,
+        "durable_unlink",
+        lambda _path: (_ for _ in ()).throw(state.StatePersistenceError("unlink fault")),
+    )
     with pytest.raises(state.StatePersistenceError):
         state.replay_journal(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
     assert paths.journal.exists()
@@ -435,7 +455,9 @@ def test_unsupported_complete_journal_fails_closed_without_mutation(tmp_path: Pa
     )
     with pytest.raises(state.StateValidationError):
         state.replay_journal(paths)
-    assert [path.read_bytes() for path in (paths.queue, paths.asset_metadata, paths.game_version)] == before
+    assert [
+        path.read_bytes() for path in (paths.queue, paths.asset_metadata, paths.game_version)
+    ] == before
     assert paths.journal.exists()
 
 
@@ -501,7 +523,9 @@ def test_invalid_journal_fails_closed_without_target_mutation(tmp_path: Path) ->
 
     with pytest.raises(state.StateValidationError):
         state.replay_journal(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
-    assert [path.read_bytes() for path in (paths.queue, paths.asset_metadata, paths.game_version)] == before
+    assert [
+        path.read_bytes() for path in (paths.queue, paths.asset_metadata, paths.game_version)
+    ] == before
     assert paths.journal.exists()
 
 
@@ -532,11 +556,7 @@ def test_lock_release_allows_reacquire(tmp_path: Path) -> None:
 def test_lock_contention_is_real_across_processes(tmp_path: Path) -> None:
     lock_path = tmp_path / "updater.lock"
     holder = state.StateLock(lock_path).acquire()
-    script = (
-        "import state, sys; "
-        "lock=state.StateLock(sys.argv[1]); "
-        "lock.acquire()"
-    )
+    script = "import state, sys; lock=state.StateLock(sys.argv[1]); lock.acquire()"
     try:
         result = subprocess.run(
             [sys.executable, "-c", script, str(lock_path)],
