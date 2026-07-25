@@ -263,6 +263,39 @@ def test_vgmstream_partial_output_is_cleaned_after_timeout_or_cancel(
     assert not list(tmp_path.glob(".hca-*"))
 
 
+def test_vgmstream_success_removes_nonempty_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "audio.wav"
+
+    class _SuccessfulVgmstreamProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    async def create_process(*args, **_kwargs):
+        staged_output = Path(args[args.index("-o") + 1])
+        staged_output.write_bytes(b"decoded")
+        (staged_output.parent / "decoder.log").write_text("diagnostic")
+        return _SuccessfulVgmstreamProcess()
+
+    monkeypatch.setattr(bundle, "_get_vgmstream_cli", lambda: "vgmstream-cli")
+    monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
+
+    decoded = asyncio.run(
+        bundle._run_hca_to_wav_with_vgmstream(
+            bundle.Path((tmp_path / "audio.hca").as_posix()),
+            bundle.Path(output.as_posix()),
+            SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=1),
+        )
+    )
+
+    assert decoded is True
+    assert output.read_bytes() == b"decoded"
+    assert not list(tmp_path.glob(".hca-*"))
+
+
 @pytest.mark.parametrize("terminate_exits", [True, False])
 def test_upload_timeout_cleans_up_process_and_redacts_remote_query(
     tmp_path, monkeypatch, caplog, terminate_exits
@@ -320,6 +353,7 @@ def _valid_config() -> SimpleNamespace:
     return SimpleNamespace(
         **values,
         EXTERNAL_PROCESS_TIMEOUT=10,
+        DOWNLOAD_MAX_RETRIES=3,
         AES_KEY=b"0123456789012345",
         AES_IV=b"0123456789012345",
         HCA_DECODE_BACKEND="auto",
@@ -331,6 +365,9 @@ def _valid_config() -> SimpleNamespace:
     "field,value,expected",
     [
         ("MAX_CONCURRENCY_UPLOADS", 0, "MAX_CONCURRENCY_UPLOADS"),
+        ("DOWNLOAD_MAX_RETRIES", 0, "DOWNLOAD_MAX_RETRIES"),
+        ("DOWNLOAD_MAX_RETRIES", "3", "DOWNLOAD_MAX_RETRIES"),
+        ("DOWNLOAD_MAX_RETRIES", 1.5, "DOWNLOAD_MAX_RETRIES"),
         ("EXTERNAL_PROCESS_TIMEOUT", 0, "EXTERNAL_PROCESS_TIMEOUT"),
         ("AES_KEY", b"short", "AES_KEY"),
         ("AES_IV", b"short", "AES_IV"),

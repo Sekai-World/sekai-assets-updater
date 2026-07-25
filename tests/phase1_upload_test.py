@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from helpers import _derive_storage_remote_path, upload_to_storage
+import helpers
+from helpers import _derive_storage_remote_path, get_download_max_retries, upload_to_storage
 from security import SecurityError
 
 
@@ -155,3 +156,34 @@ def test_upload_aggregates_failures_from_all_jobs(tmp_path: Path, fake_subproces
         )
 
     assert len(fake_process.calls) == 2
+
+
+def test_upload_reraises_cancelled_error_from_gather(
+    tmp_path: Path, fake_subprocess, monkeypatch
+) -> None:
+    exported_path = tmp_path / "asset.bin"
+    exported_path.write_bytes(b"asset")
+    fake_subprocess()
+
+    async def cancel_wait(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(helpers, "_wait_for_process", cancel_wait)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            upload_to_storage(
+                [exported_path],
+                tmp_path,
+                "remote:bucket/prefix",
+                "rclone",
+                ["copyto", "src", "dst"],
+            )
+        )
+
+
+@pytest.mark.parametrize("configured_retries", [0, -1])
+def test_download_retry_helper_clamps_to_one_attempt(configured_retries: int) -> None:
+    config = type("Config", (), {"DOWNLOAD_MAX_RETRIES": configured_retries})()
+
+    assert get_download_max_retries(config) == 1

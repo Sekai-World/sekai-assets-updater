@@ -23,6 +23,7 @@ def test_hca_decoder_uses_private_staging_and_promotes_output(
     def fake_decode_hca(input_name: str, staged_output: str) -> None:
         decoder_calls.append((input_name, staged_output))
         Path(staged_output).write_bytes(b"decoded")
+        Path(staged_output).with_name("decoder.log").write_text("diagnostic")
 
     monkeypatch.setattr(bundle, "_get_shared_audio_process_pool", lambda _config: executor)
     monkeypatch.setattr(bundle, "decode_hca_file", fake_decode_hca)

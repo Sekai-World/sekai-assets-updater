@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -124,3 +125,35 @@ def test_run_pipeline_upload_failure_cleans_temporary_roots(
     assert failed_upload[1] != successful_upload[1]
     assert failed_upload[2].parent == failed_upload[1]
     assert successful_upload[2].parent == successful_upload[1]
+
+
+def test_run_pipeline_propagates_unexpected_stage_worker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    downloaded = asyncio.Event()
+    captured_path: list[Path] = []
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        path = root.joinpath(relative)
+        await path.write_bytes(b"synthetic bundle")
+        captured_path.append(Path(path.as_posix()))
+        downloaded.set()
+
+    async def crashing_extract_stage(*_args, **_kwargs):
+        await downloaded.wait()
+        raise RuntimeError("unexpected extract worker failure")
+
+    monkeypatch.setattr(worker, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(worker, "_extract_stage", crashing_extract_stage)
+
+    with pytest.raises(RuntimeError, match="unexpected extract worker failure"):
+        worker.asyncio.run(
+            worker.run_pipeline(
+                [("url", {"bundleName": "bundle"})],
+                _config(None),
+                {},
+            )
+        )
+
+    assert captured_path
+    assert not captured_path[0].exists()

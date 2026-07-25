@@ -234,7 +234,17 @@ def _successful_response() -> _Response:
 
 
 def _connector_error() -> aiohttp.ClientConnectorError:
-    key = aiohttp.client_reqrep.ConnectionKey("example.test", 443, True, False, None, None, None)
+    loop = asyncio.new_event_loop()
+    try:
+        request = aiohttp.ClientRequest(
+            "GET",
+            aiohttp.client_reqrep.URL("https://example.test/bundle"),
+            loop=loop,
+            server_hostname="example.test",
+        )
+        key = request.connection_key
+    finally:
+        loop.close()
     return aiohttp.ClientConnectorError(key, OSError("connection refused"))
 
 

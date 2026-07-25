@@ -994,6 +994,9 @@ async def upload_to_storage(
         *(upload_file(file_path, remote_path) for file_path, remote_path in validated_uploads),
         return_exceptions=True,
     )
+    for result in results:
+        if isinstance(result, asyncio.CancelledError):
+            raise result
     errors = [result for result in results if isinstance(result, Exception)]
     if errors:
         raise RuntimeError(f"{len(errors)} upload(s) failed; first error: {errors[0]}") from errors[

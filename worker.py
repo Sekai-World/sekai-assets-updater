@@ -177,6 +177,45 @@ async def _put_sentinels(queue: asyncio.Queue, count: int) -> None:
         await queue.put(_QUEUE_SENTINEL)
 
 
+async def _monitor_worker_failures(worker_tasks: List[asyncio.Task]) -> None:
+    """Wait for pipeline workers and re-raise an unexpected worker failure."""
+
+    pending = set(worker_tasks)
+    while pending:
+        done, pending = await asyncio.wait(
+            pending,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            if task.cancelled():
+                raise asyncio.CancelledError
+            exception = task.exception()
+            if exception is not None:
+                raise exception
+
+
+async def _await_with_worker_monitor(
+    awaitable,
+    worker_monitor: asyncio.Task,
+) -> None:
+    """Await a pipeline operation without hiding a failed worker behind it."""
+
+    operation = asyncio.create_task(awaitable)
+    try:
+        done, _ = await asyncio.wait(
+            {operation, worker_monitor},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if worker_monitor in done:
+            await worker_monitor
+        await operation
+    except BaseException:
+        if not operation.done():
+            operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
+
+
 async def _download_stage(
     pipeline_id: str,
     name: str,
@@ -568,21 +607,29 @@ async def run_pipeline(
         ]
 
         all_tasks = download_tasks + extract_tasks + upload_tasks
+        worker_monitor = asyncio.create_task(_monitor_worker_failures(all_tasks))
         try:
-            await download_queue.join()
+            await _await_with_worker_monitor(download_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
-            await _put_sentinels(extract_queue, extract_concurrency)
-            await extract_queue.join()
+            await _await_with_worker_monitor(
+                _put_sentinels(extract_queue, extract_concurrency),
+                worker_monitor,
+            )
+            await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
-            await _put_sentinels(upload_queue, upload_concurrency)
-            await upload_queue.join()
+            await _await_with_worker_monitor(
+                _put_sentinels(upload_queue, upload_concurrency),
+                worker_monitor,
+            )
+            await _await_with_worker_monitor(upload_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
 
-            await asyncio.gather(*all_tasks, return_exceptions=False)
-        except asyncio.CancelledError:
+            await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=False)
+        except BaseException:
             for task in all_tasks:
                 task.cancel()
-            await asyncio.gather(*all_tasks, return_exceptions=True)
+            worker_monitor.cancel()
+            await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=True)
             await _cleanup_queued_artifacts(extract_queue)
             await _cleanup_queued_artifacts(upload_queue)
             raise

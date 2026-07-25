@@ -45,7 +45,7 @@ class ConfigLike(Protocol):
     DL_INCLUDE_LIST: Optional[List[str]]
     DL_EXCLUDE_LIST: Optional[List[str]]
     DL_PRIORITY_LIST: Optional[List[str]]
-    ASSET_REMOTE_STORAGE: list[dict[str, Any]]
+    ASSET_REMOTE_STORAGE: Optional[list[dict[str, Any]]]
 
 
 class SekaiServerRegion(Enum):

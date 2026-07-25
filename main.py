@@ -71,6 +71,12 @@ def validate_config(cfg: ConfigLike) -> None:
         if type(value) is not int or value <= 0:
             errors.append(f"{name} must be a positive integer (got {value!r})")
 
+    max_retries = getattr(cfg, "DOWNLOAD_MAX_RETRIES", None)
+    if type(max_retries) is not int or max_retries < 1:
+        errors.append(
+            f"DOWNLOAD_MAX_RETRIES must be an integer of at least 1 (got {max_retries!r})"
+        )
+
     timeout = getattr(cfg, "EXTERNAL_PROCESS_TIMEOUT", None)
     try:
         valid_timeout = float(timeout) > 0  # type: ignore[arg-type]

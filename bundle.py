@@ -811,7 +811,7 @@ async def _run_hca_to_wav_with_cridecoder(
         produced = secure_existing_output(staging_dir, staged_output)
         validate_output_target(output_root, output_path)
         os.replace(produced, output_path)
-        staging_dir.rmdir()
+        shutil.rmtree(staging_dir, ignore_errors=True)
     except Exception:
         logger.exception("Failed to decode %s with cridecoder", input_path)
         if staging_dir is not None:
@@ -1065,6 +1065,7 @@ async def _process_video_job(
     discarded_video_files: list[Path] = []
     video_output_path = usm_output_path.with_suffix(".mp4")
     m2v_path: Path | None = None
+    ffmpeg_process = None
 
     try:
         m2v_path = await _demux_usm_to_m2v(usm_output_path, config)
@@ -1108,7 +1109,9 @@ async def _process_video_job(
                             shutil.rmtree(staging_dir, ignore_errors=True)
                     logger.debug("Converted %s to mp4", usm_output_path)
                     exported_video_files.append(video_output_path)
-    except OSError:
+    except (OSError, SecurityError, ValueError, FileNotFoundError):
+        if ffmpeg_process is not None:
+            _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
     finally:
         for discarded_file in (m2v_path, usm_output_path):
@@ -1425,6 +1428,8 @@ def _extract_acb_from_cached_bundles_sync(
 
     expected_textasset_name = acb_textasset_filename.lower()
     for cached_bundle_path in bundle_cache_root.rglob("*"):
+        if cached_bundle_path.is_dir():
+            continue
         try:
             cached_bundle_path.resolve().relative_to(output_root)
         except ValueError:
