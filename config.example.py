@@ -19,15 +19,23 @@ UNITY_VERSION = "2022.3.21f1"
 USER_AGENT = None
 # HTTP request timeout in seconds; set to 0 or None to disable
 REQUEST_TIMEOUT = 180
+# Maximum lifetime of one ffmpeg/vgmstream subprocess or upload command.
+# On timeout, the process receives SIGTERM and has 2 seconds to exit before SIGKILL.
+EXTERNAL_PROCESS_TIMEOUT = 300
 # Number of download retry attempts on timeout or connection errors
 DOWNLOAD_MAX_RETRIES = 3
+# Retry delay uses capped exponential full jitter: random delay in [0, cap].
+# Numeric Retry-After hints for HTTP 429/503 take precedence, are capped at the
+# maximum, and are themselves used as the full-jitter upper bound.
+DOWNLOAD_RETRY_BASE_DELAY = 1.0
+DOWNLOAD_RETRY_MAX_DELAY = 30.0
 # Minimum free bytes to keep on the download filesystem before starting a new download
 MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 # How often blocked downloads recheck free disk space
 DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5
 
 # Concurrency settings, default to the number of CPU cores
-MAX_CONCURRENCY = os.cpu_count()
+MAX_CONCURRENCY = os.cpu_count() or 1
 # Pipeline stage concurrency. Defaults preserve the previous MAX_CONCURRENCY behavior
 # for download/extract while upload uses one bundle-level worker.
 MAX_CONCURRENCY_DOWNLOADS = MAX_CONCURRENCY
@@ -56,8 +64,10 @@ MAX_CONCURRENCY_UPLOADS = 10
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 
 # Crypto settings
-AES_KEY = bytes("AES_KEY")
-AES_IV = bytes("AES_IV")
+# Replace these with the game's AES material. AES keys must be 16, 24, or 32
+# bytes and the CBC IV must be exactly 16 bytes.
+AES_KEY = b"0123456789012345"
+AES_IV = b"0123456789012345"
 
 # JSON URL for fetching game version information, can be set to a specific version json manually
 GAME_VERSION_JSON_URL = None

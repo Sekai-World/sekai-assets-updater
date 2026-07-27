@@ -2,11 +2,16 @@
 
 import atexit
 import asyncio
+from contextlib import ExitStack
+from functools import partial
 import logging
 import os
+import random
 import re
 import shutil
+import struct
 import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor
 from io import BytesIO
 from pathlib import Path as StdPath
@@ -31,7 +36,23 @@ from constants import (
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
     UNITY_FS_CONTAINER_BASE,
 )
-from helpers import get_download_max_retries, get_request_timeout
+from helpers import (
+    get_download_max_retries,
+    get_download_retry_base_delay,
+    get_download_retry_max_delay,
+    get_http_session_options,
+    sanitize_http_log_value,
+    sanitize_url,
+)
+from security import (
+    SecurityError,
+    atomic_write_bytes,
+    atomic_write_stream,
+    resolve_secure_path,
+    secure_existing_output,
+    validate_output_target,
+    validate_contained_file,
+)
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
 from utils.playable import extract_playable
@@ -55,6 +76,79 @@ _vgmstream_cli_cache: str | None = None
 _vgmstream_cli_checked = False
 _hca_decoder_reported: str | None = None
 HcaDecodeBackend = Literal["auto", "python", "vgmstream"]
+_EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
+
+
+class DownloadIntegrityError(ValueError):
+    """Raised when a downloaded bundle fails its wire or content checks."""
+
+
+class RetryableDownloadError(DownloadIntegrityError):
+    """A transient download failure that may be retried."""
+
+    def __init__(self, message: str, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _resolve_expected_bundle_size(bundle: Dict | None) -> int | None:
+    """Resolve the optional manifest byte size without coercing untrusted values."""
+    if not bundle:
+        return None
+    provided = [(key, bundle[key]) for key in ("fileSize", "size") if key in bundle]
+    if not provided:
+        return None
+    values = []
+    for key, value in provided:
+        if type(value) is not int or value < 0:
+            raise DownloadIntegrityError(f"{key} must be a non-negative integer")
+        values.append(value)
+    if len(values) == 2 and values[0] != values[1]:
+        raise DownloadIntegrityError("fileSize and size conflict")
+    return values[0]
+
+
+_UNITYFS_SIGNATURE = b"UnityFS\0"
+_UNITYFS_FIELD_LIMIT = 1024
+_UNITYFS_FIXED_HEADER_SIZE = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4
+
+
+def _validate_unityfs_bundle(path: StdPath, stored_bytes: int) -> None:
+    """Validate the bounded UnityFS header and its declared file offsets."""
+    with path.open("rb") as stream:
+        header = stream.read(_UNITYFS_FIXED_HEADER_SIZE + 2 * _UNITYFS_FIELD_LIMIT)
+    if len(header) < len(_UNITYFS_SIGNATURE) or not header.startswith(_UNITYFS_SIGNATURE):
+        raise DownloadIntegrityError("stored bundle does not begin with UnityFS")
+
+    offset = len(_UNITYFS_SIGNATURE)
+    if len(header) < offset + 4:
+        raise DownloadIntegrityError("incomplete UnityFS format header")
+    format_version = struct.unpack_from(">I", header, offset)[0]
+    offset += 4
+    if format_version == 0:
+        raise DownloadIntegrityError("invalid UnityFS format version")
+
+    fields = []
+    for field_name in ("unity version", "revision"):
+        end = header.find(b"\0", offset, offset + _UNITYFS_FIELD_LIMIT + 1)
+        if end < 0 or end == offset + _UNITYFS_FIELD_LIMIT:
+            raise DownloadIntegrityError(f"incomplete UnityFS {field_name} field")
+        if end == offset:
+            raise DownloadIntegrityError(f"empty UnityFS {field_name} field")
+        fields.append(header[offset:end])
+        offset = end + 1
+
+    if len(header) < offset + 20:
+        raise DownloadIntegrityError("incomplete UnityFS fixed header")
+    declared_size, compressed_info_size, uncompressed_info_size, flags = struct.unpack_from(
+        ">QIII", header, offset
+    )
+    del uncompressed_info_size, flags
+    offset += 20
+    if declared_size != stored_bytes or declared_size < offset:
+        raise DownloadIntegrityError("UnityFS declared file size is invalid")
+    if compressed_info_size > declared_size - offset:
+        raise DownloadIntegrityError("UnityFS block info offset is invalid")
 
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
@@ -64,9 +158,139 @@ def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
 
 def _sanitize_concurrency(value) -> int:
     try:
-        return max(1, int(value))
+        concurrency = int(value)
     except (TypeError, ValueError):
-        return 1
+        raise ValueError(f"concurrency must be a positive integer, got {value!r}") from None
+    if concurrency <= 0:
+        raise ValueError(f"concurrency must be a positive integer, got {value!r}")
+    return concurrency
+
+
+def _get_external_process_timeout(config) -> float:
+    value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", 300)
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}") from None
+    if timeout <= 0:
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}")
+    return timeout
+
+
+async def _terminate_process(process) -> None:
+    """Terminate a child, kill it if needed, and wait until it has exited."""
+    if process.returncode is not None:
+        return
+    process.terminate()
+    try:
+        await asyncio.wait_for(process.wait(), _EXTERNAL_PROCESS_TERMINATE_GRACE)
+    except asyncio.TimeoutError:
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+
+
+async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
+    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
+    task = getattr(process, "_bundle_terminate_task", None)
+    if task is None:
+        task = asyncio.create_task(_terminate_process(process))
+        process._bundle_terminate_task = task
+
+    cancellation_seen = False
+    cleanup_error: BaseException | None = None
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            # Keep waiting on the same shielded task. Never start a second
+            # termination sequence while the first one is still in progress.
+            cancellation_seen = True
+            if task.done():
+                break
+        except Exception as exc:
+            cleanup_error = exc
+            break
+
+    if task.done():
+        if task.cancelled():
+            cancellation_seen = True
+        elif cleanup_error is None:
+            # ``Task.exception`` returns the original exception object without
+            # catching it, so its traceback and cancellation state are not
+            # replaced by this cleanup bookkeeping.
+            cleanup_error = task.exception()
+
+    if cancellation_seen:
+        if cleanup_error is not None:
+            logger.error(
+                "Process termination cleanup failed while propagating cancellation: %s",
+                cleanup_error,
+            )
+        return None, True
+    return cleanup_error, False
+
+
+async def _wait_for_process(process, timeout: float) -> int:
+    original_error: BaseException | None = None
+    cancellation = False
+    try:
+        return await asyncio.wait_for(process.wait(), timeout)
+    except asyncio.CancelledError as exc:
+        original_error = exc
+        cancellation = True
+    except asyncio.TimeoutError as exc:
+        original_error = exc
+
+    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    _cleanup_process_output(process, remove_direct_output=True)
+    if cancellation or cleanup_cancelled:
+        raise asyncio.CancelledError() from None
+    if cleanup_error is not None:
+        raise cleanup_error from None
+    raise original_error
+
+
+async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
+    original_error: BaseException | None = None
+    cancellation = False
+    try:
+        return await asyncio.wait_for(process.communicate(), timeout)
+    except asyncio.CancelledError as exc:
+        original_error = exc
+        cancellation = True
+    except asyncio.TimeoutError as exc:
+        original_error = exc
+
+    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    _cleanup_process_output(process, remove_direct_output=True)
+    if cancellation or cleanup_cancelled:
+        raise asyncio.CancelledError() from None
+    if cleanup_error is not None:
+        raise cleanup_error from None
+    raise original_error
+
+
+def _set_process_output_paths(process, output_path: StdPath, staging_dir: StdPath) -> None:
+    """Associate an external process with its private output staging area."""
+    process._bundle_output_path = output_path
+    process._bundle_staging_dir = staging_dir
+
+
+def _cleanup_process_output(process, *, remove_direct_output: bool = False) -> None:
+    """Remove process artifacts after the process has been fully reaped."""
+    staging_dir = getattr(process, "_bundle_staging_dir", None)
+    if staging_dir is not None:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    if remove_direct_output:
+        output_path = getattr(process, "_bundle_output_path", None)
+        if output_path is not None:
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to remove failed process output %s", output_path)
 
 
 def _get_legacy_audio_transcode_concurrency(config) -> int:
@@ -406,7 +630,7 @@ async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Pat
     raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
 
-async def _get_ffmpeg_video_encoder() -> tuple[str | None, list[str]]:
+async def _get_ffmpeg_video_encoder(config) -> tuple[str | None, list[str]]:
     """Detect a usable hardware H.264 encoder for the current platform."""
     global _ffmpeg_video_encoder_cache
 
@@ -425,7 +649,7 @@ async def _get_ffmpeg_video_encoder() -> tuple[str | None, list[str]]:
         _ffmpeg_video_encoder_cache = (None, [])
         return _ffmpeg_video_encoder_cache
 
-    stdout, stderr = await process.communicate()
+    stdout, stderr = await _communicate_with_process(process, _get_external_process_timeout(config))
     if process.returncode != 0:
         logger.warning(
             "Failed to inspect ffmpeg encoders, falling back to software encoding: %s",
@@ -488,37 +712,65 @@ async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
     pipeline only needs the elementary video for ffmpeg to transcode.
     """
     output_dir = usm_path.parent
+    output_root = _canonical_root(StdPath(output_dir.as_posix()))
+    staging_dir = StdPath(tempfile.mkdtemp(prefix=".usm-", dir=output_root))
     loop = asyncio.get_running_loop()
     try:
         outputs = await loop.run_in_executor(
             _get_shared_usm_process_pool(config),
             cridecoder.extract_usm,
             usm_path.as_posix(),
-            output_dir.as_posix(),
+            staging_dir.as_posix(),
             None,
             False,
         )
+        selected_output = None
+        for output in outputs:
+            try:
+                candidate = validate_contained_file(
+                    staging_dir,
+                    StdPath(output).resolve().relative_to(staging_dir.resolve()).as_posix(),
+                )
+            except (ValueError, FileNotFoundError, SecurityError):
+                logger.warning("Ignoring unsafe decoder output %s", output)
+                continue
+            if str(output).lower().endswith(".m2v"):
+                selected_output = candidate
+                break
+            if selected_output is None:
+                selected_output = candidate
+
+        if selected_output is None:
+            logger.warning("cridecoder produced no usable video stream for %s", usm_path)
+            return None
+
+        final_output = _resolve_generated_child_path(output_root, selected_output.name)
+        validate_output_target(output_root, final_output)
+        os.replace(selected_output, final_output)
+        return Path(final_output.as_posix())
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
     except Exception:
         logger.exception("Failed to demux %s with cridecoder", usm_path)
         return None
-
-    for output in outputs:
-        if output.lower().endswith(".m2v"):
-            return Path(output)
-
-    # Fall back to the first produced stream if the extension differs.
-    if outputs:
-        return Path(outputs[0])
-
-    logger.warning("cridecoder produced no video stream for %s", usm_path)
-    return None
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 async def _run_ffmpeg_video_to_mp4(
     input_path: Path,
     output_path: Path,
+    config,
 ) -> tuple[asyncio.subprocess.Process, str | None]:
-    encoder_name, encoder_args = await _get_ffmpeg_video_encoder()
+    encoder_name, encoder_args = await _get_ffmpeg_video_encoder(config)
+    output_path = Path(
+        resolve_secure_path(
+            output_path.parent,
+            output_path.name,
+        ).as_posix()
+    )
     command = [
         "ffmpeg",
         "-loglevel",
@@ -533,8 +785,15 @@ async def _run_ffmpeg_video_to_mp4(
     else:
         command.extend(["-tune", "animation"])
 
-    command.append(output_path.as_posix())
-    process = await asyncio.create_subprocess_exec(*command)
+    staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
+    staged_output = staging_dir / output_path.name
+    command.append(staged_output.as_posix())
+    try:
+        process = await asyncio.create_subprocess_exec(*command)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    _set_process_output_paths(process, staged_output, staging_dir)
     return process, encoder_name
 
 
@@ -543,20 +802,30 @@ async def _run_hca_to_wav_with_cridecoder(
     output_path: Path,
     config,
 ) -> bool:
+    staging_dir: StdPath | None = None
     try:
         _report_hca_decoder(
             "Using cridecoder for HCA decoding via process pool "
             f"({_get_hca_decode_concurrency(config)} workers)"
         )
+        output_root = StdPath(output_path.parent.as_posix())
+        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
+        staged_output = staging_dir / output_path.name
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             _get_shared_audio_process_pool(config),
             decode_hca_file,
             input_path.as_posix(),
-            output_path.as_posix(),
+            staged_output.as_posix(),
         )
+        produced = secure_existing_output(staging_dir, staged_output)
+        validate_output_target(output_root, output_path)
+        os.replace(produced, output_path)
+        shutil.rmtree(staging_dir, ignore_errors=True)
     except Exception:
         logger.exception("Failed to decode %s with cridecoder", input_path)
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         return False
     return True
 
@@ -564,6 +833,7 @@ async def _run_hca_to_wav_with_cridecoder(
 async def _run_hca_to_wav_with_vgmstream(
     input_path: Path,
     output_path: Path,
+    config,
 ) -> bool:
     vgmstream_cli = _get_vgmstream_cli()
     if vgmstream_cli is None:
@@ -571,36 +841,57 @@ async def _run_hca_to_wav_with_vgmstream(
 
     _report_hca_decoder(f"Using vgmstream-cli for HCA decoding: {vgmstream_cli}")
 
+    staging_dir: StdPath | None = None
     try:
-        if await output_path.exists():
-            await output_path.unlink()
+        output_root = StdPath(output_path.parent.as_posix())
+        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
+        staged_output = staging_dir / output_path.name
+        validate_output_target(output_root, output_path)
 
-        process = await asyncio.create_subprocess_exec(
-            vgmstream_cli,
-            "-i",
-            "-o",
-            output_path.as_posix(),
-            input_path.as_posix(),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        try:
+            process = await asyncio.create_subprocess_exec(
+                vgmstream_cli,
+                "-i",
+                "-o",
+                staged_output.as_posix(),
+                input_path.as_posix(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        _set_process_output_paths(process, staged_output, staging_dir)
+        stdout, stderr = await _communicate_with_process(
+            process, _get_external_process_timeout(config)
         )
-        stdout, stderr = await process.communicate()
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
     except Exception:
         logger.exception("Failed to decode %s with vgmstream-cli", input_path)
+        if staging_dir is not None:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         return False
 
-    if process.returncode != 0 or not await output_path.exists():
-        error_output = (
-            stderr.decode(errors="ignore").strip() or stdout.decode(errors="ignore").strip()
-        )
-        logger.warning(
-            "vgmstream-cli failed to decode %s: %s",
-            input_path,
-            error_output or f"exit code {process.returncode}",
-        )
-        return False
+    try:
+        if process.returncode != 0 or not staged_output.exists():
+            error_output = (
+                stderr.decode(errors="ignore").strip() or stdout.decode(errors="ignore").strip()
+            )
+            logger.warning(
+                "vgmstream-cli failed to decode %s: %s",
+                input_path,
+                error_output or f"exit code {process.returncode}",
+            )
+            return False
 
-    return True
+        secure_existing_output(staging_dir, staged_output)
+        os.replace(staged_output, output_path)
+        return True
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
 
 async def _run_hca_to_wav(
@@ -619,7 +910,7 @@ async def _run_hca_to_wav(
                     "Falling back to vgmstream-cli for %s after cridecoder failure",
                     input_path,
                 )
-                return await _run_hca_to_wav_with_vgmstream(input_path, output_path)
+                return await _run_hca_to_wav_with_vgmstream(input_path, output_path, config)
             case "python":
                 return await _run_hca_to_wav_with_cridecoder(
                     input_path,
@@ -627,7 +918,7 @@ async def _run_hca_to_wav(
                     config,
                 )
             case "vgmstream":
-                if await _run_hca_to_wav_with_vgmstream(input_path, output_path):
+                if await _run_hca_to_wav_with_vgmstream(input_path, output_path, config):
                     return True
                 logger.warning(
                     "Falling back to cridecoder for %s after vgmstream-cli failure",
@@ -648,17 +939,35 @@ async def _run_ffmpeg_audio_encode(
     config,
 ) -> bool:
     async with _get_shared_audio_encoder_semaphore(config):
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-loglevel",
-            "panic",
-            "-y",
-            "-i",
-            input_path.as_posix(),
-            output_path.as_posix(),
-        )
-        await process.wait()
-        return process.returncode == 0
+        output_path = Path(resolve_secure_path(output_path.parent, output_path.name).as_posix())
+        staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
+        staged_output = staging_dir / output_path.name
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-loglevel",
+                "panic",
+                "-y",
+                "-i",
+                input_path.as_posix(),
+                staged_output.as_posix(),
+            )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+        _set_process_output_paths(process, staged_output, staging_dir)
+        try:
+            returncode = await _wait_for_process(process, _get_external_process_timeout(config))
+            if returncode != 0:
+                return False
+            secure_existing_output(staging_dir, staged_output)
+            validate_output_target(output_path.parent, output_path)
+            os.replace(staged_output, output_path)
+        except (FileNotFoundError, ValueError, SecurityError):
+            return False
+        finally:
+            _cleanup_process_output(process)
+        return True
 
 
 async def _process_extracted_audio_file(
@@ -672,6 +981,11 @@ async def _process_extracted_audio_file(
         exported_audio_files: list[Path] = []
 
         try:
+            save_root = _canonical_root(StdPath(save_dir.as_posix()))
+            validate_contained_file(
+                save_root,
+                StdPath(extracted_audio_file).resolve().relative_to(save_root).as_posix(),
+            )
             if not await extracted_audio_file_path.exists():
                 logger.warning("%s not found in %s", extracted_audio_file_path, save_dir)
                 return exported_audio_files
@@ -736,6 +1050,8 @@ async def _process_extracted_audio_file(
                 else:
                     logger.debug("Converted %s to %s", wav_path, format_name)
                     exported_audio_files.append(output_path)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            raise
         except Exception as exc:
             logger.exception(
                 "Failed processing extracted audio %s: %s",
@@ -759,6 +1075,7 @@ async def _process_video_job(
     discarded_video_files: list[Path] = []
     video_output_path = usm_output_path.with_suffix(".mp4")
     m2v_path: Path | None = None
+    ffmpeg_process = None
 
     try:
         m2v_path = await _demux_usm_to_m2v(usm_output_path, config)
@@ -769,10 +1086,12 @@ async def _process_video_job(
                 ffmpeg_process, encoder_name = await _run_ffmpeg_video_to_mp4(
                     m2v_path,
                     video_output_path,
+                    config,
                 )
-                await ffmpeg_process.wait()
+                await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
 
                 if ffmpeg_process.returncode != 0 and encoder_name:
+                    _cleanup_process_output(ffmpeg_process)
                     logger.warning(
                         "Failed to convert %s to mp4 with %s, falling back to software encoding",
                         usm_output_path,
@@ -782,15 +1101,27 @@ async def _process_video_job(
                     ffmpeg_process, _ = await _run_ffmpeg_video_to_mp4(
                         m2v_path,
                         video_output_path,
+                        config,
                     )
-                    await ffmpeg_process.wait()
+                    await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
 
                 if ffmpeg_process.returncode != 0:
+                    _cleanup_process_output(ffmpeg_process)
                     logger.warning("Failed to convert %s to mp4", usm_output_path)
                 else:
+                    staged_output = getattr(ffmpeg_process, "_bundle_output_path", None)
+                    if staged_output is not None:
+                        secure_existing_output(staged_output.parent, staged_output)
+                        validate_output_target(video_output_path.parent, video_output_path)
+                        os.replace(staged_output, video_output_path)
+                        staging_dir = getattr(ffmpeg_process, "_bundle_staging_dir", None)
+                        if staging_dir is not None:
+                            shutil.rmtree(staging_dir, ignore_errors=True)
                     logger.debug("Converted %s to mp4", usm_output_path)
                     exported_video_files.append(video_output_path)
-    except OSError:
+    except (OSError, SecurityError, ValueError, FileNotFoundError):
+        if ffmpeg_process is not None:
+            _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
     finally:
         for discarded_file in (m2v_path, usm_output_path):
@@ -922,6 +1253,11 @@ def _render_image_asset(
 
 
 def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) -> StdPath:
+    if not isinstance(unityfs_path, str) or not unityfs_path:
+        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
+    if "\\" in unityfs_path or "\x00" in unityfs_path:
+        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
+
     source_path = PurePosixPath(unityfs_path)
     base_paths = (
         PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix()),
@@ -930,6 +1266,17 @@ def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) ->
     )
 
     for index, base_path in enumerate(base_paths):
+        base_text = base_path.as_posix()
+        prefix = f"{base_text}/"
+        if not unityfs_path.startswith(prefix):
+            continue
+
+        raw_relative_path = unityfs_path[len(prefix) :]
+        if not raw_relative_path or any(
+            component in ("", ".", "..") for component in raw_relative_path.split("/")
+        ):
+            raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
+
         try:
             relpath = source_path.relative_to(base_path)
         except ValueError:
@@ -937,9 +1284,36 @@ def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) ->
 
         if index == 0:
             relpath = PurePosixPath(*relpath.parts[1:])
-        return extracted_save_path.joinpath(*relpath.parts)
+        return StdPath(resolve_secure_path(extracted_save_path, relpath.as_posix()).as_posix())
 
     raise ValueError(f"Failed to get relative path for {unityfs_path}")
+
+
+def _resolve_generated_child_path(root: StdPath, name: str, suffix: str = "") -> StdPath:
+    """Resolve an untrusted generated filename below a local extraction root."""
+
+    relative_name = f"{name}{suffix}"
+    return StdPath(resolve_secure_path(root, relative_name).as_posix())
+
+
+def _canonical_root(path: StdPath) -> StdPath:
+    return path.resolve(strict=False)
+
+
+def _replace_suffix_secure(root: StdPath, name: str, suffix: str) -> StdPath:
+    if not isinstance(name, str) or not name or "\x00" in name:
+        raise SecurityError("generated name must be a non-empty filename")
+    if "/" in name or "\\" in name or name in (".", ".."):
+        raise SecurityError("generated name must be a single relative filename")
+    return _resolve_generated_child_path(root, StdPath(name).with_suffix(suffix).name)
+
+
+def _stream_files(paths: list[StdPath], chunk_size: int = 1024 * 1024):
+    with ExitStack() as stack:
+        files = [stack.enter_context(path.open("rb")) for path in paths]
+        for file in files:
+            while chunk := file.read(chunk_size):
+                yield chunk
 
 
 def _discard_exported_file_sync(exported_files: list[StdPath], file_path: StdPath) -> None:
@@ -961,20 +1335,31 @@ def _resolve_existing_path_sync(
     save_dir: StdPath,
     expected_suffix: str | None = None,
 ) -> StdPath:
+    try:
+        relative_path = expected_path.relative_to(save_dir).as_posix()
+    except ValueError as exc:
+        raise ValueError(f"Expected path is outside save directory: {expected_path}") from exc
+    expected_path = StdPath(resolve_secure_path(save_dir, relative_path).as_posix())
+
     if expected_path.exists():
-        return expected_path
+        return validate_contained_file(save_dir, relative_path)
 
     expected_name_lower = expected_path.name.lower()
     expected_path_lower = expected_path.with_name(expected_name_lower)
     if expected_path_lower.exists():
         logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
-        return expected_path_lower
+        return validate_contained_file(
+            save_dir,
+            expected_path_lower.relative_to(save_dir).as_posix(),
+        )
 
     candidate_paths = [
         path
         for path in save_dir.iterdir()
         if path.name.lower() == expected_name_lower
         and (expected_suffix is None or path.suffix.lower() == expected_suffix.lower())
+        and path.is_file()
+        and not path.is_symlink()
     ]
     if len(candidate_paths) == 1:
         logger.debug(
@@ -982,7 +1367,10 @@ def _resolve_existing_path_sync(
             candidate_paths[0],
             expected_path.name,
         )
-        return candidate_paths[0]
+        return validate_contained_file(
+            save_dir,
+            candidate_paths[0].relative_to(save_dir).as_posix(),
+        )
 
     raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
@@ -996,9 +1384,17 @@ def _resolve_shared_audio_outputs_sync(
         f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
     }
     return [
-        path
+        validate_contained_file(
+            output_root,
+            path.relative_to(output_root).as_posix(),
+        )
         for path in output_root.rglob("*")
-        if path.is_file() and path.parent != save_dir and path.name.lower() in expected_names
+        if (
+            path.is_file()
+            and not path.is_symlink()
+            and path.parent != save_dir
+            and path.name.lower() in expected_names
+        )
     ]
 
 
@@ -1019,7 +1415,7 @@ def _resolve_local_audio_outputs_sync(
     return [
         path
         for path in save_dir.iterdir()
-        if path.is_file() and path.name.lower() in expected_names
+        if path.is_file() and not path.is_symlink() and path.name.lower() in expected_names
     ]
 
 
@@ -1028,18 +1424,38 @@ def _extract_acb_from_cached_bundles_sync(
     acb_textasset_filename: str,
     acb_output_path: StdPath,
     unity_version: str | None,
+    bundle_cache_root: StdPath | None = None,
 ) -> bool:
-    bundle_cache_root = bundle_save_path
-    for _ in bundle_save_path.parts:
-        if bundle_cache_root.name == "bundle":
-            break
-        if bundle_cache_root.parent == bundle_cache_root:
-            return False
-        bundle_cache_root = bundle_cache_root.parent
+    if bundle_cache_root is None:
+        return False
+
+    bundle_cache_root = _canonical_root(bundle_cache_root)
+    if not bundle_cache_root.is_dir():
+        return False
+    bundle_path = _canonical_root(bundle_save_path)
+    output_root = _canonical_root(acb_output_path.parent)
+    validate_output_target(output_root, acb_output_path)
 
     expected_textasset_name = acb_textasset_filename.lower()
     for cached_bundle_path in bundle_cache_root.rglob("*"):
-        if not cached_bundle_path.is_file() or cached_bundle_path == bundle_save_path:
+        if cached_bundle_path.is_dir():
+            continue
+        try:
+            cached_bundle_path.resolve().relative_to(output_root)
+        except ValueError:
+            pass
+        else:
+            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
+            continue
+        try:
+            cached_bundle_path = validate_contained_file(
+                bundle_cache_root,
+                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
+            )
+        except (FileNotFoundError, ValueError, SecurityError):
+            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
+            continue
+        if cached_bundle_path.resolve() == bundle_path:
             continue
 
         try:
@@ -1060,7 +1476,10 @@ def _extract_acb_from_cached_bundles_sync(
             if not isinstance(data, UnityPy.classes.TextAsset):
                 continue
 
-            acb_output_path.write_bytes(data.m_Script.encode("utf-8", "surrogateescape"))
+            atomic_write_bytes(
+                acb_output_path,
+                data.m_Script.encode("utf-8", "surrogateescape"),
+            )
             logger.debug(
                 "Extracted %s from cached bundle %s to %s",
                 acb_textasset_filename,
@@ -1078,7 +1497,11 @@ def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -
     except FileNotFoundError:
         pass
 
-    candidate_paths = [path for path in save_dir.iterdir() if path.suffix.lower() == ".usm"]
+    candidate_paths = [
+        path
+        for path in save_dir.iterdir()
+        if path.suffix.lower() == ".usm" and path.is_file() and not path.is_symlink()
+    ]
     if len(candidate_paths) == 1:
         logger.warning(
             "Expected %s in %s, falling back to discovered usm %s",
@@ -1086,7 +1509,10 @@ def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -
             save_dir,
             candidate_paths[0].name,
         )
-        return candidate_paths[0]
+        return validate_contained_file(
+            save_dir,
+            candidate_paths[0].relative_to(save_dir).as_posix(),
+        )
 
     raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
@@ -1098,9 +1524,36 @@ def _save_image_formats(
 ) -> list[StdPath]:
     saved_paths: list[StdPath] = []
     for image_format in texture_output_formats:
-        output_path = save_path.with_suffix(f".{image_format}")
+        output_path = StdPath(
+            resolve_secure_path(
+                save_path.parent,
+                f"{save_path.stem}.{image_format}",
+            ).as_posix()
+        )
         logger.debug("Saving texture to %s", output_path)
-        image.save(output_path)
+        if output_path.exists() and output_path.is_symlink():
+            raise SecurityError(f"image output must not be a symlink: {output_path}")
+        temporary_path: StdPath | None = None
+        descriptor: int | None = None
+        try:
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{output_path.name}.",
+                suffix=".tmp",
+                dir=output_path.parent,
+            )
+            temporary_path = StdPath(temporary_name)
+            with os.fdopen(descriptor, "w+b") as temporary_file:
+                descriptor = None
+                image.save(temporary_file, format=image_format)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, output_path)
+            temporary_path = None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
         saved_paths.append(output_path)
     return saved_paths
 
@@ -1111,6 +1564,8 @@ def _extract_bundle_files_sync(
     extracted_save_path: str,
     unity_version: str | None,
     texture_output_formats: tuple[str, ...],
+    bundle_cache_root: str | None = None,
+    *,
     live2d_bundle: bool = False,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
     UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
@@ -1159,7 +1614,7 @@ def _extract_bundle_files_sync(
                     if unityfs_path.endswith(".playable"):
                         tree = extract_playable(unity_file, unityfs_path)
 
-                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
+                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
 
                     if live2d_bundle and isinstance(tree, dict) and tree.get("AdditionalMotionData"):
@@ -1181,7 +1636,7 @@ def _extract_bundle_files_sync(
                         if save_path.suffix == ".bytes":
                             save_path = save_path.with_suffix("")
                         data_bytes = data.m_Script.encode("utf-8", "surrogateescape")
-                        save_path.write_bytes(data_bytes)
+                        atomic_write_bytes(save_path, data_bytes)
                         if live2d_bundle and save_path.suffix == ".moc3":
                             param_id_map.update(extract_params_ids_from_moc3(data_bytes))
                         exported_files.append(save_path)
@@ -1220,9 +1675,9 @@ def _extract_bundle_files_sync(
                     data = unityfs_obj.read()
                     if isinstance(data, UnityPy.classes.AudioClip):
                         for filename, sample_data in data.samples.items():
-                            sample_path = save_path.with_name(filename)
+                            sample_path = _resolve_generated_child_path(save_dir, filename)
                             logger.debug("Saving audio clip %s to %s", filename, sample_path)
-                            sample_path.write_bytes(sample_data)
+                            atomic_write_bytes(sample_path, sample_data)
                             exported_files.append(sample_path)
                     else:
                         raise TypeError(f"Expected AudioClip, got {type(data)} for {unityfs_path}")
@@ -1243,7 +1698,7 @@ def _extract_bundle_files_sync(
                         json.dumps(tree)
                     except (ValueError, TypeError):
                         logger.warning("Failed to serialize %s, skipping", tree)
-                    save_path.write_bytes(json.dumps(tree, option=json.OPT_INDENT_2))
+                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
         except (ValueError, TypeError, AttributeError, OSError) as e:
             logger.exception("Failed to extract %s: %s", unityfs_path, e)
@@ -1259,16 +1714,17 @@ def _extract_bundle_files_sync(
             correct_param_ids(motions, param_id_map)
             motion_dir = save_dir / "motions"
             motion_dir.mkdir(parents=True, exist_ok=True)
-            (motion_dir / "BuildMotionData.json").write_bytes(
+            atomic_write_bytes(
+                motion_dir / "BuildMotionData.json",
                 json.dumps(
                     {"motions": [name for name, _ in motions]},
                     option=json.OPT_INDENT_2,
-                )
+                ),
             )
             exported_files.append(motion_dir / "BuildMotionData.json")
             for name, motion in motions:
                 motion_path = motion_dir / f"{name}.motion3.json"
-                motion_path.write_bytes(json.dumps(motion, option=json.OPT_INDENT_2))
+                atomic_write_bytes(motion_path, json.dumps(motion, option=json.OPT_INDENT_2))
                 exported_files.append(motion_path)
 
     logger.debug(
@@ -1281,14 +1737,16 @@ def _extract_bundle_files_sync(
     for save_dir, acb_files in post_process_acb_files:
         for acb_file in acb_files:
             acb_cue_sheet_name: str = acb_file["cueSheetName"]
-            acb_output_path = (save_dir / acb_cue_sheet_name).with_suffix(".acb")
+            acb_output_path = _replace_suffix_secure(save_dir, acb_cue_sheet_name, ".acb")
 
             if acb_file["formatType"] == 0 or acb_file["spilitFileNum"] == 0:
                 acb_textasset_filename: str = acb_file["assetBundleFileName"]
                 logger.debug("Try to find %s in %s", acb_textasset_filename, save_dir)
-                expected_acb_textasset_path = (
-                    save_dir / acb_textasset_filename.removesuffix(".bytes")
-                ).with_suffix(".acb")
+                expected_acb_textasset_path = _resolve_generated_child_path(
+                    save_dir,
+                    acb_textasset_filename.removesuffix(".bytes").removesuffix(".acb"),
+                    ".acb",
+                )
                 try:
                     acb_textasset_path = _resolve_existing_path_sync(
                         expected_acb_textasset_path,
@@ -1301,6 +1759,7 @@ def _extract_bundle_files_sync(
                         acb_textasset_filename,
                         acb_output_path,
                         unity_version,
+                        StdPath(bundle_cache_root) if bundle_cache_root else None,
                     ):
                         pass
                     else:
@@ -1332,7 +1791,9 @@ def _extract_bundle_files_sync(
                             continue
 
                         for shared_audio_path in shared_audio_paths:
-                            copied_audio_path = save_dir / shared_audio_path.name
+                            copied_audio_path = _resolve_generated_child_path(
+                                save_dir, shared_audio_path.name
+                            )
                             shutil.copy2(shared_audio_path, copied_audio_path)
                             exported_files.append(copied_audio_path)
                         logger.debug(
@@ -1382,7 +1843,9 @@ def _extract_bundle_files_sync(
                         continue
 
                     for shared_audio_path in shared_audio_paths:
-                        copied_audio_path = save_dir / shared_audio_path.name
+                        copied_audio_path = _resolve_generated_child_path(
+                            save_dir, shared_audio_path.name
+                        )
                         shutil.copy2(shared_audio_path, copied_audio_path)
                         exported_files.append(copied_audio_path)
                     logger.debug(
@@ -1402,7 +1865,9 @@ def _extract_bundle_files_sync(
                 try:
                     acb_textasset_paths = [
                         _resolve_existing_path_sync(
-                            save_dir / acb_textasset_filename.removesuffix(".bytes"),
+                            _resolve_generated_child_path(
+                                save_dir, acb_textasset_filename.removesuffix(".bytes")
+                            ),
                             save_dir,
                         )
                         for acb_textasset_filename in acb_textasset_filenames
@@ -1411,12 +1876,13 @@ def _extract_bundle_files_sync(
                     logger.error("%s not found in %s", acb_textasset_filenames, save_dir)
                     continue
 
-                with acb_output_path.open("wb") as outfile:
-                    for acb_textasset_path in acb_textasset_paths:
-                        with acb_textasset_path.open("rb") as infile:
-                            shutil.copyfileobj(infile, outfile)
-                        _discard_exported_file_sync(exported_files, acb_textasset_path)
-                        acb_textasset_path.unlink()
+                atomic_write_stream(
+                    acb_output_path,
+                    _stream_files(acb_textasset_paths),
+                )
+                for acb_textasset_path in acb_textasset_paths:
+                    _discard_exported_file_sync(exported_files, acb_textasset_path)
+                    acb_textasset_path.unlink()
 
                 logger.debug("Merged %s to %s.acb", acb_textasset_filenames, acb_cue_sheet_name)
 
@@ -1427,17 +1893,31 @@ def _extract_bundle_files_sync(
                         acb_file["assetBundleFileName"].removesuffix(".bytes").removesuffix(".acb")
                     )
                     cue_name = acb_cue_sheet_name if acb_cue_sheet_name != acb_asset_name else None
-                    extracted_audio_files = extract_acb(
-                        BytesIO(acb_data),
-                        save_dir.as_posix(),
-                        acb_output_path.as_posix(),
-                        cue_name,
-                    )
+                    acb_stage_dir = StdPath(tempfile.mkdtemp(prefix=".acb-", dir=save_dir))
+                    promoted_audio = []
+                    try:
+                        staged_acb = acb_stage_dir / acb_output_path.name
+                        staged_acb.write_bytes(acb_data)
+                        extracted_audio_files = extract_acb(
+                            BytesIO(acb_data),
+                            acb_stage_dir.as_posix(),
+                            staged_acb.as_posix(),
+                            cue_name,
+                        )
+
+                        for extracted_audio_file in extracted_audio_files:
+                            produced = secure_existing_output(acb_stage_dir, extracted_audio_file)
+                            final_audio = _resolve_generated_child_path(save_dir, produced.name)
+                            validate_output_target(save_dir, final_audio)
+                            os.replace(produced, final_audio)
+                            promoted_audio.append(final_audio.as_posix())
+                    finally:
+                        shutil.rmtree(acb_stage_dir, ignore_errors=True)
 
                 acb_output_path.unlink()
                 logger.debug("Removed %s", acb_output_path)
                 _discard_exported_file_sync(exported_files, acb_output_path)
-                audio_jobs.append((save_dir.as_posix(), extracted_audio_files))
+                audio_jobs.append((save_dir.as_posix(), promoted_audio))
             else:
                 logger.warning("%s not found in %s", acb_output_path, save_dir)
 
@@ -1445,31 +1925,44 @@ def _extract_bundle_files_sync(
         if len(movie_bundles) == 1:
             movie_bundle = movie_bundles[0]
             usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
-            usm_output_path = (save_dir / usm_output_name).with_suffix(".usm")
+            usm_output_path = _replace_suffix_secure(save_dir, usm_output_name, ".usm")
             usm_output_path = _resolve_existing_usm_path_sync(usm_output_path, save_dir)
         elif len(movie_bundles) > 1:
             pattern = re.compile(r"-\d{3}.usm.bytes")
             usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
-            usm_output_path = save_dir / usm_output_name
+            usm_output_path = _replace_suffix_secure(save_dir, usm_output_name, ".usm")
             usm_split_filenames: list[str] = [x["usmFileName"] for x in movie_bundles]
             usm_split_paths = [
-                save_dir / usm_split_filename.removesuffix(".bytes")
+                _resolve_generated_child_path(save_dir, usm_split_filename.removesuffix(".bytes"))
                 for usm_split_filename in usm_split_filenames
             ]
 
-            with usm_output_path.open("wb") as outfile:
-                for usm_split_path in usm_split_paths:
-                    if not usm_split_path.exists():
-                        usm_split_path_lower = usm_split_path.with_name(usm_split_path.name.lower())
-                        if usm_split_path_lower.exists():
-                            usm_split_path = usm_split_path_lower
-                            logger.debug("Found %s instead of %s", usm_split_path, usm_split_paths)
-                        else:
-                            raise FileNotFoundError(f"{usm_split_path} not found in {save_dir}")
-                    with usm_split_path.open("rb") as infile:
-                        shutil.copyfileobj(infile, outfile)
-                    _discard_exported_file_sync(exported_files, usm_split_path)
-                    usm_split_path.unlink()
+            resolved_usm_split_paths = []
+            for usm_split_path in usm_split_paths:
+                if not usm_split_path.exists():
+                    usm_split_path_lower = usm_split_path.with_name(usm_split_path.name.lower())
+                    if usm_split_path_lower.exists():
+                        usm_split_path = validate_contained_file(
+                            save_dir,
+                            usm_split_path_lower.relative_to(save_dir).as_posix(),
+                        )
+                        logger.debug("Found %s instead of %s", usm_split_path, usm_split_paths)
+                    else:
+                        raise FileNotFoundError(f"{usm_split_path} not found in {save_dir}")
+                else:
+                    usm_split_path = validate_contained_file(
+                        save_dir,
+                        usm_split_path.relative_to(save_dir).as_posix(),
+                    )
+                resolved_usm_split_paths.append(usm_split_path)
+
+            atomic_write_stream(
+                usm_output_path,
+                _stream_files(resolved_usm_split_paths),
+            )
+            for usm_split_path in resolved_usm_split_paths:
+                _discard_exported_file_sync(exported_files, usm_split_path)
+                usm_split_path.unlink()
 
             logger.debug("Merged %s to %s", usm_split_filenames, usm_output_name)
             exported_files.append(usm_output_path)
@@ -1480,8 +1973,15 @@ def _extract_bundle_files_sync(
         if usm_output_path.exists():
             video_jobs.append(usm_output_path.as_posix())
 
+    validated_exported_files = [
+        validate_contained_file(
+            output_root,
+            path.relative_to(output_root).as_posix(),
+        )
+        for path in exported_files
+    ]
     return (
-        [path.as_posix() for path in exported_files],
+        [path.as_posix() for path in validated_exported_files],
         audio_jobs,
         video_jobs,
     )
@@ -1489,54 +1989,140 @@ def _extract_bundle_files_sync(
 
 async def download_deobfuscate_bundle(
     url: str,
-    bundle_save_path: Path,
+    trusted_root: Path,
+    relative_destination: str,
     headers: Dict[str, str],
     config=None,
     session: aiohttp.ClientSession | None = None,
+    expected_bundle: Dict | None = None,
 ) -> None:
-    """Download and deobfuscate the bundle, retrying on transient network errors."""
+    """Download, validate, and atomically promote a bundle.
+
+    ``hash`` is intentionally not used here: it selects changed bundles, but
+    is not a byte-integrity format.  Likewise, ``crc`` is not asserted here:
+    the Project Sekai CRC input convention is not verified.
+    """
+    bundle_save_path = Path(resolve_secure_path(trusted_root, relative_destination).as_posix())
+    validate_output_target(trusted_root, bundle_save_path)
+    expected_size = _resolve_expected_bundle_size(expected_bundle)
     max_retries = get_download_max_retries(config)
+    retry_base_delay = get_download_retry_base_delay(config)
+    retry_max_delay = get_download_retry_max_delay(config)
 
     async def fetch_once(active_session: aiohttp.ClientSession) -> None:
         async with active_session.get(url, headers=headers) as response:
-            if response.status == 200:
-                async with await open_file(bundle_save_path, "wb") as f:
-                    try:
-                        header = await response.content.readexactly(4)
-                    except asyncio.IncompleteReadError as exc:
-                        header = exc.partial
-
-                    if header == b"\x20\x00\x00\x00":
-                        chunk = b""
-                    elif header == b"\x10\x00\x00\x00":
+            if response.status != 200:
+                if response.status in (408, 429) or 500 <= response.status <= 599:
+                    retry_after = None
+                    if response.status in (429, 503):
+                        value = response.headers.get("Retry-After")
                         try:
-                            obfuscated_header = await response.content.readexactly(128)
-                        except asyncio.IncompleteReadError as exc:
-                            obfuscated_header = exc.partial
-                        chunk = bytes(
+                            if value is not None:
+                                retry_after = max(0.0, float(value))
+                        except (TypeError, ValueError):
+                            retry_after = None
+                    raise RetryableDownloadError(
+                        f"download returned retryable HTTP status {response.status}",
+                        retry_after,
+                    )
+                raise DownloadIntegrityError(f"download returned HTTP status {response.status}")
+            temporary_path: StdPath | None = None
+            descriptor: int | None = None
+            raw_bytes = 0
+            stored_bytes = 0
+            header = bytearray()
+            header_mode: str | None = None
+
+            def transform_chunk(raw_chunk: bytes) -> list[bytes]:
+                """Strip and decode the transport header without buffering the body."""
+                nonlocal header_mode
+                if not raw_chunk:
+                    return []
+
+                output_chunks: list[bytes] = []
+                pending = raw_chunk
+                if header_mode is None:
+                    needed = 4 - len(header)
+                    header.extend(pending[:needed])
+                    pending = pending[needed:]
+                    if len(header) < 4:
+                        return output_chunks
+                    marker = bytes(header)
+                    if marker == b"\x20\x00\x00\x00":
+                        header_mode = "plain"
+                    elif marker == b"\x10\x00\x00\x00":
+                        header_mode = "obfuscated"
+                    elif marker == b"Unit":
+                        header_mode = "raw"
+                        output_chunks.append(bytes(header))
+                    else:
+                        raise DownloadIntegrityError("unknown bundle transport header")
+
+                if header_mode in ("plain", "raw"):
+                    if pending:
+                        output_chunks.append(pending)
+                    return output_chunks
+
+                if len(header) < 132:
+                    header_bytes_needed = 132 - len(header)
+                    header.extend(pending[:header_bytes_needed])
+                    pending = pending[header_bytes_needed:]
+                    if len(header) < 132:
+                        return output_chunks
+                    output_chunks.append(
+                        bytes(
                             a ^ b
                             for a, b in zip(
-                                obfuscated_header,
+                                header[4:132],
                                 (b"\xff" * 5 + b"\x00" * 3) * 16,
                             )
                         )
-                    else:
-                        chunk = header
+                    )
+                if pending:
+                    output_chunks.append(pending)
+                return output_chunks
 
-                    if chunk:
-                        await f.write(chunk)
-                    async for chunk in response.content.iter_chunked(1024 * 1024):
-                        if chunk:
-                            await f.write(chunk)
-                return
-
-            logger.debug(
-                "Failed to download %s: %s, response: %s",
-                url,
-                response.status,
-                await response.text(),
-            )
-            raise aiohttp.ClientError(f"Failed to download {url}")
+            try:
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=f".{bundle_save_path.name}.", suffix=".tmp", dir=bundle_save_path.parent
+                )
+                temporary_path = StdPath(temporary_name)
+                async with await open_file(descriptor, "wb") as output:
+                    descriptor = None
+                    async for raw_chunk in response.content.iter_chunked(1024 * 1024):
+                        raw_bytes += len(raw_chunk)
+                        for output_chunk in transform_chunk(raw_chunk):
+                            await output.write(output_chunk)
+                            stored_bytes += len(output_chunk)
+                    await output.flush()
+                    await asyncio.to_thread(os.fsync, output.wrapped.fileno())
+                if header_mode == "obfuscated" and len(header) < 132:
+                    raise DownloadIntegrityError("truncated obfuscated header")
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    if not isinstance(content_length, str) or not content_length.isdigit():
+                        raise DownloadIntegrityError("Content-Length is not a valid integer")
+                    if int(content_length) != raw_bytes:
+                        raise DownloadIntegrityError("Content-Length does not match response bytes")
+                if stored_bytes == 0:
+                    raise DownloadIntegrityError("downloaded bundle is empty")
+                _validate_unityfs_bundle(temporary_path, stored_bytes)
+                if expected_size is not None and expected_size != stored_bytes:
+                    raise DownloadIntegrityError("fileSize does not match stored bytes")
+                validate_output_target(trusted_root, bundle_save_path)
+                os.replace(temporary_path, StdPath(bundle_save_path.as_posix()))
+                temporary_path = None
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -1544,33 +2130,48 @@ async def download_deobfuscate_bundle(
                 await fetch_once(session)
             else:
                 async with aiohttp.ClientSession(
-                    timeout=get_request_timeout(config)
+                    **get_http_session_options(config)
                 ) as retry_session:
                     await fetch_once(retry_session)
             return
+        except asyncio.CancelledError:
+            raise
         except (
             asyncio.TimeoutError,
-            asyncio.CancelledError,
+            aiohttp.ClientConnectionError,
             aiohttp.ServerDisconnectedError,
             aiohttp.ClientPayloadError,
         ) as exc:
-            if attempt < max_retries:
-                logger.warning(
-                    "Download attempt %d/%d failed for %s (%s: %s), retrying...",
-                    attempt,
-                    max_retries,
-                    url,
-                    type(exc).__name__,
-                    exc,
-                )
-            else:
-                logger.error(
-                    "Download failed after %d attempts for %s: %s",
-                    max_retries,
-                    url,
-                    exc,
-                )
-                raise
+            retry_error = RetryableDownloadError(sanitize_http_log_value(str(exc)))
+        except RetryableDownloadError as exc:
+            retry_error = RetryableDownloadError(
+                sanitize_http_log_value(str(exc)),
+                exc.retry_after,
+            )
+        else:
+            return
+
+        if attempt >= max_retries:
+            raise retry_error from None
+        exponential_cap = min(
+            retry_max_delay,
+            retry_base_delay * (2 ** (attempt - 1)),
+        )
+        if retry_error.retry_after is not None:
+            delay_cap = min(retry_max_delay, retry_error.retry_after)
+        else:
+            delay_cap = exponential_cap
+        delay = random.uniform(0.0, delay_cap)
+        logger.warning(
+            "Download attempt %d/%d failed for %s (%s: %s), retrying in %.3fs...",
+            attempt,
+            max_retries,
+            sanitize_url(url),
+            type(retry_error).__name__,
+            sanitize_http_log_value(str(retry_error)),
+            delay,
+        )
+        await asyncio.sleep(delay)
 
 
 async def extract_asset_bundle(
@@ -1579,6 +2180,7 @@ async def extract_asset_bundle(
     extracted_save_path: Path,
     unity_version: str = None,
     config=None,
+    bundle_cache_root: Path | None = None,
 ) -> List[Path]:
     """Extract the asset bundle to the specified directory."""
     live2d_bundle = is_live2d_bundle(bundle)
@@ -1587,13 +2189,16 @@ async def extract_asset_bundle(
     loop = asyncio.get_running_loop()
     exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
         _get_shared_extract_process_pool(config),
-        _extract_bundle_files_sync,
-        bundle_save_path.as_posix(),
-        bundle,
-        extracted_save_path.as_posix(),
-        unity_version,
-        _get_texture_output_formats(config),
-        live2d_bundle,
+        partial(
+            _extract_bundle_files_sync,
+            bundle_save_path.as_posix(),
+            bundle,
+            extracted_save_path.as_posix(),
+            unity_version,
+            _get_texture_output_formats(config),
+            bundle_cache_root.as_posix() if bundle_cache_root is not None else None,
+            live2d_bundle=live2d_bundle,
+        ),
     )
 
     exported_files: List[Path] = [Path(path) for path in exported_paths]
@@ -1614,14 +2219,40 @@ async def extract_asset_bundle(
         ]
         audio_results = await asyncio.gather(*audio_tasks)
         for audio_files in audio_results:
-            exported_files.extend(audio_files)
+            for audio_file in audio_files:
+                exported_files.append(
+                    Path(
+                        validate_contained_file(
+                            StdPath(extracted_save_path.as_posix()),
+                            StdPath(audio_file.as_posix())
+                            .relative_to(StdPath(extracted_save_path.as_posix()))
+                            .as_posix(),
+                        ).as_posix()
+                    )
+                )
 
     for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
-        exported_files.extend(video_files)
+        for video_file in video_files:
+            exported_files.append(
+                Path(
+                    validate_contained_file(
+                        StdPath(extracted_save_path.as_posix()),
+                        StdPath(video_file.as_posix())
+                        .relative_to(StdPath(extracted_save_path.as_posix()))
+                        .as_posix(),
+                    ).as_posix()
+                )
+            )
         for discarded_file in discarded_files:
             _discard_exported_file(exported_files, discarded_file)
 
     for file in exported_files[:]:
+        validate_contained_file(
+            StdPath(extracted_save_path.as_posix()),
+            StdPath(file.as_posix())
+            .relative_to(StdPath(extracted_save_path.as_posix()))
+            .as_posix(),
+        )
         if file.suffix in [".bytes", ".acb", ".usm"]:
             await file.unlink()
             logger.debug("Removed %s in cleanup stage", file)

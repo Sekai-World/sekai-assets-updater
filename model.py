@@ -8,7 +8,6 @@ class ConfigLike(Protocol):
     UPDATER_MODE: str
     ENABLE_LIVE2D_POSTPROCESS: bool
     ENABLE_CHARTS_POSTPROCESS: bool
-    ASSET_REMOTE_STORAGE: list[dict]
     MAX_CONCURRENCY: int
     MAX_CONCURRENCY_DOWNLOADS: int
     MAX_CONCURRENCY_EXTRACTS: int
@@ -20,11 +19,15 @@ class ConfigLike(Protocol):
     MAX_CONCURRENCY_AUDIO_TRANSCODES: int
     HCA_DECODE_BACKEND: str
     REQUEST_TIMEOUT: int | float | None
+    EXTERNAL_PROCESS_TIMEOUT: int | float
     DOWNLOAD_MAX_RETRIES: int
+    DOWNLOAD_RETRY_BASE_DELAY: int | float
+    DOWNLOAD_RETRY_MAX_DELAY: int | float
     MIN_FREE_DISK_BYTES: int
     DOWNLOAD_DISK_SPACE_CHECK_INTERVAL: int | float
     MAX_CONCURRENCY_VIDEO_TRANSCODES: int
     MAX_CONCURRENCY_USM_DEMUXES: int
+    MAX_CONCURRENCY_UPLOADS: int
     TEXTURE_OUTPUT_FORMATS: tuple[str, ...]
     PROXY_URL: Optional[str]
     USER_AGENT: Optional[str]
@@ -48,6 +51,7 @@ class ConfigLike(Protocol):
     ASSET_LOCAL_EXTRACTED_DIR: Optional[Path]
     ASSET_LOCAL_BUNDLE_CACHE_DIR: Optional[Path]
     LIVE2D_BUNDLE_CACHE_DIR: Optional[Path]
+    ASSET_REMOTE_STORAGE: Optional[list[dict[str, Any]]]
 
 
 class SekaiServerRegion(Enum):

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import shutil
 import tempfile
 import time
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -10,12 +12,14 @@ from anyio import open_file
 from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
 from helpers import (
     build_download_disk_space_gate,
+    DownloadPlan,
     ensure_dir_exists,
     filter_bundles_for_mode,
     filter_download_items_for_mode,
     get_mode_bundle_prefixes,
     get_download_list,
     dedupe_download_items,
+    sanitize_http_log_value,
     select_bundles_for_download,
     setup_logging_queue,
 )
@@ -29,6 +33,21 @@ from specialized import (
     run_specialized_postprocess,
 )
 from worker import get_bundle_cache_path, run_pipeline
+from state import (
+    StateLock,
+    StateNotFoundError,
+    StatePaths,
+    atomic_write_json,
+    create_journal,
+    derive_state_paths,
+    durable_unlink,
+    load_pending_queue,
+    prepare_state_directory,
+    replay_journal,
+    validate_asset_metadata,
+    validate_game_version,
+    validate_pending_queue,
+)
 
 logger = logging.getLogger("asset_updater")
 
@@ -60,11 +79,82 @@ def require_config() -> ConfigLike:
     return config
 
 
+def validate_config(cfg: ConfigLike) -> None:
+    """Reject unsafe or unusable runtime settings before starting the pipeline."""
+    concurrency_names = (
+        "MAX_CONCURRENCY",
+        "MAX_CONCURRENCY_DOWNLOADS",
+        "MAX_CONCURRENCY_EXTRACTS",
+        "MAX_CONCURRENCY_UPLOAD_STAGE",
+        "PIPELINE_STAGE_QUEUE_SIZE",
+        "MAX_CONCURRENT_AUDIO_FILES",
+        "MAX_CONCURRENCY_HCA_DECODES",
+        "MAX_CONCURRENCY_AUDIO_ENCODERS",
+        "MAX_CONCURRENCY_AUDIO_TRANSCODES",
+        "MAX_CONCURRENCY_VIDEO_TRANSCODES",
+        "MAX_CONCURRENCY_USM_DEMUXES",
+        "MAX_CONCURRENCY_UPLOADS",
+    )
+    errors: list[str] = []
+    for name in concurrency_names:
+        value = getattr(cfg, name, None)
+        if type(value) is not int or value <= 0:
+            errors.append(f"{name} must be a positive integer (got {value!r})")
+
+    max_retries = getattr(cfg, "DOWNLOAD_MAX_RETRIES", None)
+    if type(max_retries) is not int or max_retries < 1:
+        errors.append(
+            f"DOWNLOAD_MAX_RETRIES must be an integer of at least 1 (got {max_retries!r})"
+        )
+
+    timeout = getattr(cfg, "EXTERNAL_PROCESS_TIMEOUT", None)
+    try:
+        valid_timeout = float(timeout) > 0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        valid_timeout = False
+    if not valid_timeout:
+        errors.append(
+            f"EXTERNAL_PROCESS_TIMEOUT must be a positive number (got {timeout!r})"
+        )
+
+    key = getattr(cfg, "AES_KEY", None)
+    iv = getattr(cfg, "AES_IV", None)
+    if not isinstance(key, bytes) or len(key) not in {16, 24, 32}:
+        errors.append("AES_KEY must be bytes with length 16, 24, or 32")
+    if not isinstance(iv, bytes) or len(iv) != 16:
+        errors.append("AES_IV must be bytes with length 16")
+
+    def require_program(program: object, label: str) -> None:
+        if not program:
+            errors.append(f"{label} executable is not configured")
+        elif not isinstance(program, str):
+            errors.append(f"{label} executable must be a string")
+        elif shutil.which(program) is None and not (
+            os.path.isfile(program) and os.access(program, os.X_OK)
+        ):
+            errors.append(f"{label} executable not found: {program}")
+
+    require_program("ffmpeg", "ffmpeg")
+    backend = str(getattr(cfg, "HCA_DECODE_BACKEND", "auto")).strip().lower()
+    if backend == "vgmstream":
+        require_program(
+            os.environ.get("VGMSTREAM_CLI", "vgmstream-cli"), "vgmstream-cli"
+        )
+    if getattr(cfg, "ASSET_REMOTE_STORAGE", None):
+        for index, storage in enumerate(cfg.ASSET_REMOTE_STORAGE):
+            if storage.get("type") == "normal":
+                require_program(storage.get("program"), f"upload storage {index}")
+
+    if errors:
+        raise ValueError("Invalid configuration:\n- " + "\n- ".join(errors))
+
+
 async def do_download(
     dl_list: List[DownloadItem],
     config: ConfigLike,
     headers: Dict[str, str],
     cookie,
+    paths: StatePaths | None = None,
 ) -> bool:
     """
     Download the files in the download list using asyncio and aiohttp.
@@ -80,6 +170,8 @@ async def do_download(
             download_disk_space_gate.min_free_bytes,
         )
 
+    pipeline_error = None
+    failed_tasks: List[DownloadItem] = []
     try:
         failed_tasks = await run_pipeline(
             dl_list,
@@ -88,18 +180,26 @@ async def do_download(
             cookie=cookie,
             download_disk_space_gate=download_disk_space_gate,
         )
-    except Exception:
-        logger.exception(
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(
             "ERROR | stage=pipeline | action=crash | preserve_pending=true | items=%d",
             len(dl_list),
         )
-        failed_tasks = dl_list
+        pipeline_error = RuntimeError(sanitize_http_log_value(str(exc)))
+
+    if pipeline_error is not None:
+        raise pipeline_error
 
     # Replace the original download list with the failed tasks
     if failed_tasks:
-        failed_path = config.DL_LIST_CACHE_PATH
-        async with await open_file(failed_path, "wb") as f:
-            await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
+        failed_path = paths.queue if paths is not None else config.DL_LIST_CACHE_PATH
+        if paths is not None:
+            atomic_write_json(failed_path, [list(item) for item in failed_tasks], validate_pending_queue)
+        else:
+            async with await open_file(failed_path, "wb") as f:
+                await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
         logger.warning(
             "RUN | result=partial_failure | failed=%d | retry_list=%s",
             len(failed_tasks),
@@ -135,6 +235,7 @@ async def _write_metadata_only_cache(
     asset_bundle_info: Dict[str, Any],
     game_version_json,
     start_time: float,
+    paths: StatePaths | None = None,
 ) -> None:
     logger.info("RUN | step=2/2 | action=write_metadata_cache")
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
@@ -150,15 +251,43 @@ async def _write_metadata_only_cache(
     if not current_bundles:
         raise ValueError("No bundles found after filtering")
 
-    await _write_json_cache(
-        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
-        {
-            "version": asset_bundle_info.get("version", ""),
-            "os": asset_bundle_info.get("os", ""),
-            "bundles": asset_bundle_info.get("bundles", {}),
-        },
-    )
-    await _write_json_cache(cfg.GAME_VERSION_JSON_CACHE_PATH, game_version_json)
+    metadata = {
+        "version": asset_bundle_info.get("version", ""),
+        "os": asset_bundle_info.get("os", ""),
+        "bundles": current_bundles,
+    }
+    if paths is None:
+        await _write_json_cache(cfg.ASSET_BUNDLE_INFO_CACHE_PATH, metadata)
+        await _write_json_cache(cfg.GAME_VERSION_JSON_CACHE_PATH, game_version_json)
+    else:
+        observed_metadata_path = paths.asset_metadata.with_name(
+            f"{paths.asset_metadata.stem}.observed{paths.asset_metadata.suffix}"
+        )
+        observed_version_path = paths.game_version.with_name(
+            f"{paths.game_version.stem}.observed{paths.game_version.suffix}"
+        )
+        state_members = {
+            path.resolve(strict=False)
+            for path in (
+                paths.queue,
+                paths.asset_metadata,
+                paths.game_version,
+                paths.journal,
+                paths.lock,
+            )
+        }
+        observed_paths = {
+            observed_metadata_path.resolve(strict=False),
+            observed_version_path.resolve(strict=False),
+        }
+        overlap = observed_paths & state_members
+        if overlap:
+            raise RuntimeError(
+                "observational state path aliases normal state target(s): "
+                + ", ".join(str(path) for path in sorted(overlap))
+            )
+        atomic_write_json(observed_metadata_path, metadata, validate_asset_metadata)
+        atomic_write_json(observed_version_path, game_version_json, validate_game_version)
     logger.info(
         "RUN | result=metadata_updated | path=%s | filtered_bundles=%d",
         cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -176,7 +305,7 @@ async def _build_new_download_list(
     asset_ver,
     assetbundle_host_hash,
     force_full_download: bool,
-) -> List[DownloadItem]:
+) -> tuple[List[DownloadItem], DownloadPlan]:
     logger.info("RUN | step=2/4 | action=build_download_list")
     # get_download_list applies the user filters and writes the metadata cache;
     # the mandatory mode scope is applied both before and after it so it cannot
@@ -185,7 +314,7 @@ async def _build_new_download_list(
     scoped_info["bundles"] = filter_bundles_for_mode(
         scoped_info.get("bundles", {}), mode
     )
-    new_download_list: List[DownloadItem] = await get_download_list(
+    plan: DownloadPlan = await get_download_list(
         scoped_info,
         game_version_json,
         config=cfg,
@@ -199,9 +328,9 @@ async def _build_new_download_list(
         bundle_cache_path_resolver=lambda bundle: get_bundle_cache_path(cfg, bundle),
         asset_bundle_info_for_cache=asset_bundle_info,
     )
-    new_download_list = filter_download_items_for_mode(new_download_list, mode)
+    new_download_list = filter_download_items_for_mode(plan.candidates, mode)
     logger.debug("New download candidates: %d item(s)", len(new_download_list))
-    return new_download_list
+    return new_download_list, plan
 
 
 async def _load_pending_download_lists(
@@ -213,7 +342,12 @@ async def _load_pending_download_lists(
     if not await cfg.DL_LIST_CACHE_PATH.exists():
         return [], []
 
-    cached_pending_list = await _read_json_cache(cfg.DL_LIST_CACHE_PATH)
+    try:
+        cached_pending_list = cast(
+            List[DownloadItem], load_pending_queue(cfg.DL_LIST_CACHE_PATH)
+        )
+    except StateNotFoundError:
+        return [], []
     if force_full_download:
         return cached_pending_list, []
 
@@ -232,15 +366,21 @@ def _merge_pending_and_new_download_lists(
 ) -> List[DownloadItem]:
     """Merge pending retries ahead of new candidates without duplicates."""
     if pending_list and new_download_list:
-        pending_bundle_names = {
-            bundle.get("bundleName") for _, bundle in pending_list
+        current_by_name = {
+            bundle.get("bundleName"): (url, bundle)
+            for url, bundle in new_download_list
         }
+        ordered_pending = [
+            current_by_name.get(bundle.get("bundleName"), (url, bundle))
+            for url, bundle in pending_list
+        ]
+        pending_bundle_names = {bundle.get("bundleName") for _, bundle in ordered_pending}
         deduped_new = [
             item
             for item in new_download_list
             if item[1].get("bundleName") not in pending_bundle_names
         ]
-        download_list = dedupe_download_items(pending_list + deduped_new)
+        download_list = dedupe_download_items(ordered_pending + deduped_new)
         logger.info(
             "RUN | action=merge_download_list | pending=%d | new=%d | total=%d",
             len(pending_list),
@@ -273,6 +413,7 @@ async def _restore_pending_cache_on_failure(
     cfg: ConfigLike,
     mode: str,
     pending_items_outside_mode: List[DownloadItem],
+    paths: StatePaths | None = None,
 ) -> None:
     """Keep other-mode pending items when the current mode partially fails."""
     if not pending_items_outside_mode:
@@ -283,25 +424,33 @@ async def _restore_pending_cache_on_failure(
         failed_current_list = filter_download_items_for_mode(
             await _read_json_cache(cfg.DL_LIST_CACHE_PATH), mode
         )
-    await _write_json_cache(
-        cfg.DL_LIST_CACHE_PATH,
-        dedupe_download_items(pending_items_outside_mode + failed_current_list),
-    )
+    queue_items = dedupe_download_items(pending_items_outside_mode + failed_current_list)
+    if paths is None:
+        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, queue_items)
+    else:
+        atomic_write_json(paths.queue, [list(item) for item in queue_items], validate_pending_queue)
 
 
 async def _cleanup_pending_cache_on_success(
     cfg: ConfigLike,
     download_list: List[DownloadItem],
     pending_items_outside_mode: List[DownloadItem],
+    paths: StatePaths | None = None,
 ) -> None:
     """Drop current-mode pending items while retaining other modes' queue."""
     if not download_list:
         return
 
     if pending_items_outside_mode:
-        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
+        if paths is None:
+            await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
+        else:
+            atomic_write_json(paths.queue, [list(item) for item in pending_items_outside_mode], validate_pending_queue)
     else:
-        await cfg.DL_LIST_CACHE_PATH.unlink()
+        if paths is None:
+            await cfg.DL_LIST_CACHE_PATH.unlink()
+        else:
+            durable_unlink(paths.queue)
     logger.debug(
         "Cleanup complete: removed pending list cache %s",
         cfg.DL_LIST_CACHE_PATH,
@@ -316,15 +465,19 @@ async def _complete_with_empty_download_list(
     pending_items_outside_mode: List[DownloadItem],
     extracted_dir_is_temporary: bool,
     start_time: float,
+    paths: StatePaths | None = None,
 ) -> None:
     logger.info("RUN | result=noop | reason=no_items | postprocess=true")
     if pending_items_outside_mode:
-        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
-    is_success = await do_download([], config=cfg, headers=headers, cookie=cookie)
-    if is_success:
-        await _run_enabled_specialized_postprocess(
-            mode, cfg, extracted_dir_is_temporary
-        )
+        if paths is None:
+            await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
+        else:
+            atomic_write_json(paths.queue, [list(item) for item in pending_items_outside_mode], validate_pending_queue)
+    elif paths is None:
+        await cfg.DL_LIST_CACHE_PATH.unlink(missing_ok=True)
+    else:
+        durable_unlink(paths.queue)
+    await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
 
@@ -337,29 +490,31 @@ async def _complete_with_download_list(
     pending_items_outside_mode: List[DownloadItem],
     extracted_dir_is_temporary: bool,
     start_time: float,
+    paths: StatePaths | None = None,
 ) -> None:
     logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
 
     # Persist the (merged) list so a mid-run crash can be resumed
     logger.info("RUN | step=3/4 | action=persist_queue | path=%s", cfg.DL_LIST_CACHE_PATH)
-    await _write_json_cache(
-        cfg.DL_LIST_CACHE_PATH,
-        dedupe_download_items(pending_items_outside_mode + download_list),
-    )
+    queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
+    if paths is not None:
+        atomic_write_json(paths.queue, [list(item) for item in queue_items], validate_pending_queue)
+    else:
+        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, queue_items)
 
     is_success = await do_download(
-        download_list, config=cfg, headers=headers, cookie=cookie
+        download_list, config=cfg, headers=headers, cookie=cookie, paths=paths
     )
     if not is_success:
         await _restore_pending_cache_on_failure(
-            cfg, mode, pending_items_outside_mode
+            cfg, mode, pending_items_outside_mode, paths
         )
     else:
         await _run_enabled_specialized_postprocess(
             mode, cfg, extracted_dir_is_temporary
         )
         await _cleanup_pending_cache_on_success(
-            cfg, download_list, pending_items_outside_mode
+            cfg, download_list, pending_items_outside_mode, paths
         )
 
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
@@ -373,10 +528,11 @@ async def _run_full_download_pipeline(
     automatic_prefixes,
     fetch_result,
     start_time: float,
+    paths: StatePaths | None = None,
 ) -> None:
     # Charts consume extracted scores from local/normal remote storage and do
     # not participate in the asset-bundle download pipeline at all.
-    new_download_list = await _build_new_download_list(
+    new_download_list, plan = await _build_new_download_list(
         cfg,
         mode,
         automatic_prefixes,
@@ -394,6 +550,11 @@ async def _run_full_download_pipeline(
         pending_list, new_download_list
     )
 
+    if paths is not None and not paths.journal.exists():
+        queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
+        create_journal(paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version)
+        replay_journal(paths)
+
     if not download_list:
         await _complete_with_empty_download_list(
             cfg,
@@ -403,6 +564,7 @@ async def _run_full_download_pipeline(
             pending_items_outside_mode,
             extracted_dir_is_temporary,
             start_time,
+            paths,
         )
         return
 
@@ -415,6 +577,7 @@ async def _run_full_download_pipeline(
         pending_items_outside_mode,
         extracted_dir_is_temporary,
         start_time,
+        paths,
     )
 
 
@@ -425,7 +588,7 @@ async def _run_main(
     extracted_dir_is_temporary: bool = False,
 ):
     cfg = require_config()
-    cfg.UPDATER_MODE = mode
+    setattr(cfg, "UPDATER_MODE", mode)
     start_time = time.monotonic()
     automatic_prefixes = get_required_bundle_prefixes(mode, cfg)
 
@@ -437,6 +600,39 @@ async def _run_main(
     )
 
     await _ensure_run_cache_dirs(cfg)
+    shared_dir = cfg.DL_LIST_CACHE_PATH.parent
+    prepare_state_directory(shared_dir)
+    paths = derive_state_paths(
+        cfg.DL_LIST_CACHE_PATH,
+        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
+        cfg.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    lock = StateLock(paths.lock)
+    lock.acquire()
+    try:
+        replay_journal(paths)
+        await _run_main_locked(
+            cfg,
+            update_asset_bundle_info_only,
+            force_full_download,
+            mode,
+            extracted_dir_is_temporary,
+            paths,
+        )
+    finally:
+        lock.release()
+
+
+async def _run_main_locked(
+    cfg: ConfigLike,
+    update_asset_bundle_info_only: bool,
+    force_full_download: bool,
+    mode: str,
+    extracted_dir_is_temporary: bool,
+    paths: StatePaths,
+) -> None:
+    start_time = time.monotonic()
+    automatic_prefixes = get_required_bundle_prefixes(mode, cfg)
     headers, cookie = await build_request_headers(cfg)
 
     if force_full_download:
@@ -460,6 +656,7 @@ async def _run_main(
             fetch_result.asset_bundle_info,
             fetch_result.game_version_json,
             start_time,
+            paths,
         )
         return
 
@@ -471,6 +668,7 @@ async def _run_main(
         automatic_prefixes,
         fetch_result,
         start_time,
+        paths=paths,
     )
 
 
@@ -592,6 +790,7 @@ def cli():
     spec.loader.exec_module(loaded_config)
     sys.modules["config"] = loaded_config
     config = cast(ConfigLike, loaded_config)
+    validate_config(config)
 
     # Set the logging level
     log_level = logging.INFO

@@ -302,4 +302,5 @@ async def _upload_specialized_directory(mode: str, source_dir: Path, config) -> 
             remote_path,
             storage["program"],
             storage["args"],
+            config=config,
         )

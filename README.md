@@ -43,6 +43,9 @@ Important fields:
 - `ASSET_BUNDLE_URL`
 - `MIN_FREE_DISK_BYTES`: minimum free disk space to keep before a new download starts
 - `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL`: how often blocked downloads recheck free space
+- `EXTERNAL_PROCESS_TIMEOUT`: maximum seconds for each selected external codec or upload
+  command. A timed-out process is terminated and given a 2-second grace period before it
+  is killed; configuration must be a positive number.
 
 Disk space gate:
 
@@ -87,6 +90,9 @@ Storage:
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
 - Charts never download or cache asset bundles. They use existing `music/music_score/*.txt` files first; when absent, they copy `music/music_score/` from the first successful `type == "normal"` target in `ASSET_REMOTE_STORAGE`, using that target's program and args. If `ASSET_LOCAL_EXTRACTED_DIR` is persistent, the fallback uses a separate temporary workspace and cannot pollute it. If it is unset, the existing run-scoped extracted workspace is reused and cleaned after processing. Ordinary assets retain their existing temporary-file semantics.
+
+Startup validates all configured concurrency values, AES key/IV lengths, the external process
+timeout, and executables required by the selected decoder and upload backends.
 
 Cache files:
 
@@ -138,6 +144,18 @@ uv run python main.py -c config.py --force-full-download
 ```
 
 If downloads are blocked by low free disk space, the updater logs a warning and retries after `DOWNLOAD_DISK_SPACE_CHECK_INTERVAL` seconds.
+
+## Tests
+
+Run the test suite with uv, including the development dependencies:
+
+```bash
+uv run --group dev pytest
+```
+
+Tests are discovered from the project root using the `test_*.py` pattern. The
+single-bundle debugging script, `test_download_extract.py`, is excluded from
+the test run.
 
 ## Resume Behavior
 

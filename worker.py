@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 import tempfile
 import uuid
@@ -8,13 +9,21 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from bundle import download_deobfuscate_bundle, extract_asset_bundle, is_live2d_bundle
+from bundle import (
+    _resolve_expected_bundle_size,
+    download_deobfuscate_bundle,
+    extract_asset_bundle,
+    is_live2d_bundle,
+)
 from helpers import (
+    build_cdn_headers,
     DownloadDiskSpaceGate,
-    get_request_timeout,
+    get_http_session_options,
     refresh_cookie,
+    sanitize_log_label,
     upload_to_storage,
 )
+from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 
 logger = logging.getLogger("asset_updater")
 
@@ -80,9 +89,7 @@ def get_extract_stage_concurrency(config) -> int:
 
 
 def get_upload_stage_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1)
-    )
+    return _sanitize_concurrency(getattr(config, "MAX_CONCURRENCY_UPLOAD_STAGE", 1))
 
 
 def get_stage_queue_size(config, downstream_concurrency: int) -> int:
@@ -97,11 +104,29 @@ def get_stage_queue_size(config, downstream_concurrency: int) -> int:
 
 
 def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
-    value = bundle.get("fileSize", 0)
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
+    return _resolve_expected_bundle_size(bundle) or 0
+
+
+def _bundle_staging_identity(bundle_name: Any) -> str:
+    """Return a deterministic, filesystem-safe identity for a bundle name."""
+
+    if not isinstance(bundle_name, str) or not bundle_name:
+        raise ValueError("bundleName must be a non-empty string")
+    digest = hashlib.sha256(bundle_name.encode("utf-8", "surrogatepass")).hexdigest()
+    return f"bundle-{digest[:24]}"
+
+
+def _validate_artifact_outputs(extracted_root: Path, exported_paths: List[Path]) -> List[Path]:
+    """Ensure extraction output is contained regular files for this artifact."""
+
+    root = extracted_root
+    root_std = __import__("pathlib").Path(root.as_posix()).resolve()
+    validated: List[Path] = []
+    for path in exported_paths:
+        candidate = __import__("pathlib").Path(path.as_posix())
+        relative_path = candidate.resolve().relative_to(root_std).as_posix()
+        validated.append(Path(validate_contained_file(root_std, relative_path).as_posix()))
+    return validated
 
 
 async def _cleanup_artifact(
@@ -119,7 +144,7 @@ async def _cleanup_artifact(
                 await artifact.bundle_save_path.unlink(missing_ok=True)
             logger.debug("Removed temporary bundle %s", artifact.bundle_save_path)
         except OSError:
-            logger.exception(
+            logger.error(
                 "Failed to remove temporary bundle %s",
                 artifact.bundle_save_path,
             )
@@ -141,7 +166,7 @@ async def _cleanup_artifact(
                 artifact.extracted_save_path,
             )
         except OSError:
-            logger.exception(
+            logger.error(
                 "Failed to remove temporary extracted dir %s",
                 artifact.extracted_save_path,
             )
@@ -149,9 +174,62 @@ async def _cleanup_artifact(
             artifact.tmp_extracted_save_dir = None
 
 
+async def _cleanup_queued_artifacts(queue: asyncio.Queue) -> None:
+    """Remove durable temporary artifacts that cannot survive a cancelled run."""
+    while True:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        try:
+            if isinstance(item, PipelineArtifact):
+                await _cleanup_artifact(item, remove_bundle=True, remove_extracted=True)
+        finally:
+            queue.task_done()
+
+
 async def _put_sentinels(queue: asyncio.Queue, count: int) -> None:
     for _ in range(count):
         await queue.put(_QUEUE_SENTINEL)
+
+
+async def _monitor_worker_failures(worker_tasks: List[asyncio.Task]) -> None:
+    """Wait for pipeline workers and re-raise an unexpected worker failure."""
+
+    pending = set(worker_tasks)
+    while pending:
+        done, pending = await asyncio.wait(
+            pending,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in done:
+            if task.cancelled():
+                raise asyncio.CancelledError
+            exception = task.exception()
+            if exception is not None:
+                raise exception
+
+
+async def _await_with_worker_monitor(
+    awaitable,
+    worker_monitor: asyncio.Task,
+) -> None:
+    """Await a pipeline operation without hiding a failed worker behind it."""
+
+    operation = asyncio.create_task(awaitable)
+    try:
+        done, _ = await asyncio.wait(
+            {operation, worker_monitor},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if worker_monitor in done:
+            await worker_monitor
+        await operation
+    except BaseException:
+        if not operation.done():
+            operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        raise
 
 
 async def _download_stage(
@@ -177,7 +255,7 @@ async def _download_stage(
                 return
 
             url, bundle = item
-            label = bundle.get("bundleName", url)
+            label = sanitize_log_label(bundle.get("bundleName", url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=download | action=start_item | item=%s",
                 pipeline_id,
@@ -189,6 +267,8 @@ async def _download_stage(
             bundle_save_path: Union[Path, None] = None
             tmp_bundle_save_file = None
             remove_bundle_after_extract = False
+            download_root: Path
+            download_relative_path: str
 
             try:
                 if worker_cookie:
@@ -200,14 +280,28 @@ async def _download_stage(
 
                 bundle_cache_root = get_bundle_cache_root(config, bundle)
                 if isinstance(bundle_cache_root, Path):
-                    bundle_save_path = bundle_cache_root / bundle["bundleName"]
-                    await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    bundle_cache_root = Path(
+                        prepare_secure_directory(bundle_cache_root).as_posix()
+                    )
+                    bundle_save_path = Path(
+                        resolve_secure_path(
+                            bundle_cache_root,
+                            bundle["bundleName"],
+                        ).as_posix()
+                    )
+                    bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    download_root = bundle_cache_root
+                    download_relative_path = bundle_save_path.relative_to(
+                        bundle_cache_root
+                    ).as_posix()
                 else:
                     tmp_bundle_save_file = tempfile.NamedTemporaryFile(delete=False)
                     bundle_save_path = Path(tmp_bundle_save_file.name)
                     tmp_bundle_save_file.close()
                     tmp_bundle_save_file = None
                     remove_bundle_after_extract = True
+                    download_root = bundle_save_path.parent
+                    download_relative_path = bundle_save_path.name
 
                 if download_disk_space_gate is not None:
                     async with download_disk_space_gate.reserve(
@@ -216,18 +310,22 @@ async def _download_stage(
                     ):
                         await download_deobfuscate_bundle(
                             url,
-                            bundle_save_path,
-                            headers=worker_headers,
+                            download_root,
+                            download_relative_path,
+                            headers=build_cdn_headers(worker_cookie),
                             config=config,
                             session=session,
+                            expected_bundle=bundle,
                         )
                 else:
                     await download_deobfuscate_bundle(
                         url,
-                        bundle_save_path,
-                        headers=worker_headers,
+                        download_root,
+                        download_relative_path,
+                        headers=build_cdn_headers(worker_cookie),
                         config=config,
                         session=session,
+                        expected_bundle=bundle,
                     )
 
                 await extract_queue.put(
@@ -239,12 +337,18 @@ async def _download_stage(
                         remove_bundle_after_extract=remove_bundle_after_extract,
                     )
                 )
+            except asyncio.CancelledError:
+                if tmp_bundle_save_file:
+                    tmp_bundle_save_file.close()
+                if bundle_save_path and remove_bundle_after_extract:
+                    await bundle_save_path.unlink(missing_ok=True)
+                raise
             except Exception:
                 if tmp_bundle_save_file:
                     tmp_bundle_save_file.close()
                 if bundle_save_path and remove_bundle_after_extract:
                     await bundle_save_path.unlink(missing_ok=True)
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=download | item=%s",
                     pipeline_id,
                     name,
@@ -272,7 +376,7 @@ async def _extract_stage(
                 return
 
             artifact = item
-            label = artifact.bundle.get("bundleName", artifact.url)
+            label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=extract | action=start_item | item=%s",
                 pipeline_id,
@@ -280,10 +384,25 @@ async def _extract_stage(
                 label,
             )
 
+            handed_to_upload = False
             try:
+                bundle_cache_root = None
+                configured_bundle_cache_root = get_bundle_cache_root(config, artifact.bundle)
+                if isinstance(configured_bundle_cache_root, Path):
+                    bundle_cache_root = Path(
+                        prepare_secure_directory(configured_bundle_cache_root).as_posix()
+                    )
+
                 if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
-                    extracted_save_path = config.ASSET_LOCAL_EXTRACTED_DIR
-                    await extracted_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    configured_root = Path(
+                        prepare_secure_directory(config.ASSET_LOCAL_EXTRACTED_DIR).as_posix()
+                    )
+                    identity_root = configured_root / _bundle_staging_identity(
+                        artifact.bundle.get("bundleName")
+                    )
+                    extracted_save_path = Path(
+                        prepare_secure_directory(identity_root / uuid.uuid4().hex).as_posix()
+                    )
                     remove_extracted_after_upload = False
                 else:
                     tmp_extracted_save_dir = tempfile.TemporaryDirectory(delete=False)
@@ -293,12 +412,17 @@ async def _extract_stage(
 
                 artifact.extracted_save_path = extracted_save_path
                 artifact.remove_extracted_after_upload = remove_extracted_after_upload
-                artifact.exported_list = await extract_asset_bundle(
+                extracted_outputs = await extract_asset_bundle(
                     artifact.bundle_save_path,
                     artifact.bundle,
                     extracted_save_path,
                     unity_version=config.UNITY_VERSION,
                     config=config,
+                    bundle_cache_root=bundle_cache_root,
+                )
+                artifact.exported_list = _validate_artifact_outputs(
+                    extracted_save_path,
+                    extracted_outputs,
                 )
                 logger.debug(
                     "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
@@ -310,19 +434,29 @@ async def _extract_stage(
 
                 await _cleanup_artifact(artifact, remove_bundle=True)
                 await upload_queue.put(artifact)
+                handed_to_upload = True
+            except asyncio.CancelledError:
+                if not handed_to_upload:
+                    await _cleanup_artifact(
+                        artifact,
+                        remove_bundle=True,
+                        remove_extracted=True,
+                    )
+                raise
             except Exception:
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s",
                     pipeline_id,
                     name,
                     label,
                 )
+                upload_succeeded = True
                 async with failed_lock:
                     failed_tasks.append((artifact.url, artifact.bundle))
                 await _cleanup_artifact(
                     artifact,
                     remove_bundle=True,
-                    remove_extracted=True,
+                    remove_extracted=upload_succeeded,
                 )
         finally:
             extract_queue.task_done()
@@ -343,7 +477,7 @@ async def _upload_stage(
                 return
 
             artifact = item
-            label = artifact.bundle.get("bundleName", artifact.url)
+            label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
             logger.debug(
                 "PIPELINE | id=%s | worker=%s | stage=upload | action=start_item | item=%s",
                 pipeline_id,
@@ -351,6 +485,7 @@ async def _upload_stage(
                 label,
             )
 
+            upload_succeeded = False
             try:
                 if config.ASSET_REMOTE_STORAGE:
                     if artifact.extracted_save_path is None:
@@ -365,6 +500,7 @@ async def _upload_stage(
                                 storage["program"],
                                 storage["args"],
                                 max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
+                                config=config,
                             )
                 logger.debug(
                     "PIPELINE | id=%s | worker=%s | stage=upload | action=done_item | item=%s",
@@ -372,8 +508,12 @@ async def _upload_stage(
                     name,
                     label,
                 )
+                upload_succeeded = True
+            except asyncio.CancelledError:
+                await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
+                raise
             except Exception:
-                logger.exception(
+                logger.error(
                     "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
                     pipeline_id,
                     name,
@@ -432,7 +572,7 @@ async def run_pipeline(
         upload_queue_size,
     )
 
-    async with aiohttp.ClientSession(timeout=get_request_timeout(config)) as session:
+    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
         download_tasks = [
             asyncio.create_task(
                 _download_stage(
@@ -479,21 +619,33 @@ async def run_pipeline(
             for worker_id in range(upload_concurrency)
         ]
 
-        await download_queue.join()
-        logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
-        await _put_sentinels(extract_queue, extract_concurrency)
-        await extract_queue.join()
-        logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
-        await _put_sentinels(upload_queue, upload_concurrency)
-        await upload_queue.join()
-        logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
+        all_tasks = download_tasks + extract_tasks + upload_tasks
+        worker_monitor = asyncio.create_task(_monitor_worker_failures(all_tasks))
+        try:
+            await _await_with_worker_monitor(download_queue.join(), worker_monitor)
+            logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
+            await _await_with_worker_monitor(
+                _put_sentinels(extract_queue, extract_concurrency),
+                worker_monitor,
+            )
+            await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
+            logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
+            await _await_with_worker_monitor(
+                _put_sentinels(upload_queue, upload_concurrency),
+                worker_monitor,
+            )
+            await _await_with_worker_monitor(upload_queue.join(), worker_monitor)
+            logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
 
-        await asyncio.gather(
-            *download_tasks,
-            *extract_tasks,
-            *upload_tasks,
-            return_exceptions=False,
-        )
+            await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=False)
+        except BaseException:
+            for task in all_tasks:
+                task.cancel()
+            worker_monitor.cancel()
+            await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=True)
+            await _cleanup_queued_artifacts(extract_queue)
+            await _cleanup_queued_artifacts(upload_queue)
+            raise
 
     succeeded = total_items - len(failed_tasks)
     logger.info(
@@ -526,5 +678,6 @@ async def worker(
     if failed_tasks:
         _, bundle = dl_info
         raise RuntimeError(
-            f"{name} failed processing {bundle.get('bundleName', dl_info[0])}"
+            f"{sanitize_log_label(name)} failed processing "
+            f"{sanitize_log_label(bundle.get('bundleName', dl_info[0]))}"
         )
