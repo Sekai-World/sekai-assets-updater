@@ -562,6 +562,7 @@ def test_lock_contention_is_real_across_processes(tmp_path: Path) -> None:
             [sys.executable, "-c", script, str(lock_path)],
             capture_output=True,
             text=True,
+            cwd=Path(__file__).resolve().parents[1],
         )
         assert result.returncode != 0
         assert "already held" in result.stderr

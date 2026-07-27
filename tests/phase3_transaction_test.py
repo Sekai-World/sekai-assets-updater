@@ -113,7 +113,7 @@ def test_download_plan_retains_fetched_assetver_even_when_cache_differs_or_match
 
 def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     events: list[str] = []
     original_create = main.create_journal
     original_replay = main.replay_journal
@@ -155,7 +155,7 @@ def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatc
 
 def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -195,7 +195,7 @@ def test_pipeline_exception_or_cancellation_preserves_complete_queue(
     )
     queue = [["url", {"bundleName": "current", "hash": "new"}]]
     state.atomic_write_json(paths.queue, queue, state.validate_pending_queue)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
 
     async def fake_fetch(*_args, **_kwargs):
         return _fetch_result()
@@ -218,7 +218,7 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -250,7 +250,7 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -282,7 +282,7 @@ def test_metadata_only_rejects_observed_path_aliasing_normal_target(
     config = _config(tmp_path)
     config.DL_LIST_CACHE_PATH = AnyioPath(tmp_path / "metadata.observed.json")
     config.ASSET_BUNDLE_INFO_CACHE_PATH = AnyioPath(tmp_path / "metadata.json")
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
 
     async def fake_fetch(*_args, **_kwargs):
         return _fetch_result()
@@ -292,7 +292,7 @@ def test_metadata_only_rejects_observed_path_aliasing_normal_target(
         asyncio.run(main.main(update_asset_bundle_info_only=True))
 
 
-def test_lock_contention_blocks_second_main_run(tmp_path: Path) -> None:
+def test_lock_contention_blocks_second_main_run(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
@@ -301,7 +301,7 @@ def test_lock_contention_blocks_second_main_run(tmp_path: Path) -> None:
     )
     holder = state.StateLock(paths.lock).acquire()
     try:
-        main.config = config
+        monkeypatch.setattr(main, "config", config)
         with pytest.raises(state.StateLockError, match="already held"):
             asyncio.run(main.main(force_full_download=True))
     finally:

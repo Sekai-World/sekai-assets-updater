@@ -110,6 +110,8 @@ This roadmap records the remediation work identified by the July 2026 project re
 
 **Priority:** P1
 
+**Status:** Complete (2026-07-24)
+
 ### Risks addressed
 
 - Empty, truncated, or malformed HTTP 200 responses are accepted as successful downloads.
@@ -134,6 +136,8 @@ This roadmap records the remediation work identified by the July 2026 project re
 
 **Priority:** P1
 
+**Status:** Complete (2026-07-26)
+
 ### Work
 
 - Introduce a log-sanitization helper and redact `Cookie`, `Authorization`, API keys, and signed URL parameters before logging requests or failures.
@@ -154,6 +158,8 @@ This roadmap records the remediation work identified by the July 2026 project re
 
 **Priority:** P2
 
+**Status:** Complete (2026-07-25)
+
 ### Work
 
 - Correct priority-list ordering so matching patterns run before unmatched bundles.
@@ -172,6 +178,8 @@ This roadmap records the remediation work identified by the July 2026 project re
 ## Phase 7: Pipeline Integration and Regression Coverage
 
 **Priority:** P2
+
+**Status:** Complete (2026-07-27)
 
 ### Work
 

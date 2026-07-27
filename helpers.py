@@ -669,7 +669,9 @@ async def get_download_list(
 
             # Generate the download list from changed bundles
             app_version: str = (
-                config.APP_VERSION_OVERRIDE or game_version_json.get("appVersion") or ""
+                getattr(config, "APP_VERSION_OVERRIDE", None)
+                or game_version_json.get("appVersion")
+                or ""
             )
             assert app_version, "App version must be set in game version json or config"
             download_list = [

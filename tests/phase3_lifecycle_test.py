@@ -91,7 +91,7 @@ def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     fetch_result = SimpleNamespace(
         headers={},
         cookie=None,
@@ -124,7 +124,7 @@ def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue
 
 def test_success_clears_queue_only_after_pipeline_success(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     seen_queue_exists: list[bool] = []
 
     async def fake_fetch(*_args, **_kwargs):
@@ -189,7 +189,7 @@ def test_malformed_queue_without_journal_fails_closed_and_preserves_bytes(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    main.config = config
+    monkeypatch.setattr(main, "config", config)
     paths = _paths(tmp_path)
     paths.queue.write_bytes(b"malformed pending queue")
     before = paths.queue.read_bytes()

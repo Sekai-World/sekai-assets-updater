@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -47,6 +47,13 @@ def test_resolve_secure_path_rejects_existing_symlink_escape(tmp_path: Path) -> 
 
     with pytest.raises(security.SecurityError):
         security.resolve_secure_path(tmp_path, "link/secret.txt")
+
+
+def test_resolve_secure_path_checks_intermediate_repeated_component(tmp_path: Path) -> None:
+    (tmp_path / "a").write_bytes(b"not a directory")
+
+    with pytest.raises(NotADirectoryError):
+        security.resolve_secure_path(tmp_path, "a/b/a")
 
 
 def test_resolve_secure_path_rejects_symlinked_root_parent(tmp_path: Path) -> None:
@@ -134,15 +141,24 @@ def test_save_image_formats_uses_closed_race_safe_tempfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     save_path = tmp_path / "texture.asset"
-    created_descriptors: list[int] = []
     original_mkstemp = bundle.tempfile.mkstemp
+    closed_descriptors: list[int] = []
 
     def record_mkstemp(*args, **kwargs):
         descriptor, temporary_name = original_mkstemp(*args, **kwargs)
-        created_descriptors.append(descriptor)
         return descriptor, temporary_name
 
+    original_fdopen = bundle.os.fdopen
+
+    @contextmanager
+    def record_fdopen(*args, **kwargs):
+        descriptor = args[0]
+        with original_fdopen(*args, **kwargs) as temporary_file:
+            yield temporary_file
+        closed_descriptors.append(descriptor)
+
     monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(bundle.os, "fdopen", record_fdopen)
     monkeypatch.setattr(
         bundle.tempfile,
         "mktemp",
@@ -153,8 +169,6 @@ def test_save_image_formats_uses_closed_race_safe_tempfile(
         saved_paths = bundle._save_image_formats(image, save_path, ("PNG",))
 
     assert saved_paths == [tmp_path / "texture.PNG"]
-    for descriptor in created_descriptors:
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
+    assert len(closed_descriptors) == 1
     assert saved_paths[0].read_bytes()
     assert list(tmp_path.glob(".texture.PNG.*.tmp")) == []

@@ -96,7 +96,8 @@ def resolve_secure_path(root: PathLike, relative_path: PathLike) -> Path:
 
     relative_text = _validate_relative_path(relative_path, label="relative_path")
     candidate = root_path
-    for component in relative_text.split("/"):
+    components = relative_text.split("/")
+    for index, component in enumerate(components):
         candidate /= component
         try:
             mode = os.lstat(candidate).st_mode
@@ -104,7 +105,7 @@ def resolve_secure_path(root: PathLike, relative_path: PathLike) -> Path:
             continue
         if stat.S_ISLNK(mode):
             raise SecurityError(f"symlink traversal is not allowed: {candidate}")
-        if candidate != root_path and component != relative_text.split("/")[-1]:
+        if index < len(components) - 1:
             if not stat.S_ISDIR(mode):
                 raise NotADirectoryError(f"path component is not a directory: {candidate}")
 

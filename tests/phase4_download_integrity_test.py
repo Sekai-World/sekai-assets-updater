@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import struct
 from pathlib import Path
 from types import SimpleNamespace
@@ -575,7 +574,7 @@ def test_download_uses_async_open_file_for_temp_write(
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
     created_descriptors: list[int] = []
     original_mkstemp = bundle.tempfile.mkstemp
-    open_file_calls: list[object] = []
+    opened_files: list[object] = []
     original_open_file = bundle.open_file
 
     def record_mkstemp(*args, **kwargs):
@@ -584,8 +583,9 @@ def test_download_uses_async_open_file_for_temp_write(
         return descriptor, temporary_name
 
     async def record_open_file(file, *args, **kwargs):
-        open_file_calls.append(file)
-        return await original_open_file(file, *args, **kwargs)
+        opened_file = await original_open_file(file, *args, **kwargs)
+        opened_files.append(opened_file)
+        return opened_file
 
     monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
     monkeypatch.setattr(bundle, "open_file", record_open_file)
@@ -607,9 +607,7 @@ def test_download_uses_async_open_file_for_temp_write(
     )
 
     assert target.read_bytes() == data
-    assert open_file_calls
-    assert open_file_calls[0] in created_descriptors
-    for descriptor in created_descriptors:
-        with pytest.raises(OSError):
-            os.fstat(descriptor)
+    assert opened_files
+    assert len(opened_files) == len(created_descriptors)
+    assert all(file.wrapped.closed for file in opened_files)
     assert not list(tmp_path.glob(".bundle.*.tmp"))
