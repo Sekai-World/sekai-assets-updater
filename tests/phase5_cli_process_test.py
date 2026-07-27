@@ -328,6 +328,7 @@ def test_upload_timeout_cleans_up_process_and_redacts_remote_query(
     assert process.kill_called is (not terminate_exits)
     assert process.returncode is not None
     records = "\n".join(record.getMessage() for record in caplog.records)
+    assert "remote:bucket?Signature=%3Credacted%3E" in records
     assert "remote-secret" not in records
     assert "secret-arg" not in records
 
