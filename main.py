@@ -155,7 +155,7 @@ async def _write_metadata_only_cache(
         {
             "version": asset_bundle_info.get("version", ""),
             "os": asset_bundle_info.get("os", ""),
-            "bundles": current_bundles,
+            "bundles": asset_bundle_info.get("bundles", {}),
         },
     )
     await _write_json_cache(cfg.GAME_VERSION_JSON_CACHE_PATH, game_version_json)
@@ -197,6 +197,7 @@ async def _build_new_download_list(
         force_full_download=force_full_download,
         automatic_prefixes=automatic_prefixes,
         bundle_cache_path_resolver=lambda bundle: get_bundle_cache_path(cfg, bundle),
+        asset_bundle_info_for_cache=asset_bundle_info,
     )
     new_download_list = filter_download_items_for_mode(new_download_list, mode)
     logger.debug("New download candidates: %d item(s)", len(new_download_list))
@@ -209,10 +210,13 @@ async def _load_pending_download_lists(
     force_full_download: bool,
 ) -> Tuple[List[DownloadItem], List[DownloadItem]]:
     """Load cached pending items and the subset belonging to the current mode."""
-    if force_full_download or not await cfg.DL_LIST_CACHE_PATH.exists():
+    if not await cfg.DL_LIST_CACHE_PATH.exists():
         return [], []
 
     cached_pending_list = await _read_json_cache(cfg.DL_LIST_CACHE_PATH)
+    if force_full_download:
+        return cached_pending_list, []
+
     pending_list = filter_download_items_for_mode(cached_pending_list, mode)
     logger.info(
         "RUN | action=load_pending | count=%d | path=%s",

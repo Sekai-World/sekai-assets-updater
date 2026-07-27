@@ -294,7 +294,7 @@ def _fill_motion_tracks(
                 stream_count + curve_idx,
                 time,
                 dense_clip.m_SampleArray,
-                curve_idx,
+                frame_idx * dense_clip.m_CurveCount + curve_idx,
             )
 
     constant_clip = animation_clip.m_MuscleClip.m_Clip.data.m_ConstantClip

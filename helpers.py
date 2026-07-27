@@ -320,6 +320,7 @@ async def get_download_list(
     force_full_download: bool = False,
     automatic_prefixes: tuple[str, ...] = (),
     bundle_cache_path_resolver=None,
+    asset_bundle_info_for_cache: Dict | None = None,
 ) -> List[Tuple[str, Dict]]:
     """Generate the download list for the asset bundles.
 
@@ -476,11 +477,17 @@ async def get_download_list(
         )
 
     # Cache the asset bundle info
+    metadata_source = (
+        asset_bundle_info
+        if asset_bundle_info_for_cache is None
+        else asset_bundle_info_for_cache
+    )
+    metadata_bundles = metadata_source.get("bundles", {})
     async with await open_file(config.ASSET_BUNDLE_INFO_CACHE_PATH, "wb") as f:
         await f.write(json.dumps({
             "version": asset_bundle_info.get("version", ""),
             "os": asset_bundle_info.get("os", ""),
-            "bundles": current_bundles
+            "bundles": metadata_bundles,
         }, option=json.OPT_INDENT_2))
 
     # Cache the game version json
