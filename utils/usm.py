@@ -45,9 +45,7 @@ def extract_usm(
             usm_path = os.fspath(usm)
 
         os.makedirs(target_dir, exist_ok=True)
-        return list(
-            cridecoder.extract_usm(usm_path, target_dir, key, export_audio)
-        )
+        return list(cridecoder.extract_usm(usm_path, target_dir, key, export_audio))
     finally:
         if tmp_path is not None:
             try:
