@@ -105,9 +105,8 @@ def resolve_secure_path(root: PathLike, relative_path: PathLike) -> Path:
             continue
         if stat.S_ISLNK(mode):
             raise SecurityError(f"symlink traversal is not allowed: {candidate}")
-        if index < len(components) - 1:
-            if not stat.S_ISDIR(mode):
-                raise NotADirectoryError(f"path component is not a directory: {candidate}")
+        if index < len(components) - 1 and not stat.S_ISDIR(mode):
+            raise NotADirectoryError(f"path component is not a directory: {candidate}")
 
     return candidate
 
