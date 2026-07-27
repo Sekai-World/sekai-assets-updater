@@ -331,7 +331,12 @@ async def _terminate_process(process) -> None:
 
 
 async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
-    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
+    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly.
+
+    Cancellation is remembered while the child is being reaped and reported to
+    the caller only after cleanup has completed.  This keeps cancellation from
+    being swallowed without allowing it to interrupt the termination sequence.
+    """
     task = getattr(process, "_helpers_terminate_task", None)
     if task is None:
         task = asyncio.create_task(_terminate_process(process))
@@ -343,25 +348,24 @@ async def _ensure_process_terminated(process) -> tuple[BaseException | None, boo
         try:
             await asyncio.shield(task)
             break
-        except asyncio.CancelledError as exc:
+        except asyncio.CancelledError:
             # Keep waiting on the same shielded task. Never start a second
             # termination sequence while the first one is still in progress.
             cancellation_seen = True
             if task.done():
                 break
-        except BaseException as exc:
+        except Exception as exc:
             cleanup_error = exc
             break
 
     if task.done():
-        try:
-            task.result()
-        except asyncio.CancelledError as exc:
-            if not cancellation_seen:
-                cleanup_error = exc
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
+        if task.cancelled():
+            cancellation_seen = True
+        elif cleanup_error is None:
+            # ``Task.exception`` returns the original exception object without
+            # catching it, so its traceback and cancellation state are not
+            # replaced by this cleanup bookkeeping.
+            cleanup_error = task.exception()
 
     if cancellation_seen:
         if cleanup_error is not None:
