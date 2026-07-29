@@ -11,7 +11,7 @@
 .bar-count-text {
     font-size: 12px;
     font-weight: 900;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #ffffff;
     text-anchor: start;
 }
@@ -34,7 +34,7 @@
 .event-text {
     font-size: 12px;
     font-weight: 900;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #fee300;
     text-anchor: start;
 }
@@ -46,7 +46,7 @@
 
 .speed-text {
     font-size: 12px;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #ff33ff;
     text-anchor: end;
 }
@@ -86,7 +86,7 @@
 
 .tick-text {
     font-size: 12px;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #e2e2e2;
     text-anchor: end;
 }

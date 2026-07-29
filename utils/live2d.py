@@ -331,7 +331,7 @@ def _append_curve_segment(
     if (
         index + 1 < len(track_curves)
         and abs(curve["time"] - pre_curve["time"] - 0.01) < 0.0001
-        and track_curves[index + 1]["value"] == curve["value"]
+        and abs(track_curves[index + 1]["value"] - curve["value"]) < 0.0001
     ):
         next_curve = track_curves[index + 1]
         segments.extend([3, format_float(next_curve["time"]), format_float(next_curve["value"])])
