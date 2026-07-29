@@ -280,9 +280,7 @@ async def _download_stage(
 
                 bundle_cache_root = get_bundle_cache_root(config, bundle)
                 if isinstance(bundle_cache_root, Path):
-                    bundle_cache_root = Path(
-                        prepare_secure_directory(bundle_cache_root).as_posix()
-                    )
+                    bundle_cache_root = Path(prepare_secure_directory(bundle_cache_root).as_posix())
                     bundle_save_path = Path(
                         resolve_secure_path(
                             bundle_cache_root,

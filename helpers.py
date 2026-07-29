@@ -774,7 +774,9 @@ async def get_download_list(
             priority_list=priority_list,
         )
 
-    metadata_source = asset_bundle_info if asset_bundle_info_for_cache is None else asset_bundle_info_for_cache
+    metadata_source = (
+        asset_bundle_info if asset_bundle_info_for_cache is None else asset_bundle_info_for_cache
+    )
     normalized_metadata = {
         "version": metadata_source.get("version", ""),
         "os": metadata_source.get("os", ""),
@@ -795,9 +797,8 @@ def select_bundles_for_download(
     for key, value in bundles.items():
         bundle_name = value.get("bundleName") or ""
         user_selected = (
-            (not include_list or any(re.match(pattern, bundle_name) for pattern in include_list))
-            and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
-        )
+            not include_list or any(re.match(pattern, bundle_name) for pattern in include_list)
+        ) and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
         automatic_selected = bundle_name.startswith(automatic_prefixes)
         if (user_selected or automatic_selected) and bundle_name not in selected_names:
             selected[key] = value
@@ -864,7 +865,9 @@ def filter_bundles_for_mode(bundles: Dict[str, Dict], mode: str = "assets") -> D
     )
 
 
-def filter_download_items_for_mode(items: List[Tuple[str, Dict]], mode: str) -> List[Tuple[str, Dict]]:
+def filter_download_items_for_mode(
+    items: List[Tuple[str, Dict]], mode: str
+) -> List[Tuple[str, Dict]]:
     prefixes = get_mode_bundle_prefixes(mode)
     return (
         items
@@ -1112,7 +1115,5 @@ async def upload_directory(
     except (asyncio.CancelledError, asyncio.TimeoutError):
         raise
     if process.returncode != 0:
-        raise RuntimeError(
-            f"Failed to upload directory {source_path} to {safe_remote_path}"
-        )
+        raise RuntimeError(f"Failed to upload directory {source_path} to {safe_remote_path}")
     logger.info("Successfully uploaded directory %s to %s", source_path, safe_remote_path)

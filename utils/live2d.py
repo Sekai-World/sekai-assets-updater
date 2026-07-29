@@ -38,7 +38,6 @@ def format_float(num):
 
 
 class StreamedCurveKey(object):
-
     def __init__(self, bs):
         super().__init__()
 
@@ -130,21 +129,30 @@ def _read_streamed_frames(bs: BinaryStream, payload_len: int) -> List:
     return frames
 
 
+def _apply_frame_in_slopes(frame, previous_curve_by_index) -> None:
+    for curve_key in frame["keyList"]:
+        previous_curve = previous_curve_by_index.get(curve_key.index)
+        if previous_curve:
+            previous_time, previous_curve_key = previous_curve
+            curve_key.inSlope = previous_curve_key.calc_next_in_slope(
+                frame["time"] - previous_time,
+                curve_key,
+            )
+
+
+def _remember_frame_curves(frame, previous_curve_by_index) -> None:
+    for curve_key in frame["keyList"]:
+        previous_curve_by_index[curve_key.index] = (frame["time"], curve_key)
+
+
 def _apply_streamed_in_slopes(frames: List) -> None:
     previous_curve_by_index = {}
+    last_frame_index = len(frames) - 1
     for k, frame in enumerate(frames):
-        if k >= 2 and k != len(frames) - 1:
-            for curve_key in frame["keyList"]:
-                previous_curve = previous_curve_by_index.get(curve_key.index)
-                if previous_curve:
-                    previous_time, previous_curve_key = previous_curve
-                    curve_key.inSlope = previous_curve_key.calc_next_in_slope(
-                        frame["time"] - previous_time,
-                        curve_key,
-                    )
+        if k >= 2 and k != last_frame_index:
+            _apply_frame_in_slopes(frame, previous_curve_by_index)
         if k > 0:
-            for curve_key in frame["keyList"]:
-                previous_curve_by_index[curve_key.index] = (frame["time"], curve_key)
+            _remember_frame_curves(frame, previous_curve_by_index)
 
 
 def process_streamed_clip(streamed_clip: List[int]) -> List:
@@ -165,9 +173,7 @@ def read_streamed_data(
     try:
         target, bone_name = binding_info_lookup[idx]
     except IndexError as exc:
-        raise RuntimeError(
-            f"Failed to find binding constant for {idx}"
-        ) from exc
+        raise RuntimeError(f"Failed to find binding constant for {idx}") from exc
     if bone_name:
         track = track_by_name.get(bone_name)
         if not track:
@@ -211,9 +217,7 @@ def read_curve_data(
     try:
         target, bone_name = binding_info_lookup[idx]
     except IndexError as exc:
-        raise RuntimeError(
-            f"Failed to find binding constant for {idx}"
-        ) from exc
+        raise RuntimeError(f"Failed to find binding constant for {idx}") from exc
     if bone_name:
         track = track_by_name.get(bone_name)
         if not track:
@@ -330,9 +334,7 @@ def _append_curve_segment(
         and track_curves[index + 1]["value"] == curve["value"]
     ):
         next_curve = track_curves[index + 1]
-        segments.extend(
-            [3, format_float(next_curve["time"]), format_float(next_curve["value"])]
-        )
+        segments.extend([3, format_float(next_curve["time"]), format_float(next_curve["value"])])
         return 1, 1
 
     if curve["inSlope"] == float("inf"):
@@ -373,11 +375,13 @@ def _build_motion3_curves(motion: Dict) -> Tuple[List, int, int]:
             )
             total_point_count += point_delta
             total_segment_count += segment_delta
-        curves.append({
-            "Target": track["Target"],
-            "Id": track["Name"],
-            "Segments": segments,
-        })
+        curves.append(
+            {
+                "Target": track["Target"],
+                "Id": track["Name"],
+                "Segments": segments,
+            }
+        )
     return curves, total_segment_count, total_point_count
 
 
@@ -385,10 +389,12 @@ def _build_motion3_user_data(motion: Dict) -> Tuple[List, int]:
     user_data = []
     total_user_data_size = sum(len(ev["value"]) for ev in motion["Events"])
     for ev in motion["Events"]:
-        user_data.append({
-            "Time": format_float(ev["time"]),
-            "Value": ev["value"],
-        })
+        user_data.append(
+            {
+                "Time": format_float(ev["time"]),
+                "Value": ev["value"],
+            }
+        )
     return user_data, total_user_data_size
 
 
@@ -429,12 +435,8 @@ def restore_unity_object_to_motion3(unity_object) -> Tuple | None:
         "TrackList": [],
         "Events": [],
     }
-    assert (
-        name == animation_clip.m_Name
-    ), f"Name mismatch {name} != {animation_clip.m_Name}"
-    logger.debug(
-        "Restoring %s with sample rate %s and duration %s", name, sample_rate, duration
-    )
+    assert name == animation_clip.m_Name, f"Name mismatch {name} != {animation_clip.m_Name}"
+    logger.debug("Restoring %s with sample rate %s and duration %s", name, sample_rate, duration)
     _fill_motion_tracks(motion, animation_clip, unity_object.ClipAssetName)
     return name, _build_restored_motion3(motion, duration, sample_rate)
 
@@ -530,9 +532,11 @@ def _build_motion_save_dir(
     buildmotiondata_path: str,
     local_live2d_motion_extracted_dir: StdPath,
 ) -> StdPath:
-    reldir = PurePosixPath(buildmotiondata_path).relative_to(
-        PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix())
-    ).parent
+    reldir = (
+        PurePosixPath(buildmotiondata_path)
+        .relative_to(PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix()))
+        .parent
+    )
     rel_parts = reldir.parts[1:]
     if rel_parts[:2] == ("live2d", "motion"):
         rel_parts = rel_parts[2:]
@@ -544,8 +548,7 @@ def _find_buildmotiondata(container_items):
         (
             (asset_path, obj.read())
             for asset_path, obj in container_items
-            if obj.type.name == "MonoBehaviour"
-            and "buildmotiondata" in asset_path.lower()
+            if obj.type.name == "MonoBehaviour" and "buildmotiondata" in asset_path.lower()
         ),
         (None, None),
     )

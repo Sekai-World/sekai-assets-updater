@@ -1617,7 +1617,11 @@ def _extract_bundle_files_sync(
                     atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
 
-                    if live2d_bundle and isinstance(tree, dict) and tree.get("AdditionalMotionData"):
+                    if (
+                        live2d_bundle
+                        and isinstance(tree, dict)
+                        and tree.get("AdditionalMotionData")
+                    ):
                         additional_motion_jobs.append((unityfs_obj.read(), save_dir))
 
                     if "acbFiles" in tree:
@@ -2174,6 +2178,77 @@ async def download_deobfuscate_bundle(
         await asyncio.sleep(delay)
 
 
+async def _append_audio_outputs(
+    exported_files: List[Path],
+    audio_jobs: list[tuple[str, list[str]]],
+    extracted_save_path: Path,
+    config,
+) -> None:
+    audio_file_semaphore = _get_shared_audio_file_semaphore(config)
+    extracted_root = StdPath(extracted_save_path.as_posix())
+    for save_dir_path, extracted_audio_files in audio_jobs:
+        save_dir = Path(save_dir_path)
+        audio_tasks = [
+            asyncio.create_task(
+                _process_extracted_audio_file(
+                    extracted_audio_file,
+                    save_dir,
+                    config,
+                    audio_file_semaphore,
+                )
+            )
+            for extracted_audio_file in extracted_audio_files
+        ]
+        audio_results = await asyncio.gather(*audio_tasks)
+        for audio_files in audio_results:
+            for audio_file in audio_files:
+                exported_files.append(
+                    Path(
+                        validate_contained_file(
+                            extracted_root,
+                            StdPath(audio_file.as_posix()).relative_to(extracted_root).as_posix(),
+                        ).as_posix()
+                    )
+                )
+
+
+async def _append_video_outputs(
+    exported_files: List[Path],
+    video_jobs: list[str],
+    extracted_save_path: Path,
+    config,
+) -> None:
+    extracted_root = StdPath(extracted_save_path.as_posix())
+    for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
+        for video_file in video_files:
+            exported_files.append(
+                Path(
+                    validate_contained_file(
+                        extracted_root,
+                        StdPath(video_file.as_posix()).relative_to(extracted_root).as_posix(),
+                    ).as_posix()
+                )
+            )
+        for discarded_file in discarded_files:
+            _discard_exported_file(exported_files, discarded_file)
+
+
+async def _cleanup_extracted_files(
+    exported_files: List[Path],
+    extracted_save_path: Path,
+) -> None:
+    extracted_root = StdPath(extracted_save_path.as_posix())
+    for file in exported_files[:]:
+        validate_contained_file(
+            extracted_root,
+            StdPath(file.as_posix()).relative_to(extracted_root).as_posix(),
+        )
+        if file.suffix in [".bytes", ".acb", ".usm"]:
+            await file.unlink()
+            logger.debug("Removed %s in cleanup stage", file)
+            exported_files.remove(file)
+
+
 async def extract_asset_bundle(
     bundle_save_path: Path,
     bundle: Dict[str, str],
@@ -2203,59 +2278,8 @@ async def extract_asset_bundle(
 
     exported_files: List[Path] = [Path(path) for path in exported_paths]
 
-    audio_file_semaphore = _get_shared_audio_file_semaphore(config)
-    for save_dir_path, extracted_audio_files in audio_jobs:
-        save_dir = Path(save_dir_path)
-        audio_tasks = [
-            asyncio.create_task(
-                _process_extracted_audio_file(
-                    extracted_audio_file,
-                    save_dir,
-                    config,
-                    audio_file_semaphore,
-                )
-            )
-            for extracted_audio_file in extracted_audio_files
-        ]
-        audio_results = await asyncio.gather(*audio_tasks)
-        for audio_files in audio_results:
-            for audio_file in audio_files:
-                exported_files.append(
-                    Path(
-                        validate_contained_file(
-                            StdPath(extracted_save_path.as_posix()),
-                            StdPath(audio_file.as_posix())
-                            .relative_to(StdPath(extracted_save_path.as_posix()))
-                            .as_posix(),
-                        ).as_posix()
-                    )
-                )
-
-    for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
-        for video_file in video_files:
-            exported_files.append(
-                Path(
-                    validate_contained_file(
-                        StdPath(extracted_save_path.as_posix()),
-                        StdPath(video_file.as_posix())
-                        .relative_to(StdPath(extracted_save_path.as_posix()))
-                        .as_posix(),
-                    ).as_posix()
-                )
-            )
-        for discarded_file in discarded_files:
-            _discard_exported_file(exported_files, discarded_file)
-
-    for file in exported_files[:]:
-        validate_contained_file(
-            StdPath(extracted_save_path.as_posix()),
-            StdPath(file.as_posix())
-            .relative_to(StdPath(extracted_save_path.as_posix()))
-            .as_posix(),
-        )
-        if file.suffix in [".bytes", ".acb", ".usm"]:
-            await file.unlink()
-            logger.debug("Removed %s in cleanup stage", file)
-            exported_files.remove(file)
+    await _append_audio_outputs(exported_files, audio_jobs, extracted_save_path, config)
+    await _append_video_outputs(exported_files, video_jobs, extracted_save_path, config)
+    await _cleanup_extracted_files(exported_files, extracted_save_path)
 
     return exported_files

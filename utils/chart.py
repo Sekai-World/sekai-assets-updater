@@ -12,8 +12,8 @@ import aiohttp
 from anyio import open_file
 
 logger = logging.getLogger("charts")
-DEFAULT_STYLE_SHEET = Path(__file__).with_name("pjsekai_scores_default.css").read_text(
-    encoding="utf-8"
+DEFAULT_STYLE_SHEET = (
+    Path(__file__).with_name("pjsekai_scores_default.css").read_text(encoding="utf-8")
 )
 _scores = None
 
@@ -65,9 +65,7 @@ async def _prepare_jacket(jacket: str) -> tuple[str, tempfile.TemporaryDirectory
     return target_path.as_uri(), tmpdir
 
 
-async def render_chart(
-    score_path: str, chart_path: str, music: dict, jacket: str
-):
+async def render_chart(score_path: str, chart_path: str, music: dict, jacket: str):
     scores = _load_scores_module()
     score = await asyncio.to_thread(scores.Score.open_sus, score_path)
     jacket_uri, jacket_tmpdir = await _prepare_jacket(jacket)

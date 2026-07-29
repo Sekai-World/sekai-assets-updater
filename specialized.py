@@ -55,16 +55,18 @@ def get_required_bundle_prefixes(mode: str, config) -> tuple[str, ...]:
 
 def needs_shared_workspace(mode: str, config) -> bool:
     """Whether specialized processing needs a run-scoped extracted workspace."""
-    return bool(get_enabled_specialized_modes(mode, config)) and getattr(
-        config, "ASSET_LOCAL_EXTRACTED_DIR", None
-    ) is None
+    return (
+        bool(get_enabled_specialized_modes(mode, config))
+        and getattr(config, "ASSET_LOCAL_EXTRACTED_DIR", None) is None
+    )
 
 
 def needs_live2d_bundle_cache(mode: str, config) -> bool:
     """Whether Live2D needs a run-scoped bundle cache root."""
-    return "live2d" in get_enabled_specialized_modes(mode, config) and getattr(
-        config, "LIVE2D_BUNDLE_CACHE_DIR", None
-    ) is None
+    return (
+        "live2d" in get_enabled_specialized_modes(mode, config)
+        and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None
+    )
 
 
 def get_specialized_storage(config, mode: str) -> list[dict]:
@@ -136,9 +138,7 @@ async def _stop_chart_source_process(process) -> None:
     except ProcessLookupError:
         pass
     try:
-        await asyncio.wait_for(
-            process.wait(), timeout=CHART_SOURCE_TERMINATE_TIMEOUT
-        )
+        await asyncio.wait_for(process.wait(), timeout=CHART_SOURCE_TERMINATE_TIMEOUT)
     except (asyncio.TimeoutError, ProcessLookupError):
         try:
             process.kill()
@@ -179,9 +179,7 @@ async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> No
     errors = []
     for storage in get_normal_storage_candidates(config):
         try:
-            await _copy_chart_sources_from_one_storage(
-                storage, target_dir, config
-            )
+            await _copy_chart_sources_from_one_storage(storage, target_dir, config)
             if not has_local_chart_sources(extracted_dir):
                 raise RuntimeError("storage did not provide any chart .txt files")
             logger.info("Loaded chart sources from normal storage %s", storage["base"])
@@ -192,9 +190,7 @@ async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> No
     if errors:
         detail = "; ".join(errors)
         raise RuntimeError(f"Failed to load chart sources from normal storage: {detail}")
-    raise RuntimeError(
-        "No normal ASSET_REMOTE_STORAGE target is configured for chart sources"
-    )
+    raise RuntimeError("No normal ASSET_REMOTE_STORAGE target is configured for chart sources")
 
 
 def music_id_from_score_path(score_path: StdPath) -> int:
@@ -221,7 +217,9 @@ async def _render_charts(config, extracted_dir: StdPath) -> None:
             return
         music = music_by_id.get(music_id)
         if music is None:
-            logger.warning("Skipping chart %s: music id %s is not in musics.json", score_file, music_id)
+            logger.warning(
+                "Skipping chart %s: music id %s is not in musics.json", score_file, music_id
+            )
             return
         padded_id = str(music_id).zfill(3)
         chart_path = extracted_dir / "charts" / region / str(music_id) / f"{score_file.stem}.svg"
@@ -269,9 +267,7 @@ async def run_specialized_postprocess(
         configured_extracted_dir = (
             None if extracted_dir_is_temporary else config.ASSET_LOCAL_EXTRACTED_DIR
         )
-        temporary_source = needs_temporary_chart_source(
-            extracted_dir, configured_extracted_dir
-        )
+        temporary_source = needs_temporary_chart_source(extracted_dir, configured_extracted_dir)
         if temporary_source:
             with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
                 chart_source_dir = StdPath(temp_dir)
@@ -286,7 +282,9 @@ async def run_specialized_postprocess(
             if not has_local_chart_sources(extracted_dir):
                 await fetch_chart_sources_from_storage(config, extracted_dir)
             await _render_charts(config, extracted_dir)
-            await _upload_specialized_directory("charts", extracted_dir / "charts" / _region_name(config), config)
+            await _upload_specialized_directory(
+                "charts", extracted_dir / "charts" / _region_name(config), config
+            )
     else:
         raise ValueError(f"Unsupported specialized mode: {mode}")
 

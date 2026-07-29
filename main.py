@@ -57,18 +57,12 @@ DownloadItem = Tuple[str, Dict[str, Any]]
 config: Optional[ConfigLike] = None
 
 
-def _pending_items_outside_mode(
-    items: List[DownloadItem], mode: str
-) -> List[DownloadItem]:
+def _pending_items_outside_mode(items: List[DownloadItem], mode: str) -> List[DownloadItem]:
     """Keep pending entries for other bundle namespaces when rewriting the cache."""
     prefixes = get_mode_bundle_prefixes(mode)
     if not prefixes:
         return []
-    return [
-        item
-        for item in items
-        if not (item[1].get("bundleName") or "").startswith(prefixes)
-    ]
+    return [item for item in items if not (item[1].get("bundleName") or "").startswith(prefixes)]
 
 
 def require_config() -> ConfigLike:
@@ -113,9 +107,7 @@ def validate_config(cfg: ConfigLike) -> None:
     except (TypeError, ValueError):
         valid_timeout = False
     if not valid_timeout:
-        errors.append(
-            f"EXTERNAL_PROCESS_TIMEOUT must be a positive number (got {timeout!r})"
-        )
+        errors.append(f"EXTERNAL_PROCESS_TIMEOUT must be a positive number (got {timeout!r})")
 
     key = getattr(cfg, "AES_KEY", None)
     iv = getattr(cfg, "AES_IV", None)
@@ -137,9 +129,7 @@ def validate_config(cfg: ConfigLike) -> None:
     require_program("ffmpeg", "ffmpeg")
     backend = str(getattr(cfg, "HCA_DECODE_BACKEND", "auto")).strip().lower()
     if backend == "vgmstream":
-        require_program(
-            os.environ.get("VGMSTREAM_CLI", "vgmstream-cli"), "vgmstream-cli"
-        )
+        require_program(os.environ.get("VGMSTREAM_CLI", "vgmstream-cli"), "vgmstream-cli")
     if getattr(cfg, "ASSET_REMOTE_STORAGE", None):
         for index, storage in enumerate(cfg.ASSET_REMOTE_STORAGE):
             if storage.get("type") == "normal":
@@ -196,7 +186,9 @@ async def do_download(
     if failed_tasks:
         failed_path = paths.queue if paths is not None else config.DL_LIST_CACHE_PATH
         if paths is not None:
-            atomic_write_json(failed_path, [list(item) for item in failed_tasks], validate_pending_queue)
+            atomic_write_json(
+                failed_path, [list(item) for item in failed_tasks], validate_pending_queue
+            )
         else:
             async with await open_file(failed_path, "wb") as f:
                 await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
@@ -311,9 +303,7 @@ async def _build_new_download_list(
     # the mandatory mode scope is applied both before and after it so it cannot
     # be bypassed by a cached queue or a broad include expression.
     scoped_info = dict(asset_bundle_info)
-    scoped_info["bundles"] = filter_bundles_for_mode(
-        scoped_info.get("bundles", {}), mode
-    )
+    scoped_info["bundles"] = filter_bundles_for_mode(scoped_info.get("bundles", {}), mode)
     plan: DownloadPlan = await get_download_list(
         scoped_info,
         game_version_json,
@@ -343,9 +333,7 @@ async def _load_pending_download_lists(
         return [], []
 
     try:
-        cached_pending_list = cast(
-            List[DownloadItem], load_pending_queue(cfg.DL_LIST_CACHE_PATH)
-        )
+        cached_pending_list = cast(List[DownloadItem], load_pending_queue(cfg.DL_LIST_CACHE_PATH))
     except StateNotFoundError:
         return [], []
     if force_full_download:
@@ -367,8 +355,7 @@ def _merge_pending_and_new_download_lists(
     """Merge pending retries ahead of new candidates without duplicates."""
     if pending_list and new_download_list:
         current_by_name = {
-            bundle.get("bundleName"): (url, bundle)
-            for url, bundle in new_download_list
+            bundle.get("bundleName"): (url, bundle) for url, bundle in new_download_list
         }
         ordered_pending = [
             current_by_name.get(bundle.get("bundleName"), (url, bundle))
@@ -389,9 +376,7 @@ def _merge_pending_and_new_download_lists(
         )
         return download_list
     if pending_list:
-        logger.info(
-            "RUN | action=retry_pending_only | count=%d", len(pending_list)
-        )
+        logger.info("RUN | action=retry_pending_only | count=%d", len(pending_list))
         return pending_list
     return new_download_list
 
@@ -445,7 +430,11 @@ async def _cleanup_pending_cache_on_success(
         if paths is None:
             await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
         else:
-            atomic_write_json(paths.queue, [list(item) for item in pending_items_outside_mode], validate_pending_queue)
+            atomic_write_json(
+                paths.queue,
+                [list(item) for item in pending_items_outside_mode],
+                validate_pending_queue,
+            )
     else:
         if paths is None:
             await cfg.DL_LIST_CACHE_PATH.unlink()
@@ -472,7 +461,11 @@ async def _complete_with_empty_download_list(
         if paths is None:
             await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
         else:
-            atomic_write_json(paths.queue, [list(item) for item in pending_items_outside_mode], validate_pending_queue)
+            atomic_write_json(
+                paths.queue,
+                [list(item) for item in pending_items_outside_mode],
+                validate_pending_queue,
+            )
     elif paths is None:
         await cfg.DL_LIST_CACHE_PATH.unlink(missing_ok=True)
     else:
@@ -506,13 +499,9 @@ async def _complete_with_download_list(
         download_list, config=cfg, headers=headers, cookie=cookie, paths=paths
     )
     if not is_success:
-        await _restore_pending_cache_on_failure(
-            cfg, mode, pending_items_outside_mode, paths
-        )
+        await _restore_pending_cache_on_failure(cfg, mode, pending_items_outside_mode, paths)
     else:
-        await _run_enabled_specialized_postprocess(
-            mode, cfg, extracted_dir_is_temporary
-        )
+        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
         await _cleanup_pending_cache_on_success(
             cfg, download_list, pending_items_outside_mode, paths
         )
@@ -546,13 +535,13 @@ async def _run_full_download_pipeline(
         cfg, mode, force_full_download
     )
     pending_items_outside_mode = _pending_items_outside_mode(cached_pending_list, mode)
-    download_list = _merge_pending_and_new_download_lists(
-        pending_list, new_download_list
-    )
+    download_list = _merge_pending_and_new_download_lists(pending_list, new_download_list)
 
     if paths is not None and not paths.journal.exists():
         queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
-        create_journal(paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version)
+        create_journal(
+            paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version
+        )
         replay_journal(paths)
 
     if not download_list:
@@ -636,9 +625,7 @@ async def _run_main_locked(
     headers, cookie = await build_request_headers(cfg)
 
     if force_full_download:
-        logger.info(
-            "RUN | option=force_full_download | cache_metadata=false | cache_pending=false"
-        )
+        logger.info("RUN | option=force_full_download | cache_metadata=false | cache_pending=false")
 
     logger.info("RUN | step=1/4 | action=fetch_metadata")
     fetch_result = await fetch_asset_bundle_info(cfg, headers=headers, cookie=cookie)
@@ -672,7 +659,6 @@ async def _run_main_locked(
     )
 
 
-
 async def main(
     update_asset_bundle_info_only: bool = False,
     force_full_download: bool = False,
@@ -682,9 +668,7 @@ async def main(
     cfg = require_config()
     if not mode_uses_bundle_pipeline(mode):
         if update_asset_bundle_info_only:
-            logger.info(
-                "RUN | result=noop | reason=metadata_only_not_applicable_to_charts"
-            )
+            logger.info("RUN | result=noop | reason=metadata_only_not_applicable_to_charts")
             return
 
         needs_extracted_workspace = needs_shared_workspace(mode, cfg)
@@ -733,9 +717,7 @@ def cli():
     # Accept command line arguments
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="Start the asset updater with given config."
-    )
+    parser = argparse.ArgumentParser(description="Start the asset updater with given config.")
     parser.add_argument(
         "--mode",
         choices=("assets", "live2d", "charts"),
@@ -749,9 +731,7 @@ def cli():
         help="Path to the config python file.",
         required=True,
     )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Enable verbose logging."
-    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose logging.")
     parser.add_argument(
         "-q",
         "--quiet",
