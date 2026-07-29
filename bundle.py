@@ -1727,7 +1727,7 @@ def _extract_bundle_files_sync(
             )
             exported_files.append(motion_dir / "BuildMotionData.json")
             for name, motion in motions:
-                motion_path = motion_dir / f"{name}.motion3.json"
+                motion_path = _resolve_generated_child_path(motion_dir, name, ".motion3.json")
                 atomic_write_bytes(motion_path, json.dumps(motion, option=json.OPT_INDENT_2))
                 exported_files.append(motion_path)
 
@@ -2259,7 +2259,9 @@ async def extract_asset_bundle(
 ) -> List[Path]:
     """Extract the asset bundle to the specified directory."""
     live2d_bundle = is_live2d_bundle(bundle)
-    if live2d_bundle and bundle.get("bundleName", "").startswith("live2d/motion"):
+    if getattr(config, "UPDATER_MODE", "assets") == "live2d" and bundle.get(
+        "bundleName", ""
+    ).startswith("live2d/motion/"):
         return []
     loop = asyncio.get_running_loop()
     exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
