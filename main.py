@@ -449,8 +449,6 @@ async def _cleanup_pending_cache_on_success(
 async def _complete_with_empty_download_list(
     cfg: ConfigLike,
     mode: str,
-    headers: Dict[str, str],
-    cookie,
     pending_items_outside_mode: List[DownloadItem],
     extracted_dir_is_temporary: bool,
     start_time: float,
@@ -548,8 +546,6 @@ async def _run_full_download_pipeline(
         await _complete_with_empty_download_list(
             cfg,
             mode,
-            fetch_result.headers,
-            fetch_result.cookie,
             pending_items_outside_mode,
             extracted_dir_is_temporary,
             start_time,
@@ -578,8 +574,6 @@ async def _run_main(
 ):
     cfg = require_config()
     setattr(cfg, "UPDATER_MODE", mode)
-    start_time = time.monotonic()
-    automatic_prefixes = get_required_bundle_prefixes(mode, cfg)
 
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
     logger.info(

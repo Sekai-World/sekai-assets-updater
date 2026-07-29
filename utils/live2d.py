@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import struct
 from io import BytesIO
@@ -42,7 +43,7 @@ class StreamedCurveKey(object):
         super().__init__()
 
         self.index: int = bs.readUInt32()
-        self.coeff: List[float] = [bs.readFloat() for i in range(3)]
+        self.coeff: List[float] = [bs.readFloat() for _ in range(3)]
 
         self.outSlope: float = self.coeff[2]
         self.value: float = bs.readFloat()
@@ -124,7 +125,7 @@ def _read_streamed_frames(bs: BinaryStream, payload_len: int) -> List:
         num_keys = bs.readUInt32()
         key_list = [StreamedCurveKey(bs) for _ in range(num_keys)]
         assert len(key_list) == num_keys
-        if not time < 0:
+        if time >= 0:
             frames.append({"time": time, "keyList": key_list})
     return frames
 
@@ -193,7 +194,6 @@ def read_streamed_data(
             motion["TrackList"].append(track)
             track_by_name[bone_name] = track
         else:
-            # track["Target"] = target
             track["Curve"].append(
                 {
                     "time": time,
@@ -237,7 +237,6 @@ def read_curve_data(
             motion["TrackList"].append(track)
             track_by_name[bone_name] = track
         else:
-            # track["Target"] = target
             track["Curve"].append(
                 {
                     "time": time,
@@ -331,7 +330,7 @@ def _append_curve_segment(
     if (
         index + 1 < len(track_curves)
         and abs(curve["time"] - pre_curve["time"] - 0.01) < 0.0001
-        and abs(track_curves[index + 1]["value"] - curve["value"]) < 0.0001
+        and math.isclose(track_curves[index + 1]["value"], curve["value"], abs_tol=0.0001)
     ):
         next_curve = track_curves[index + 1]
         segments.extend([3, format_float(next_curve["time"]), format_float(next_curve["value"])])
@@ -341,7 +340,7 @@ def _append_curve_segment(
         segments.extend([2, format_float(curve["time"]), format_float(curve["value"])])
         return 1, 1
 
-    if pre_curve["outSlope"] == 0.0 and abs(curve["inSlope"]) < 0.0001:
+    if math.isclose(pre_curve["outSlope"], 0.0, abs_tol=0.0001) and abs(curve["inSlope"]) < 0.0001:
         segments.extend([0, format_float(curve["time"]), format_float(curve["value"])])
         return 1, 1
 
@@ -492,24 +491,37 @@ def extract_params_ids_from_moc3(moc3: bytes) -> Dict[str, str]:
 
 
 class Live2DBuildMotion:
-    ClipAssetName: str
-    Clip: UnityPy.classes.PPtr[UnityPy.classes.AnimationClip]
+    _json_aliases = {
+        "ClipAssetName": "clip_asset_name",
+        "Clip": "clip",
+    }
+
+    clip_asset_name: str
+    clip: UnityPy.classes.PPtr[UnityPy.classes.AnimationClip]
 
     def __init__(
         self,
         clip_asset_name: str,
         clip: UnityPy.classes.PPtr[UnityPy.classes.AnimationClip],
     ):
-        self.ClipAssetName = clip_asset_name
-        self.Clip = clip
+        self.clip_asset_name = clip_asset_name
+        self.clip = clip
+
+    def __getattr__(self, name: str):
+        try:
+            python_name = self._json_aliases[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+        return object.__getattribute__(self, python_name)
+
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            json_name: getattr(self, python_name)
+            for json_name, python_name in self._json_aliases.items()
+        }
 
     def __repr__(self) -> str:
-        return str(
-            {
-                "ClipAssetName": self.ClipAssetName,
-                "Clip": self.Clip,
-            }
-        )
+        return str(self.to_dict())
 
 
 def get_max_concurrent_motion_base_files(config=None) -> int:

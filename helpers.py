@@ -1110,10 +1110,7 @@ async def upload_directory(
     logger.debug("Uploading directory %s to %s", source_path, safe_remote_path)
 
     process = await asyncio.create_subprocess_exec(upload_program, *args)
-    try:
-        await _wait_for_process(process, _get_external_process_timeout(config))
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        raise
+    await _wait_for_process(process, _get_external_process_timeout(config))
     if process.returncode != 0:
         raise RuntimeError(f"Failed to upload directory {source_path} to {safe_remote_path}")
     logger.info("Successfully uploaded directory %s to %s", source_path, safe_remote_path)
