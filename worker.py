@@ -13,6 +13,7 @@ from bundle import (
     _resolve_expected_bundle_size,
     download_deobfuscate_bundle,
     extract_asset_bundle,
+    is_live2d_bundle,
 )
 from helpers import (
     build_cdn_headers,
@@ -43,6 +44,21 @@ class PipelineArtifact:
     tmp_extracted_save_dir: tempfile.TemporaryDirectory | None = None
     remove_bundle_after_extract: bool = False
     remove_extracted_after_upload: bool = False
+
+
+def get_bundle_cache_root(config, bundle: Dict[str, Any]):
+    """Select the cache root without allowing specialized roots to leak."""
+    if is_live2d_bundle(bundle):
+        return getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None)
+    return getattr(config, "ASSET_LOCAL_BUNDLE_CACHE_DIR", None)
+
+
+def get_bundle_cache_path(config, bundle: Dict[str, Any]):
+    root = get_bundle_cache_root(config, bundle)
+    bundle_name = bundle.get("bundleName") or ""
+    if root is None or not bundle_name:
+        return None
+    return root / bundle_name
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -262,10 +278,9 @@ async def _download_stage(
                         worker_cookie,
                     )
 
-                if isinstance(config.ASSET_LOCAL_BUNDLE_CACHE_DIR, Path):
-                    bundle_cache_root = Path(
-                        prepare_secure_directory(config.ASSET_LOCAL_BUNDLE_CACHE_DIR).as_posix()
-                    )
+                bundle_cache_root = get_bundle_cache_root(config, bundle)
+                if isinstance(bundle_cache_root, Path):
+                    bundle_cache_root = Path(prepare_secure_directory(bundle_cache_root).as_posix())
                     bundle_save_path = Path(
                         resolve_secure_path(
                             bundle_cache_root,
@@ -370,11 +385,7 @@ async def _extract_stage(
             handed_to_upload = False
             try:
                 bundle_cache_root = None
-                configured_bundle_cache_root = getattr(
-                    config,
-                    "ASSET_LOCAL_BUNDLE_CACHE_DIR",
-                    None,
-                )
+                configured_bundle_cache_root = get_bundle_cache_root(config, artifact.bundle)
                 if isinstance(configured_bundle_cache_root, Path):
                     bundle_cache_root = Path(
                         prepare_secure_directory(configured_bundle_cache_root).as_posix()

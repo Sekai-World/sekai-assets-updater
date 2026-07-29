@@ -3,6 +3,7 @@
 import atexit
 import asyncio
 from contextlib import ExitStack
+from functools import partial
 import logging
 import os
 import random
@@ -55,6 +56,11 @@ from security import (
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
 from utils.playable import extract_playable
+from utils.live2d import (
+    correct_param_ids,
+    extract_params_ids_from_moc3,
+    restore_unity_object_to_motion3,
+)
 
 logger = logging.getLogger("live2d")
 
@@ -143,6 +149,11 @@ def _validate_unityfs_bundle(path: StdPath, stored_bytes: int) -> None:
         raise DownloadIntegrityError("UnityFS declared file size is invalid")
     if compressed_info_size > declared_size - offset:
         raise DownloadIntegrityError("UnityFS block info offset is invalid")
+
+
+def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
+    """Return whether this individual bundle belongs to the Live2D namespace."""
+    return (bundle.get("bundleName") or "").startswith("live2d/")
 
 
 def _sanitize_concurrency(value) -> int:
@@ -1554,6 +1565,8 @@ def _extract_bundle_files_sync(
     unity_version: str | None,
     texture_output_formats: tuple[str, ...],
     bundle_cache_root: str | None = None,
+    *,
+    live2d_bundle: bool = False,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
     UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
 
@@ -1570,6 +1583,8 @@ def _extract_bundle_files_sync(
     post_process_movie_bundles: list[tuple[StdPath, list[Dict]]] = []
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
+    additional_motion_jobs = []
+    param_id_map: dict[str, str] = {}
 
     for unityfs_path, unityfs_obj in unity_file.container.items():
         try:
@@ -1579,6 +1594,9 @@ def _extract_bundle_files_sync(
             raise e
 
         save_path = save_path.with_name(save_path.name.strip())
+        if live2d_bundle and "motion" in save_path.parts:
+            logger.debug("Skipping live2d motion asset %s for post-processing", unityfs_path)
+            continue
         save_dir = save_path.parent
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1599,6 +1617,13 @@ def _extract_bundle_files_sync(
                     atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
                     exported_files.append(save_path)
 
+                    if (
+                        live2d_bundle
+                        and isinstance(tree, dict)
+                        and tree.get("AdditionalMotionData")
+                    ):
+                        additional_motion_jobs.append((unityfs_obj.read(), save_dir))
+
                     if "acbFiles" in tree:
                         post_process_acb_files.append((save_dir, tree["acbFiles"]))
                         logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
@@ -1614,10 +1639,10 @@ def _extract_bundle_files_sync(
                     if isinstance(data, UnityPy.classes.TextAsset):
                         if save_path.suffix == ".bytes":
                             save_path = save_path.with_suffix("")
-                        atomic_write_bytes(
-                            save_path,
-                            data.m_Script.encode("utf-8", "surrogateescape"),
-                        )
+                        data_bytes = data.m_Script.encode("utf-8", "surrogateescape")
+                        atomic_write_bytes(save_path, data_bytes)
+                        if live2d_bundle and save_path.suffix == ".moc3":
+                            param_id_map.update(extract_params_ids_from_moc3(data_bytes))
                         exported_files.append(save_path)
                     else:
                         raise TypeError(f"Expected TextAsset, got {type(data)} for {unityfs_path}")
@@ -1682,6 +1707,29 @@ def _extract_bundle_files_sync(
         except (ValueError, TypeError, AttributeError, OSError) as e:
             logger.exception("Failed to extract %s: %s", unityfs_path, e)
             raise e
+
+    if live2d_bundle:
+        for mono_behaviour, save_dir in additional_motion_jobs:
+            motions = [
+                restore_unity_object_to_motion3(motion)
+                for motion in mono_behaviour.AdditionalMotionData
+            ]
+            motions = [motion for motion in motions if motion is not None]
+            correct_param_ids(motions, param_id_map)
+            motion_dir = save_dir / "motions"
+            motion_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_bytes(
+                motion_dir / "BuildMotionData.json",
+                json.dumps(
+                    {"motions": [name for name, _ in motions]},
+                    option=json.OPT_INDENT_2,
+                ),
+            )
+            exported_files.append(motion_dir / "BuildMotionData.json")
+            for name, motion in motions:
+                motion_path = _resolve_generated_child_path(motion_dir, name, ".motion3.json")
+                atomic_write_bytes(motion_path, json.dumps(motion, option=json.OPT_INDENT_2))
+                exported_files.append(motion_path)
 
     logger.debug(
         "Extracted %d files from %s, list: %s",
@@ -2130,30 +2178,14 @@ async def download_deobfuscate_bundle(
         await asyncio.sleep(delay)
 
 
-async def extract_asset_bundle(
-    bundle_save_path: Path,
-    bundle: Dict[str, str],
+async def _append_audio_outputs(
+    exported_files: List[Path],
+    audio_jobs: list[tuple[str, list[str]]],
     extracted_save_path: Path,
-    unity_version: str = None,
-    config=None,
-    bundle_cache_root: Path | None = None,
-) -> List[Path]:
-    """Extract the asset bundle to the specified directory."""
-    loop = asyncio.get_running_loop()
-    exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
-        _get_shared_extract_process_pool(config),
-        _extract_bundle_files_sync,
-        bundle_save_path.as_posix(),
-        bundle,
-        extracted_save_path.as_posix(),
-        unity_version,
-        _get_texture_output_formats(config),
-        bundle_cache_root.as_posix() if bundle_cache_root is not None else None,
-    )
-
-    exported_files: List[Path] = [Path(path) for path in exported_paths]
-
+    config,
+) -> None:
     audio_file_semaphore = _get_shared_audio_file_semaphore(config)
+    extracted_root = StdPath(extracted_save_path.as_posix())
     for save_dir_path, extracted_audio_files in audio_jobs:
         save_dir = Path(save_dir_path)
         audio_tasks = [
@@ -2173,39 +2205,83 @@ async def extract_asset_bundle(
                 exported_files.append(
                     Path(
                         validate_contained_file(
-                            StdPath(extracted_save_path.as_posix()),
-                            StdPath(audio_file.as_posix())
-                            .relative_to(StdPath(extracted_save_path.as_posix()))
-                            .as_posix(),
+                            extracted_root,
+                            StdPath(audio_file.as_posix()).relative_to(extracted_root).as_posix(),
                         ).as_posix()
                     )
                 )
 
+
+async def _append_video_outputs(
+    exported_files: List[Path],
+    video_jobs: list[str],
+    extracted_save_path: Path,
+    config,
+) -> None:
+    extracted_root = StdPath(extracted_save_path.as_posix())
     for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
         for video_file in video_files:
             exported_files.append(
                 Path(
                     validate_contained_file(
-                        StdPath(extracted_save_path.as_posix()),
-                        StdPath(video_file.as_posix())
-                        .relative_to(StdPath(extracted_save_path.as_posix()))
-                        .as_posix(),
+                        extracted_root,
+                        StdPath(video_file.as_posix()).relative_to(extracted_root).as_posix(),
                     ).as_posix()
                 )
             )
         for discarded_file in discarded_files:
             _discard_exported_file(exported_files, discarded_file)
 
+
+async def _cleanup_extracted_files(
+    exported_files: List[Path],
+    extracted_save_path: Path,
+) -> None:
+    extracted_root = StdPath(extracted_save_path.as_posix())
     for file in exported_files[:]:
         validate_contained_file(
-            StdPath(extracted_save_path.as_posix()),
-            StdPath(file.as_posix())
-            .relative_to(StdPath(extracted_save_path.as_posix()))
-            .as_posix(),
+            extracted_root,
+            StdPath(file.as_posix()).relative_to(extracted_root).as_posix(),
         )
         if file.suffix in [".bytes", ".acb", ".usm"]:
             await file.unlink()
             logger.debug("Removed %s in cleanup stage", file)
             exported_files.remove(file)
+
+
+async def extract_asset_bundle(
+    bundle_save_path: Path,
+    bundle: Dict[str, str],
+    extracted_save_path: Path,
+    unity_version: str = None,
+    config=None,
+    bundle_cache_root: Path | None = None,
+) -> List[Path]:
+    """Extract the asset bundle to the specified directory."""
+    live2d_bundle = is_live2d_bundle(bundle)
+    if getattr(config, "UPDATER_MODE", "assets") == "live2d" and bundle.get(
+        "bundleName", ""
+    ).startswith("live2d/motion/"):
+        return []
+    loop = asyncio.get_running_loop()
+    exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
+        _get_shared_extract_process_pool(config),
+        partial(
+            _extract_bundle_files_sync,
+            bundle_save_path.as_posix(),
+            bundle,
+            extracted_save_path.as_posix(),
+            unity_version,
+            _get_texture_output_formats(config),
+            bundle_cache_root.as_posix() if bundle_cache_root is not None else None,
+            live2d_bundle=live2d_bundle,
+        ),
+    )
+
+    exported_files: List[Path] = [Path(path) for path in exported_paths]
+
+    await _append_audio_outputs(exported_files, audio_jobs, extracted_save_path, config)
+    await _append_video_outputs(exported_files, video_jobs, extracted_save_path, config)
+    await _cleanup_extracted_files(exported_files, extracted_save_path)
 
     return exported_files

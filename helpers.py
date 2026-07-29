@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import logging
 import os
 import re
@@ -606,6 +607,9 @@ async def get_download_list(
     exclude_list: List[str] | None = None,
     priority_list: List[str] | None = None,
     force_full_download: bool = False,
+    automatic_prefixes: tuple[str, ...] = (),
+    bundle_cache_path_resolver=None,
+    asset_bundle_info_for_cache: Dict | None = None,
 ) -> DownloadPlan:
     """Generate the download list for the asset bundles.
 
@@ -643,30 +647,38 @@ async def get_download_list(
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
     asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
-    current_bundles = await filter_bundles(
+    current_bundles = select_bundles_for_download(
         current_bundles,
         include_list=include_list,
         exclude_list=exclude_list,
+        automatic_prefixes=automatic_prefixes,
     )
-    assert current_bundles, "No bundles found after filtering"
+    if not current_bundles:
+        raise ValueError("No bundles found after filtering")
+
+    async def select_changed_bundles(cached_bundles: Dict[str, Dict]) -> list[Dict]:
+        changed_bundles = []
+        for bundle in current_bundles.values():
+            if bundle_has_changed(bundle, cached_bundles.get(bundle.get("bundleName", ""), {})):
+                changed_bundles.append(bundle)
+                continue
+            if bundle_cache_path_resolver is None:
+                continue
+            cache_path = bundle_cache_path_resolver(bundle)
+            if cache_path is None:
+                continue
+            exists = cache_path.exists()
+            if inspect.isawaitable(exists):
+                exists = await exists
+            if not exists:
+                changed_bundles.append(bundle)
+        return changed_bundles
+
     if cached_asset_bundle_info and cached_game_version_json:
+        cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
+        changed_bundles = await select_changed_bundles(cached_bundles)
+
         if assetver:
-            # Nuverse's assetver identifies the metadata endpoint, but it is
-            # not a sufficient change signal for the bundles themselves.
-            # Compare checksums even when the fetched assetver is unchanged;
-            # conversely, an assetver change alone must not redownload all
-            # bundles.
-            cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
-
-            changed_bundles = [
-                bundle
-                for bundle in current_bundles.values()
-                if bundle_has_changed(
-                    bundle,
-                    cached_bundles.get(bundle.get("bundleName", ""), {}),
-                )
-            ]
-
             # Generate the download list from changed bundles
             app_version: str = (
                 getattr(config, "APP_VERSION_OVERRIDE", None)
@@ -762,12 +774,36 @@ async def get_download_list(
             priority_list=priority_list,
         )
 
+    metadata_source = (
+        asset_bundle_info if asset_bundle_info_for_cache is None else asset_bundle_info_for_cache
+    )
     normalized_metadata = {
-        "version": asset_bundle_info.get("version", ""),
-        "os": asset_bundle_info.get("os", ""),
-        "bundles": current_bundles,
+        "version": metadata_source.get("version", ""),
+        "os": metadata_source.get("os", ""),
+        "bundles": metadata_source.get("bundles", {}),
     }
     return DownloadPlan(download_list, normalized_metadata, game_version_json)
+
+
+def select_bundles_for_download(
+    bundles: Dict[str, Dict],
+    include_list: List[str] | None = None,
+    exclude_list: List[str] | None = None,
+    automatic_prefixes: tuple[str, ...] = (),
+) -> Dict[str, Dict]:
+    """Select user bundles and merge mandatory specialized bundles."""
+    selected: Dict[str, Dict] = {}
+    selected_names: set[str] = set()
+    for key, value in bundles.items():
+        bundle_name = value.get("bundleName") or ""
+        user_selected = (
+            not include_list or any(re.match(pattern, bundle_name) for pattern in include_list)
+        ) and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
+        automatic_selected = bundle_name.startswith(automatic_prefixes)
+        if (user_selected or automatic_selected) and bundle_name not in selected_names:
+            selected[key] = value
+            selected_names.add(bundle_name)
+    return selected
 
 
 async def filter_bundles(
@@ -793,6 +829,51 @@ async def filter_bundles(
         }
 
     return bundles
+
+
+def dedupe_download_items(items: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict]]:
+    result: List[Tuple[str, Dict]] = []
+    seen_names: set[str] = set()
+    for item in items:
+        bundle_name = item[1].get("bundleName") or ""
+        if bundle_name not in seen_names:
+            result.append(item)
+            seen_names.add(bundle_name)
+    return result
+
+
+MODE_BUNDLE_PREFIXES = {"assets": (), "live2d": ("live2d/",), "charts": ()}
+
+
+def get_mode_bundle_prefixes(mode: str) -> tuple[str, ...]:
+    try:
+        return MODE_BUNDLE_PREFIXES[mode]
+    except KeyError as exc:
+        raise ValueError(f"Unknown updater mode: {mode}") from exc
+
+
+def filter_bundles_for_mode(bundles: Dict[str, Dict], mode: str = "assets") -> Dict[str, Dict]:
+    prefixes = get_mode_bundle_prefixes(mode)
+    return (
+        bundles
+        if not prefixes
+        else {
+            key: value
+            for key, value in bundles.items()
+            if (value.get("bundleName") or "").startswith(prefixes)
+        }
+    )
+
+
+def filter_download_items_for_mode(
+    items: List[Tuple[str, Dict]], mode: str
+) -> List[Tuple[str, Dict]]:
+    prefixes = get_mode_bundle_prefixes(mode)
+    return (
+        items
+        if not prefixes
+        else [item for item in items if (item[1].get("bundleName") or "").startswith(prefixes)]
+    )
 
 
 async def sort_download_list(
@@ -1008,3 +1089,28 @@ async def upload_to_storage(
         raise RuntimeError(f"{len(errors)} upload(s) failed; first error: {errors[0]}") from errors[
             0
         ]
+
+
+async def upload_directory(
+    source_dir: Path,
+    remote_path: Path,
+    upload_program: str,
+    upload_args: List[str],
+    config=None,
+) -> None:
+    """Upload a complete specialized output directory in one storage operation."""
+    source_path = os.path.abspath(os.fspath(source_dir))
+    if not os.path.isdir(source_path):
+        raise ValueError(f"Directory upload source does not exist: {source_path}")
+
+    args = upload_args[:]
+    args[args.index("src")] = source_path
+    args[args.index("dst")] = str(remote_path)
+    safe_remote_path = sanitize_url(str(remote_path))
+    logger.debug("Uploading directory %s to %s", source_path, safe_remote_path)
+
+    process = await asyncio.create_subprocess_exec(upload_program, *args)
+    await _wait_for_process(process, _get_external_process_timeout(config))
+    if process.returncode != 0:
+        raise RuntimeError(f"Failed to upload directory {source_path} to {safe_remote_path}")
+    logger.info("Successfully uploaded directory %s to %s", source_path, safe_remote_path)

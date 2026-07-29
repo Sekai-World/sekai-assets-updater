@@ -83,7 +83,13 @@ Storage:
 
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
 - `ASSET_LOCAL_BUNDLE_CACHE_DIR`: keep downloaded bundles locally; if `None`, use a temp file
-- `ASSET_REMOTE_STORAGE`: upload extracted files after processing; set to `[]` to disable uploads
+- `LIVE2D_BUNDLE_CACHE_DIR`: separate persistent cache for `live2d/` bundles; if `None`, use a run-scoped temporary cache only while Live2D post-processing runs
+- `ASSET_REMOTE_STORAGE`: upload targets after processing; set to `[]` to disable uploads. Each target uses `type` to select its pipeline: `normal` for extracted assets, `live2d` for Live2D output, or `charts` for rendered charts.
+- `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
+- Multiple targets of each `ASSET_REMOTE_STORAGE` type upload sequentially after successful processing.
+- Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
+- Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
+- Charts never download or cache asset bundles. They use existing `music/music_score/*.txt` files first; when absent, they copy `music/music_score/` from the first successful `type == "normal"` target in `ASSET_REMOTE_STORAGE`, using that target's program and args. If `ASSET_LOCAL_EXTRACTED_DIR` is persistent, the fallback uses a separate temporary workspace and cannot pollute it. If it is unset, the existing run-scoped extracted workspace is reused and cleaned after processing. Ordinary assets retain their existing temporary-file semantics.
 
 Startup validates all configured concurrency values, AES key/IV lengths, the external process
 timeout, and executables required by the selected decoder and upload backends.
@@ -100,6 +106,17 @@ Run the full updater:
 
 ```bash
 uv run python main.py -c config.py
+```
+
+The single entry point supports `--mode assets|live2d|charts` (default `assets`).
+The `live2d` mode constrains bundles to `live2d/`, ignores `DL_INCLUDE_LIST` and
+`DL_EXCLUDE_LIST` for that namespace, and always runs Live2D processing. The
+`charts` mode does not download game bundles: it runs the local-first/normal-storage
+chart source fallback and then charts processing regardless of the enable flag.
+
+```bash
+uv run python main.py -c config.py --mode live2d
+uv run python main.py -c config.py --mode charts
 ```
 
 Verbose mode:
