@@ -78,8 +78,9 @@ def test_wait_timeout_terminates_and_waits_for_process(monkeypatch, terminate_ex
     process = _HangingProcess(terminate_exits=terminate_exits)
     monkeypatch.setattr(bundle, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
 
+    wait = bundle._wait_for_process(process, 0.001)
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(bundle._wait_for_process(process, 0.001))
+        asyncio.run(wait)
 
     assert process.terminate_called
     assert process.kill_called is (not terminate_exits)
@@ -310,19 +311,18 @@ def test_upload_timeout_cleans_up_process_and_redacts_remote_query(
     monkeypatch.setattr(helpers.asyncio, "create_subprocess_exec", create_process)
     monkeypatch.setattr(helpers, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
     config = SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=0.001)
+    upload = helpers.upload_to_storage(
+        [source],
+        tmp_path,
+        "remote:bucket?Signature=remote-secret",
+        "rclone",
+        ["copyto", "src", "dst", "--header", "secret-arg"],
+        config=config,
+    )
 
     with caplog.at_level("DEBUG", logger="asset_updater"):
         with pytest.raises(RuntimeError, match=r"1 upload\(s\) failed"):
-            asyncio.run(
-                helpers.upload_to_storage(
-                    [source],
-                    tmp_path,
-                    "remote:bucket?Signature=remote-secret",
-                    "rclone",
-                    ["copyto", "src", "dst", "--header", "secret-arg"],
-                    config=config,
-                )
-            )
+            asyncio.run(upload)
 
     assert process.terminate_called
     assert process.kill_called is (not terminate_exits)

@@ -236,7 +236,8 @@ async def _wait_for_process(process, timeout: float) -> int:
     original_error: BaseException | None = None
     cancellation = False
     try:
-        return await asyncio.wait_for(process.wait(), timeout)
+        async with asyncio.timeout(timeout):
+            return await process.wait()
     except asyncio.CancelledError as exc:
         original_error = exc
         cancellation = True
@@ -256,7 +257,8 @@ async def _communicate_with_process(process, timeout: float) -> tuple[bytes, byt
     original_error: BaseException | None = None
     cancellation = False
     try:
-        return await asyncio.wait_for(process.communicate(), timeout)
+        async with asyncio.timeout(timeout):
+            return await process.communicate()
     except asyncio.CancelledError as exc:
         original_error = exc
         cancellation = True
@@ -1119,7 +1121,7 @@ async def _process_video_job(
                             shutil.rmtree(staging_dir, ignore_errors=True)
                     logger.debug("Converted %s to mp4", usm_output_path)
                     exported_video_files.append(video_output_path)
-    except (OSError, SecurityError, ValueError, FileNotFoundError):
+    except (OSError, SecurityError, ValueError):
         if ffmpeg_process is not None:
             _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
@@ -1452,7 +1454,7 @@ def _extract_acb_from_cached_bundles_sync(
                 bundle_cache_root,
                 cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
             )
-        except (FileNotFoundError, ValueError, SecurityError):
+        except (OSError, ValueError, SecurityError):
             logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
             continue
         if cached_bundle_path.resolve() == bundle_path:

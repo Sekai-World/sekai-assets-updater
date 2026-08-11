@@ -382,7 +382,8 @@ async def _wait_for_process(process, timeout: float) -> int:
     original_error: BaseException | None = None
     cancellation = False
     try:
-        return await asyncio.wait_for(process.wait(), timeout)
+        async with asyncio.timeout(timeout):
+            return await process.wait()
     except asyncio.CancelledError as exc:
         original_error = exc
         cancellation = True
@@ -1058,13 +1059,7 @@ async def upload_to_storage(
 
             # Execute the command
             upload_process = await asyncio.create_subprocess_exec(program, *args)
-            try:
-                await _wait_for_process(
-                    upload_process,
-                    process_timeout,
-                )
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                raise
+            await _wait_for_process(upload_process, process_timeout)
             if upload_process.returncode != 0:
                 safe_remote_path = sanitize_url(remote_path)
                 logger.error("Failed to upload %s to %s", file_path, safe_remote_path)

@@ -161,8 +161,9 @@ def test_missing_nuverse_template_value_is_descriptive(monkeypatch) -> None:
         AES_IV=b"iv",
     )
 
+    request = asset_bundle_info.fetch_asset_bundle_info(config, headers={}, cookie=None)
     with pytest.raises(ValueError, match=r"Missing format values for required") as caught:
-        asyncio.run(asset_bundle_info.fetch_asset_bundle_info(config, headers={}, cookie=None))
+        asyncio.run(request)
 
     assert "https://cdn.test/{assetVer}/{required}" in str(caught.value)
 

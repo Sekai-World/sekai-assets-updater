@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 
 JOURNAL_SCHEMA_VERSION = 1
+STATE_LOCK_FILENAME = ".updater-state.lock"
 _JOURNAL_KEYS = {
     "schema_version",
     "queue",
@@ -359,7 +360,7 @@ class StatePaths:
             raise StateValidationError("state paths must be distinct")
         if len({path.parent for path in paths}) != 1:
             raise StateValidationError("all state files must share one parent directory")
-        expected_lock = paths[0].parent / ".updater-state.lock"
+        expected_lock = paths[0].parent / STATE_LOCK_FILENAME
         if paths[-1] != expected_lock:
             raise StateValidationError(
                 f"state lock must be the canonical shared lock {expected_lock}"
@@ -394,7 +395,7 @@ def derive_state_paths(
         asset_metadata=metadata,
         game_version=version,
         journal=Path(f"{queue}.journal").resolve(strict=False),
-        lock=queue.parent / ".updater-state.lock",
+        lock=queue.parent / STATE_LOCK_FILENAME,
     )
     return paths
 

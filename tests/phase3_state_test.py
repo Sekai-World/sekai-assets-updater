@@ -57,44 +57,51 @@ def test_bundle_crc_compatibility_accepts_empty_hash_and_normalizes_numeric_crc(
 
 
 def test_metadata_and_version_validation_is_strict() -> None:
+    invalid_metadata = {"bundles": {"a": {}}}
     with pytest.raises(state.StateValidationError):
-        state.validate_asset_metadata({"bundles": {"a": {}}})
+        state.validate_asset_metadata(invalid_metadata)
+    invalid_metadata = {"bundles": []}
     with pytest.raises(state.StateValidationError):
-        state.validate_asset_metadata({"bundles": []})
+        state.validate_asset_metadata(invalid_metadata)
+    invalid_version = {}
     with pytest.raises(state.StateValidationError):
-        state.validate_game_version({})
+        state.validate_game_version(invalid_version)
+    invalid_version = {"appVersion": ""}
     with pytest.raises(state.StateValidationError):
-        state.validate_game_version({"appVersion": ""})
+        state.validate_game_version(invalid_version)
+    invalid_metadata = {
+        "version": "v1",
+        "os": "ios",
+        "bundles": {"key": {"bundleName": "other"}},
+    }
     with pytest.raises(state.StateValidationError):
-        state.validate_asset_metadata(
-            {"version": "v1", "os": "ios", "bundles": {"key": {"bundleName": "other"}}}
-        )
+        state.validate_asset_metadata(invalid_metadata)
+    invalid_metadata = {"version": 1, "bundles": {"a": {"bundleName": "a"}}}
     with pytest.raises(state.StateValidationError):
-        state.validate_asset_metadata({"version": 1, "bundles": {"a": {"bundleName": "a"}}})
+        state.validate_asset_metadata(invalid_metadata)
+    invalid_version = {"appVersion": "1", "assetVersion": 2}
     with pytest.raises(state.StateValidationError):
-        state.validate_game_version({"appVersion": "1", "assetVersion": 2})
+        state.validate_game_version(invalid_version)
+    invalid_journal = {
+        "schema_version": True,
+        "queue": _queue(),
+        "asset_metadata": _metadata(),
+        "game_version": _version(),
+        "transaction_id": "tx",
+        "operation": "update",
+    }
     with pytest.raises(state.StateValidationError):
-        state.validate_journal(
-            {
-                "schema_version": True,
-                "queue": _queue(),
-                "asset_metadata": _metadata(),
-                "game_version": _version(),
-                "transaction_id": "tx",
-                "operation": "update",
-            }
-        )
+        state.validate_journal(invalid_journal)
+    invalid_journal = {
+        "schema_version": 1,
+        "queue": _queue(),
+        "asset_metadata": _metadata(),
+        "game_version": _version(),
+        "transaction_id": "tx",
+        "operation": "repair",
+    }
     with pytest.raises(state.StateValidationError):
-        state.validate_journal(
-            {
-                "schema_version": 1,
-                "queue": _queue(),
-                "asset_metadata": _metadata(),
-                "game_version": _version(),
-                "transaction_id": "tx",
-                "operation": "repair",
-            }
-        )
+        state.validate_journal(invalid_journal)
 
 
 def test_missing_and_unreadable_state_are_distinct(tmp_path: Path, monkeypatch) -> None:
@@ -171,12 +178,12 @@ def test_atomic_write_parent_fsync_failure_after_replace_leaves_new_target(
 
 
 def test_atomic_write_requires_validator_and_existing_parent(tmp_path: Path) -> None:
+    queue = _queue()
     with pytest.raises(state.StateValidationError):
-        state.atomic_write_json(tmp_path / "state.json", _queue(), 0)  # type: ignore[arg-type]
+        state.atomic_write_json(tmp_path / "state.json", queue, 0)  # type: ignore[arg-type]
+    missing_target = tmp_path / "absent" / "state.json"
     with pytest.raises(state.StatePersistenceError):
-        state.atomic_write_json(
-            tmp_path / "absent" / "state.json", _queue(), state.validate_pending_queue
-        )
+        state.atomic_write_json(missing_target, queue, state.validate_pending_queue)
 
 
 def test_replace_failure_preserves_old_target_and_cleans_temp(tmp_path: Path, monkeypatch) -> None:

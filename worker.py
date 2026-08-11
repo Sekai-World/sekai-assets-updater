@@ -483,7 +483,6 @@ async def _upload_stage(
                 label,
             )
 
-            upload_succeeded = False
             try:
                 if config.ASSET_REMOTE_STORAGE:
                     if artifact.extracted_save_path is None:
@@ -506,7 +505,6 @@ async def _upload_stage(
                     name,
                     label,
                 )
-                upload_succeeded = True
             except asyncio.CancelledError:
                 await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
                 raise

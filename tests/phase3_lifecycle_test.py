@@ -180,8 +180,9 @@ def test_unexpected_pipeline_failure_retains_full_pre_run_queue(
         raise failure
 
     monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
+    download = main.do_download(original, config, {}, None, paths)  # type: ignore[arg-type]
     with pytest.raises(type(failure)):
-        asyncio.run(main.do_download(original, config, {}, None, paths))  # type: ignore[arg-type]
+        asyncio.run(download)
     assert paths.queue.read_bytes() == before
 
 
@@ -209,8 +210,9 @@ def test_malformed_queue_without_journal_fails_closed_and_preserves_bytes(
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "get_download_list", fake_plan)
+    run = main.main()
     with pytest.raises(state.StateValidationError):
-        asyncio.run(main.main())
+        asyncio.run(run)
     assert paths.queue.read_bytes() == before
     assert not paths.journal.exists()
 

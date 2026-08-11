@@ -153,12 +153,14 @@ def test_http_transport_errors_are_sanitized(monkeypatch, target):
     config = _config()
     if target == "metadata":
         monkeypatch.setattr(asset_bundle_info.aiohttp, "ClientSession", _FailingSession)
+        request = asset_bundle_info.fetch_asset_bundle_info(config)
         with pytest.raises(RuntimeError) as caught:
-            asyncio.run(asset_bundle_info.fetch_asset_bundle_info(config))
+            asyncio.run(request)
     else:
         monkeypatch.setattr(helpers.aiohttp, "ClientSession", _FailingSession)
+        request = helpers.refresh_cookie(config, {})
         with pytest.raises(RuntimeError) as caught:
-            asyncio.run(helpers.refresh_cookie(config, {}))
+            asyncio.run(request)
 
     assert secret not in str(caught.value)
     assert caught.value.__context__ is None
@@ -176,8 +178,9 @@ def test_main_pipeline_boundary_does_not_log_raw_transport_exception(monkeypatch
     paths = SimpleNamespace(queue="pending.json")
 
     with caplog.at_level(logging.ERROR):
+        download = main.do_download([], config, {}, None, paths)
         with pytest.raises(RuntimeError) as caught:
-            asyncio.run(main.do_download([], config, {}, None, paths))
+            asyncio.run(download)
 
     assert secret not in caplog.text
     assert secret not in str(caught.value)
@@ -224,17 +227,16 @@ def test_http_logs_redact_headers_urls_and_response_bodies(monkeypatch, caplog):
     )
 
     with caplog.at_level(logging.DEBUG, logger="asset_updater"):
+        request = asset_bundle_info.fetch_asset_bundle_info(
+            config,
+            headers={
+                "Cookie": "cookie-secret",
+                "Authorization": "authorization-secret",
+                "X-Api-Key": "header-secret",
+            },
+        )
         with pytest.raises(RuntimeError):
-            asyncio.run(
-                asset_bundle_info.fetch_asset_bundle_info(
-                    config,  # type: ignore[arg-type]
-                    headers={
-                        "Cookie": "cookie-secret",
-                        "Authorization": "authorization-secret",
-                        "X-Api-Key": "header-secret",
-                    },
-                )
-            )
+            asyncio.run(request)
 
     records = "\n".join(record.getMessage() for record in caplog.records)
     for secret in (
@@ -263,18 +265,12 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
     )
     monkeypatch.setattr(bundle.random, "uniform", lambda *_args: 0)
 
+    download = bundle.download_deobfuscate_bundle(
+        signed_url, AnyioPath(tmp_path), "bundle", {}, config=config, session=_FailingSession()
+    )
     with caplog.at_level(logging.WARNING, logger="live2d"):
         with pytest.raises(bundle.RetryableDownloadError):
-            asyncio.run(
-                bundle.download_deobfuscate_bundle(
-                    signed_url,
-                    AnyioPath(tmp_path),
-                    "bundle",
-                    {},
-                    config=config,
-                    session=_FailingSession(),
-                )
-            )
+            asyncio.run(download)
 
     records = "\n".join(record.getMessage() for record in caplog.records)
     assert "url-secret" not in records

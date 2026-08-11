@@ -146,14 +146,9 @@ def test_run_pipeline_propagates_unexpected_stage_worker_failure(
     monkeypatch.setattr(worker, "download_deobfuscate_bundle", fake_download)
     monkeypatch.setattr(worker, "_extract_stage", crashing_extract_stage)
 
+    pipeline = worker.run_pipeline([("url", {"bundleName": "bundle"})], _config(None), {})
     with pytest.raises(RuntimeError, match="unexpected extract worker failure"):
-        worker.asyncio.run(
-            worker.run_pipeline(
-                [("url", {"bundleName": "bundle"})],
-                _config(None),
-                {},
-            )
-        )
+        worker.asyncio.run(pipeline)
 
     assert captured_path
     assert not captured_path[0].exists()

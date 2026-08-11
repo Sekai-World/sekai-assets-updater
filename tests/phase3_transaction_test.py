@@ -207,8 +207,9 @@ def test_pipeline_exception_or_cancellation_preserves_complete_queue(
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
+    run = main.main()
     with pytest.raises((RuntimeError, asyncio.CancelledError)):
-        asyncio.run(main.main())
+        asyncio.run(run)
     assert state.load_pending_queue(paths.queue) == [
         ["https://example.test/current", {"bundleName": "current", "hash": "new"}]
     ]
@@ -288,8 +289,9 @@ def test_metadata_only_rejects_observed_path_aliasing_normal_target(
         return _fetch_result()
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
+    run = main.main(update_asset_bundle_info_only=True)
     with pytest.raises(RuntimeError, match="aliases"):
-        asyncio.run(main.main(update_asset_bundle_info_only=True))
+        asyncio.run(run)
 
 
 def test_lock_contention_blocks_second_main_run(tmp_path: Path, monkeypatch) -> None:
@@ -302,7 +304,8 @@ def test_lock_contention_blocks_second_main_run(tmp_path: Path, monkeypatch) -> 
     holder = state.StateLock(paths.lock).acquire()
     try:
         monkeypatch.setattr(main, "config", config)
+        run = main.main(force_full_download=True)
         with pytest.raises(state.StateLockError, match="already held"):
-            asyncio.run(main.main(force_full_download=True))
+            asyncio.run(run)
     finally:
         holder.release()

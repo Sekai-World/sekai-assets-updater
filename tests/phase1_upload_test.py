@@ -72,16 +72,11 @@ def test_upload_rejects_outside_source_before_subprocess(tmp_path: Path, fake_su
     outside_path.write_bytes(b"outside")
     fake_process = fake_subprocess()
 
+    upload = upload_to_storage(
+        [outside_path], tmp_path, "remote:bucket/prefix", "rclone", ["copyto", "src", "dst"]
+    )
     with pytest.raises(SecurityError):
-        asyncio.run(
-            upload_to_storage(
-                [outside_path],
-                tmp_path,
-                "remote:bucket/prefix",
-                "rclone",
-                ["copyto", "src", "dst"],
-            )
-        )
+        asyncio.run(upload)
 
     assert fake_process.calls == []
 
@@ -93,16 +88,11 @@ def test_upload_rejects_symlink_source_before_subprocess(tmp_path: Path, fake_su
     symlink_path.symlink_to(outside_path)
     fake_process = fake_subprocess()
 
+    upload = upload_to_storage(
+        [symlink_path], tmp_path, "remote:bucket/prefix", "rclone", ["copyto", "src", "dst"]
+    )
     with pytest.raises(SecurityError):
-        asyncio.run(
-            upload_to_storage(
-                [symlink_path],
-                tmp_path,
-                "remote:bucket/prefix",
-                "rclone",
-                ["copyto", "src", "dst"],
-            )
-        )
+        asyncio.run(upload)
 
     assert fake_process.calls == []
 
@@ -112,16 +102,11 @@ def test_upload_rejects_filename_with_non_posix_separator(tmp_path: Path, fake_s
     exported_path.write_bytes(b"audio")
     fake_process = fake_subprocess()
 
+    upload = upload_to_storage(
+        [exported_path], tmp_path, "remote:bucket/prefix", "rclone", ["copyto", "src", "dst"]
+    )
     with pytest.raises(SecurityError):
-        asyncio.run(
-            upload_to_storage(
-                [exported_path],
-                tmp_path,
-                "remote:bucket/prefix",
-                "rclone",
-                ["copyto", "src", "dst"],
-            )
-        )
+        asyncio.run(upload)
 
     assert fake_process.calls == []
 
@@ -144,16 +129,15 @@ def test_upload_aggregates_failures_from_all_jobs(tmp_path: Path, fake_subproces
     second_path.write_bytes(b"second")
     fake_process = fake_subprocess(returncode=1)
 
+    upload = upload_to_storage(
+        [first_path, second_path],
+        tmp_path,
+        "remote:bucket/prefix",
+        "rclone",
+        ["copyto", "src", "dst"],
+    )
     with pytest.raises(RuntimeError, match=r"2 upload\(s\) failed"):
-        asyncio.run(
-            upload_to_storage(
-                [first_path, second_path],
-                tmp_path,
-                "remote:bucket/prefix",
-                "rclone",
-                ["copyto", "src", "dst"],
-            )
-        )
+        asyncio.run(upload)
 
     assert len(fake_process.calls) == 2
 
@@ -170,16 +154,11 @@ def test_upload_reraises_cancelled_error_from_gather(
 
     monkeypatch.setattr(helpers, "_wait_for_process", cancel_wait)
 
+    upload = upload_to_storage(
+        [exported_path], tmp_path, "remote:bucket/prefix", "rclone", ["copyto", "src", "dst"]
+    )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(
-            upload_to_storage(
-                [exported_path],
-                tmp_path,
-                "remote:bucket/prefix",
-                "rclone",
-                ["copyto", "src", "dst"],
-            )
-        )
+        asyncio.run(upload)
 
 
 @pytest.mark.parametrize("configured_retries", [0, -1])

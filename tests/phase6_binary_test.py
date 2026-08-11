@@ -13,8 +13,9 @@ def test_read_string_to_null_returns_bytes_before_terminator() -> None:
 
 @pytest.mark.parametrize("data", [b"", b"unterminated"])
 def test_read_string_to_null_raises_eof_without_terminator(data: bytes) -> None:
+    stream = BinaryStream(BytesIO(data))
     with pytest.raises(EOFError):
-        BinaryStream(BytesIO(data)).readStringToNull()
+        stream.readStringToNull()
 
 
 def test_read_string_to_null_with_offset_restores_position() -> None:

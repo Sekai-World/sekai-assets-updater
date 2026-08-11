@@ -159,15 +159,11 @@ def test_usm_extractor_uses_private_staging_and_promotes_selected_result(
 def test_download_rejects_unsafe_relative_destination(
     tmp_path: Path, relative_destination: str
 ) -> None:
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.invalid/bundle", tmp_path, relative_destination, {}
+    )
     with pytest.raises(security.SecurityError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.invalid/bundle",
-                tmp_path,
-                relative_destination,
-                {},
-            )
-        )
+        asyncio.run(download)
 
 
 def test_download_rejects_preexisting_symlink_destination(tmp_path: Path) -> None:
@@ -176,12 +172,8 @@ def test_download_rejects_preexisting_symlink_destination(tmp_path: Path) -> Non
     symlink_path = tmp_path / "bundle"
     symlink_path.symlink_to(outside_path)
 
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.invalid/bundle", tmp_path, "bundle", {}
+    )
     with pytest.raises(security.SecurityError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.invalid/bundle",
-                tmp_path,
-                "bundle",
-                {},
-            )
-        )
+        asyncio.run(download)

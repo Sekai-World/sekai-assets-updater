@@ -63,23 +63,29 @@ class _SequenceSession:
 
 
 def _run(tmp_path: Path, body: bytes, *, bundle_data=None, headers=None, existing=b"old"):
+    target, download = _start_run(
+        tmp_path, body, bundle_data=bundle_data, headers=headers, existing=existing
+    )
+    asyncio.run(download)
+    return target
+
+
+def _start_run(tmp_path: Path, body: bytes, *, bundle_data=None, headers=None, existing=b"old"):
     target = tmp_path / "nested" / "bundle"
     target.parent.mkdir(exist_ok=True)
     target.write_bytes(existing)
     response = _Response(body, headers=headers)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
-    asyncio.run(
-        bundle.download_deobfuscate_bundle(
-            "https://example.test/bundle",
-            AnyioPath(target.parent),
-            "bundle",
-            {},
-            config=config,
-            session=_Session(response),
-            expected_bundle=bundle_data,
-        )
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        AnyioPath(target.parent),
+        "bundle",
+        {},
+        config=config,
+        session=_Session(response),
+        expected_bundle=bundle_data,
     )
-    return target
+    return target, download
 
 
 def _unityfs(*, declared_size: int | None = None) -> bytes:
@@ -146,21 +152,24 @@ def test_size_only_metadata_is_validated(tmp_path: Path) -> None:
 
 
 def test_conflicting_size_metadata_is_rejected(tmp_path: Path) -> None:
+    _, download = _start_run(tmp_path, _unityfs(), bundle_data={"fileSize": 1, "size": 2})
     with pytest.raises(bundle.DownloadIntegrityError):
-        _run(tmp_path, _unityfs(), bundle_data={"fileSize": 1, "size": 2})
+        asyncio.run(download)
 
 
 def test_same_size_malformed_unityfs_is_rejected(tmp_path: Path) -> None:
     data = b"UnityFS\0" + b"x" * 35
+    _, download = _start_run(tmp_path, data, bundle_data={"fileSize": len(data)})
     with pytest.raises(bundle.DownloadIntegrityError):
-        _run(tmp_path, data, bundle_data={"fileSize": len(data)})
+        asyncio.run(download)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
 def test_invalid_expected_metadata_is_rejected_before_promotion(tmp_path: Path) -> None:
     body = _unityfs()
+    _, download = _start_run(tmp_path, body, bundle_data={"fileSize": "not-an-int"})
     with pytest.raises(bundle.DownloadIntegrityError):
-        _run(tmp_path, body, bundle_data={"fileSize": "not-an-int"})
+        asyncio.run(download)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
@@ -179,17 +188,16 @@ def test_non_200_response_does_not_promote(tmp_path: Path) -> None:
     target.write_bytes(b"old")
     response = _Response(_unityfs(), status=503)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        AnyioPath(tmp_path),
+        "bundle",
+        {},
+        config=config,
+        session=_Session(response),
+    )
     with pytest.raises(bundle.DownloadIntegrityError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                AnyioPath(tmp_path),
-                "bundle",
-                {},
-                config=config,
-                session=_Session(response),
-            )
-        )
+        asyncio.run(download)
     assert target.read_bytes() == b"old"
 
 
@@ -201,17 +209,16 @@ def test_cancellation_cleans_temp_without_retry_or_replacing_existing(tmp_path: 
     session = _Session(response)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=3, REQUEST_TIMEOUT=1)
 
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        AnyioPath(tmp_path),
+        "bundle",
+        {},
+        config=config,
+        session=session,
+    )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                AnyioPath(tmp_path),
-                "bundle",
-                {},
-                config=config,
-                session=session,
-            )
-        )
+        asyncio.run(download)
 
     assert target.read_bytes() == b"old"
     assert not list(tmp_path.glob(".bundle.*.tmp"))
@@ -341,34 +348,32 @@ def test_permanent_http_errors_are_single_attempt(tmp_path: Path, status: int) -
     session = _SequenceSession([_Response(b"", status=status), _successful_response()])
     target = tmp_path / "bundle"
     target.write_bytes(b"old")
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        tmp_path,
+        "bundle",
+        {},
+        config=_retry_config(),
+        session=session,
+    )
     with pytest.raises(bundle.DownloadIntegrityError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                tmp_path,
-                "bundle",
-                {},
-                config=_retry_config(),
-                session=session,
-            )
-        )
+        asyncio.run(download)
     assert session.calls == 1
     assert target.read_bytes() == b"old"
 
 
 def test_integrity_error_is_single_attempt(tmp_path: Path) -> None:
     session = _SequenceSession([_Response(b"not-a-bundle"), _successful_response()])
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        tmp_path,
+        "bundle",
+        {},
+        config=_retry_config(),
+        session=session,
+    )
     with pytest.raises(bundle.DownloadIntegrityError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                tmp_path,
-                "bundle",
-                {},
-                config=_retry_config(),
-                session=session,
-            )
-        )
+        asyncio.run(download)
     assert session.calls == 1
 
 
@@ -380,17 +385,16 @@ def test_retry_exhaustion_uses_total_attempt_semantics(tmp_path: Path, monkeypat
         sleeps.append(delay)
 
     monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        tmp_path,
+        "bundle",
+        {},
+        config=_retry_config(DOWNLOAD_MAX_RETRIES=3),
+        session=session,
+    )
     with pytest.raises(bundle.RetryableDownloadError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                tmp_path,
-                "bundle",
-                {},
-                config=_retry_config(DOWNLOAD_MAX_RETRIES=3),
-                session=session,
-            )
-        )
+        asyncio.run(download)
     assert session.calls == 3
     assert len(sleeps) == 2
 
@@ -467,17 +471,16 @@ def test_cancellation_during_backoff_does_not_make_next_request(
         raise asyncio.CancelledError
 
     monkeypatch.setattr(bundle.asyncio, "sleep", cancelled_sleep)
+    download = bundle.download_deobfuscate_bundle(
+        "https://example.test/bundle",
+        tmp_path,
+        "bundle",
+        {},
+        config=_retry_config(),
+        session=session,
+    )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(
-            bundle.download_deobfuscate_bundle(
-                "https://example.test/bundle",
-                tmp_path,
-                "bundle",
-                {},
-                config=_retry_config(),
-                session=session,
-            )
-        )
+        asyncio.run(download)
     assert session.calls == 1
     assert target.read_bytes() == b"old"
     assert not list(tmp_path.glob(".bundle.*.tmp"))
