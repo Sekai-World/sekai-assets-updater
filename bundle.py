@@ -203,7 +203,7 @@ async def _ensure_process_terminated(process) -> BaseException | None:
         try:
             await asyncio.shield(task)
             break
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # NOSONAR - re-raised after the shared cleanup task finishes
             # Keep waiting on the same shielded task. Never start a second
             # termination sequence while the first one is still in progress.
             cancellation_seen = True
