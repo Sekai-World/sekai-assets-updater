@@ -190,7 +190,7 @@ async def _terminate_process(process) -> None:
         await process.wait()
 
 
-async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
+async def _ensure_process_terminated(process) -> BaseException | None:
     """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
     task = getattr(process, "_bundle_terminate_task", None)
     if task is None:
@@ -228,8 +228,8 @@ async def _ensure_process_terminated(process) -> tuple[BaseException | None, boo
                 "Process termination cleanup failed while propagating cancellation: %s",
                 cleanup_error,
             )
-        return None, True
-    return cleanup_error, False
+        raise asyncio.CancelledError() from None
+    return cleanup_error
 
 
 async def _wait_for_process(process, timeout: float) -> int:
@@ -244,9 +244,9 @@ async def _wait_for_process(process, timeout: float) -> int:
     except asyncio.TimeoutError as exc:
         original_error = exc
 
-    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    cleanup_error = await _ensure_process_terminated(process)
     _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation or cleanup_cancelled:
+    if cancellation:
         raise asyncio.CancelledError() from None
     if cleanup_error is not None:
         raise cleanup_error from None
@@ -265,9 +265,9 @@ async def _communicate_with_process(process, timeout: float) -> tuple[bytes, byt
     except asyncio.TimeoutError as exc:
         original_error = exc
 
-    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
+    cleanup_error = await _ensure_process_terminated(process)
     _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation or cleanup_cancelled:
+    if cancellation:
         raise asyncio.CancelledError() from None
     if cleanup_error is not None:
         raise cleanup_error from None
