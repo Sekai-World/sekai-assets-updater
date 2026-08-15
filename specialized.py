@@ -22,6 +22,7 @@ SPECIALIZED_BUNDLE_PREFIXES = {
 }
 CHART_SOURCE_CONCURRENCY = 4
 CHART_SOURCE_TERMINATE_TIMEOUT = 5
+DEFAULT_CHART_JACKET_BASE_URL = "https://storage.sekai.best/sekai-{region}-assets/music/jacket"
 
 
 def mode_uses_bundle_pipeline(mode: str) -> bool:
@@ -205,6 +206,16 @@ def music_id_from_score_path(score_path: StdPath) -> int:
     return int(score_path.parent.name.split("_", 1)[0])
 
 
+def get_chart_jacket_url(config, region: str, music_id: int) -> str:
+    """Build a chart jacket URL from the configured or legacy base URL."""
+    jacket_base_url = getattr(config, "CHART_JACKET_BASE_URL", None)
+    if not jacket_base_url:
+        jacket_base_url = DEFAULT_CHART_JACKET_BASE_URL.format(region=region)
+    padded_id = str(music_id).zfill(3)
+    jacket_name = f"jacket_s_{padded_id}.png"
+    return f"{jacket_base_url.rstrip('/')}/jacket_s_{padded_id}/{jacket_name}"
+
+
 async def _render_charts(config, extracted_dir: StdPath) -> None:
     score_files = collect_score_files(extracted_dir)
     if not score_files:
@@ -228,7 +239,6 @@ async def _render_charts(config, extracted_dir: StdPath) -> None:
                 "Skipping chart %s: music id %s is not in musics.json", score_file, music_id
             )
             return
-        padded_id = str(music_id).zfill(3)
         chart_path = extracted_dir / "charts" / region / str(music_id) / f"{score_file.stem}.svg"
         chart_path.parent.mkdir(parents=True, exist_ok=True)
         async with semaphore:
@@ -236,7 +246,7 @@ async def _render_charts(config, extracted_dir: StdPath) -> None:
                 score_file.as_posix(),
                 chart_path.as_posix(),
                 music,
-                f"https://storage.sekai.best/sekai-{region}-assets/music/jacket/jacket_s_{padded_id}/jacket_s_{padded_id}.png",
+                get_chart_jacket_url(config, region, music_id),
             )
         logger.info("Rendered chart for %s to %s", score_file, chart_path)
 

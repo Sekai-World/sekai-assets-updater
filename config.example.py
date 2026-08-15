@@ -115,3 +115,6 @@ ASSET_REMOTE_STORAGE = [
 # live2d/charts always runs its corresponding post-processor.
 ENABLE_LIVE2D_POSTPROCESS = False
 ENABLE_CHARTS_POSTPROCESS = False
+# Optional base URL for chart jacket images. When unset, charts use
+# https://storage.sekai.best/sekai-{region}-assets/music/jacket.
+CHART_JACKET_BASE_URL = None

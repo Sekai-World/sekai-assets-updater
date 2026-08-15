@@ -51,6 +51,7 @@ class ConfigLike(Protocol):
     ASSET_LOCAL_EXTRACTED_DIR: Optional[Path]
     ASSET_LOCAL_BUNDLE_CACHE_DIR: Optional[Path]
     LIVE2D_BUNDLE_CACHE_DIR: Optional[Path]
+    CHART_JACKET_BASE_URL: Optional[str]
     ASSET_REMOTE_STORAGE: Optional[list[dict[str, Any]]]
 
 
