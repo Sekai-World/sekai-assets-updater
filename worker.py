@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import os
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from helpers import (
     upload_to_storage,
 )
 from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
+from specialized import retains_live2d_extracted_outputs
 
 logger = logging.getLogger("asset_updater")
 
@@ -59,6 +61,13 @@ def get_bundle_cache_path(config, bundle: Dict[str, Any]):
     if root is None or not bundle_name:
         return None
     return root / bundle_name
+
+
+def _configured_path(value) -> Path | None:
+    """Normalize configured filesystem paths from either pathlib or anyio."""
+    if isinstance(value, (str, os.PathLike)):
+        return Path(os.fspath(value))
+    return None
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -278,8 +287,8 @@ async def _download_stage(
                         worker_cookie,
                     )
 
-                bundle_cache_root = get_bundle_cache_root(config, bundle)
-                if isinstance(bundle_cache_root, Path):
+                bundle_cache_root = _configured_path(get_bundle_cache_root(config, bundle))
+                if bundle_cache_root is not None:
                     bundle_cache_root = Path(prepare_secure_directory(bundle_cache_root).as_posix())
                     bundle_save_path = Path(
                         resolve_secure_path(
@@ -287,7 +296,7 @@ async def _download_stage(
                             bundle["bundleName"],
                         ).as_posix()
                     )
-                    bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
+                    await bundle_save_path.parent.mkdir(parents=True, exist_ok=True)
                     download_root = bundle_cache_root
                     download_relative_path = bundle_save_path.relative_to(
                         bundle_cache_root
@@ -385,22 +394,33 @@ async def _extract_stage(
             handed_to_upload = False
             try:
                 bundle_cache_root = None
-                configured_bundle_cache_root = get_bundle_cache_root(config, artifact.bundle)
-                if isinstance(configured_bundle_cache_root, Path):
+                configured_bundle_cache_root = _configured_path(
+                    get_bundle_cache_root(config, artifact.bundle)
+                )
+                if configured_bundle_cache_root is not None:
                     bundle_cache_root = Path(
                         prepare_secure_directory(configured_bundle_cache_root).as_posix()
                     )
 
-                if isinstance(config.ASSET_LOCAL_EXTRACTED_DIR, Path):
+                configured_extracted_root = _configured_path(config.ASSET_LOCAL_EXTRACTED_DIR)
+                if configured_extracted_root is not None:
                     configured_root = Path(
-                        prepare_secure_directory(config.ASSET_LOCAL_EXTRACTED_DIR).as_posix()
+                        prepare_secure_directory(configured_extracted_root).as_posix()
                     )
-                    identity_root = configured_root / _bundle_staging_identity(
-                        artifact.bundle.get("bundleName")
-                    )
-                    extracted_save_path = Path(
-                        prepare_secure_directory(identity_root / uuid.uuid4().hex).as_posix()
-                    )
+                    if is_live2d_bundle(artifact.bundle) and retains_live2d_extracted_outputs(
+                        config
+                    ):
+                        # Motion restoration consumes the aggregate live2d/model
+                        # tree after the pipeline completes. Keep those outputs in
+                        # the run workspace rather than per-bundle staging roots.
+                        extracted_save_path = configured_root
+                    else:
+                        identity_root = configured_root / _bundle_staging_identity(
+                            artifact.bundle.get("bundleName")
+                        )
+                        extracted_save_path = Path(
+                            prepare_secure_directory(identity_root / uuid.uuid4().hex).as_posix()
+                        )
                     remove_extracted_after_upload = False
                 else:
                     tmp_extracted_save_dir = tempfile.TemporaryDirectory(delete=False)

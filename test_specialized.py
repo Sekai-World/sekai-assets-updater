@@ -16,6 +16,7 @@ from specialized import (
     mode_uses_bundle_pipeline,
     needs_live2d_bundle_cache,
     needs_shared_workspace,
+    retains_live2d_extracted_outputs,
 )
 from bundle import is_live2d_bundle
 from worker import get_bundle_cache_path, get_bundle_cache_root
@@ -27,8 +28,18 @@ class SpecializedHelpersTest(unittest.TestCase):
             ENABLE_LIVE2D_POSTPROCESS=False,
             ENABLE_CHARTS_POSTPROCESS=False,
             ASSET_REMOTE_STORAGE=[
-                {"type": "live2d", "base": "live", "program": "rclone", "args": ["copy", "src", "dst"]},
-                {"type": "charts", "base": "charts", "program": "rclone", "args": ["copy", "src", "dst"]},
+                {
+                    "type": "live2d",
+                    "base": "live",
+                    "program": "rclone",
+                    "args": ["copy", "src", "dst"],
+                },
+                {
+                    "type": "charts",
+                    "base": "charts",
+                    "program": "rclone",
+                    "args": ["copy", "src", "dst"],
+                },
             ],
             ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
             ASSET_LOCAL_EXTRACTED_DIR=None,
@@ -85,8 +96,12 @@ class SpecializedHelpersTest(unittest.TestCase):
             {"type": "live2d", "base": "live"},
             {"type": "charts", "base": "charts"},
         ]
-        self.assertEqual(get_specialized_storage(config, "live2d"), [config.ASSET_REMOTE_STORAGE[1]])
-        self.assertEqual(get_specialized_storage(config, "charts"), [config.ASSET_REMOTE_STORAGE[2]])
+        self.assertEqual(
+            get_specialized_storage(config, "live2d"), [config.ASSET_REMOTE_STORAGE[1]]
+        )
+        self.assertEqual(
+            get_specialized_storage(config, "charts"), [config.ASSET_REMOTE_STORAGE[2]]
+        )
 
     def test_specialized_mode_prefixes_are_mandatory(self):
         bundles = {
@@ -150,6 +165,15 @@ class SpecializedHelpersTest(unittest.TestCase):
         config.LIVE2D_BUNDLE_CACHE_DIR = Path("live2d-cache")
         self.assertFalse(needs_shared_workspace("charts", config))
         self.assertFalse(needs_live2d_bundle_cache("live2d", config))
+
+    def test_live2d_outputs_are_retained_for_forced_or_enabled_postprocess(self):
+        config = self.config()
+        self.assertFalse(retains_live2d_extracted_outputs(config))
+        config.ENABLE_LIVE2D_POSTPROCESS = True
+        self.assertTrue(retains_live2d_extracted_outputs(config))
+        config.ENABLE_LIVE2D_POSTPROCESS = False
+        config.UPDATER_MODE = "live2d"
+        self.assertTrue(retains_live2d_extracted_outputs(config))
 
     def test_charts_have_no_automatic_bundle_prefix(self):
         config = self.config()

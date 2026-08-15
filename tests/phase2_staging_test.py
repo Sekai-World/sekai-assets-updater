@@ -8,6 +8,7 @@ import pytest
 from anyio import Path as AnyioPath
 
 import worker
+import specialized
 
 
 def _config(
@@ -124,6 +125,70 @@ def test_configured_bundle_outputs_use_distinct_retained_roots(tmp_path: Path, m
     assert asyncio.run(second_out.extracted_save_path.exists())
     assert first_out.exported_list[0].parent == first_out.extracted_save_path
     assert second_out.exported_list[0].parent == second_out.extracted_save_path
+
+
+def test_live2d_postprocess_outputs_use_the_shared_extraction_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "extracted"
+    artifact = worker.PipelineArtifact(
+        "a", {"bundleName": "live2d/model/base"}, AnyioPath(tmp_path / "bundle")
+    )
+    config = _config(root)
+    config.UPDATER_MODE = "live2d"
+
+    output_artifact, failures = _run_extract_stage(
+        artifact,
+        config,
+        monkeypatch,
+        "live2d/model/base/base.model3.json",
+    )
+
+    assert not failures
+    assert output_artifact.extracted_save_path == AnyioPath(root)
+    assert asyncio.run(AnyioPath(root / "live2d/model/base/base.model3.json").exists())
+
+
+def test_live2d_postprocess_uses_model_tree_from_pathlib_workspace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "live2d-workspace"
+    artifact = worker.PipelineArtifact(
+        "a",
+        {
+            "bundleName": "live2d/model/08shizuku_cloth001",
+            "paths": ["StartApp/live2d/model/v1/main/08_shizuku/08shizuku_cloth001"],
+            "cacheFileName": "193307e96f564d5666c08b7cc218263d",
+        },
+        AnyioPath(tmp_path / "bundle"),
+    )
+    config = _config(root)
+    config.ASSET_LOCAL_EXTRACTED_DIR = root
+    config.UPDATER_MODE = "live2d"
+    config.LIVE2D_BUNDLE_CACHE_DIR = tmp_path / "live2d-bundles"
+    restored: list[tuple[AnyioPath, AnyioPath, AnyioPath]] = []
+
+    async def fake_restore(motion_root, motion_output, model_root, *_args, **_kwargs):
+        restored.append((motion_root, motion_output, model_root))
+
+    monkeypatch.setattr(specialized, "restore_live2d_motions", fake_restore)
+    _run_extract_stage(
+        artifact,
+        config,
+        monkeypatch,
+        "live2d/model/08_shizuku/08shizuku_cloth001.model3.json",
+    )
+
+    asyncio.run(specialized.run_specialized_postprocess("live2d", config))
+
+    assert restored == [
+        (
+            AnyioPath(tmp_path / "live2d-bundles/live2d/motion"),
+            AnyioPath(root / "live2d/motion"),
+            AnyioPath(root / "live2d/model"),
+        )
+    ]
+    assert (root / "live2d/model/08_shizuku/08shizuku_cloth001.model3.json").is_file()
 
 
 def test_configured_output_is_retained_and_upload_uses_only_its_root(

@@ -69,6 +69,13 @@ def needs_live2d_bundle_cache(mode: str, config) -> bool:
     )
 
 
+def retains_live2d_extracted_outputs(config) -> bool:
+    """Whether Live2D extraction must remain available for post-processing."""
+    return "live2d" in get_enabled_specialized_modes(
+        getattr(config, "UPDATER_MODE", "assets"), config
+    )
+
+
 def get_specialized_storage(config, mode: str) -> list[dict]:
     """Return asset storage targets configured for a specialized mode."""
     if mode not in SPECIALIZED_MODES:
