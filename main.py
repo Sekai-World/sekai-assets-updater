@@ -479,7 +479,16 @@ async def _complete_with_empty_download_list(
     start_time: float,
     paths: StatePaths | None = None,
 ) -> None:
-    logger.info("RUN | result=noop | reason=no_items | postprocess=true")
+    # An ordinary assets run can legitimately have no current downloads.  Do
+    # not treat that as a signal to run enabled specialized processors: their
+    # inputs are produced by this run, and a fresh temporary workspace is
+    # intentionally empty in this case.  Forced specialized modes retain
+    # their explicit rebuild/repair semantics.
+    should_postprocess = mode != "assets"
+    logger.info(
+        "RUN | result=noop | reason=no_items | postprocess=%s",
+        should_postprocess,
+    )
     if pending_items_outside_mode:
         if paths is None:
             await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
@@ -493,7 +502,8 @@ async def _complete_with_empty_download_list(
         await cfg.DL_LIST_CACHE_PATH.unlink(missing_ok=True)
     else:
         durable_unlink(paths.queue)
-    await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
+    if should_postprocess:
+        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
 

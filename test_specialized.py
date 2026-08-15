@@ -4,6 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import specialized
+import main
+from anyio import Path as AsyncPath
 from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes
 from helpers import select_bundles_for_download
 from specialized import (
@@ -211,6 +213,38 @@ class SpecializedHelpersTest(unittest.TestCase):
 
 
 class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_assets_noop_does_not_run_specialized_postprocessing(self):
+        config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))
+
+        with patch.object(
+            main, "_run_enabled_specialized_postprocess", new=AsyncMock()
+        ) as postprocess:
+            await main._complete_with_empty_download_list(
+                config,
+                "assets",
+                [],
+                True,
+                0,
+            )
+
+        postprocess.assert_not_awaited()
+
+    async def test_forced_specialized_noop_retains_postprocessing(self):
+        config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))
+
+        with patch.object(
+            main, "_run_enabled_specialized_postprocess", new=AsyncMock()
+        ) as postprocess:
+            await main._complete_with_empty_download_list(
+                config,
+                "live2d",
+                [],
+                True,
+                0,
+            )
+
+        postprocess.assert_awaited_once_with("live2d", config, True)
+
     async def test_live2d_postprocess_uses_live2d_sources_and_storage(self):
         import tempfile
 
