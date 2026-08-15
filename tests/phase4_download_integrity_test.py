@@ -101,6 +101,11 @@ def _unityfs(*, declared_size: int | None = None) -> bytes:
     )
 
 
+def _unityfs_with_payload(size: int = 1024) -> bytes:
+    header = _unityfs(declared_size=size)
+    return header + b"x" * (size - len(header))
+
+
 def test_plain_unityfs_is_promoted_atomically(tmp_path: Path) -> None:
     data = _unityfs()
     target = _run(
@@ -142,6 +147,45 @@ def test_file_size_mismatch_preserves_existing(tmp_path: Path) -> None:
     body = b"\x20\x00\x00\x00" + _unityfs()
     with pytest.raises(bundle.DownloadIntegrityError):
         _run(tmp_path, body, bundle_data={"fileSize": 1})
+    assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("delta", [-1024, 1024])
+def test_live2d_file_size_delta_within_observed_bounds_is_accepted(
+    tmp_path: Path, delta: int
+) -> None:
+    data = _unityfs_with_payload()
+    target = _run(
+        tmp_path,
+        data,
+        bundle_data={"bundleName": "live2d/model", "fileSize": len(data) + delta},
+    )
+    assert target.read_bytes() == data
+
+
+@pytest.mark.parametrize("delta", [-1025, 1025])
+def test_live2d_file_size_delta_outside_observed_bounds_is_rejected(
+    tmp_path: Path, delta: int
+) -> None:
+    data = _unityfs_with_payload()
+    with pytest.raises(bundle.DownloadIntegrityError):
+        _run(
+            tmp_path,
+            data,
+            bundle_data={"bundleName": "live2d/model", "fileSize": len(data) + delta},
+        )
+    assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
+
+
+@pytest.mark.parametrize("delta", [-1024, 1024])
+def test_non_live2d_file_size_delta_is_rejected(tmp_path: Path, delta: int) -> None:
+    data = _unityfs_with_payload()
+    with pytest.raises(bundle.DownloadIntegrityError):
+        _run(
+            tmp_path,
+            data,
+            bundle_data={"bundleName": "character/model", "fileSize": len(data) + delta},
+        )
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
