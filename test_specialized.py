@@ -1,7 +1,9 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
+import specialized
 from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes
 from helpers import select_bundles_for_download
 from specialized import (
@@ -17,6 +19,7 @@ from specialized import (
     needs_live2d_bundle_cache,
     needs_shared_workspace,
     retains_live2d_extracted_outputs,
+    run_specialized_postprocess,
 )
 from bundle import is_live2d_bundle
 from worker import get_bundle_cache_path, get_bundle_cache_root
@@ -205,3 +208,85 @@ class SpecializedHelpersTest(unittest.TestCase):
             self.assertTrue(has_local_chart_sources(root))
             self.assertFalse(needs_temporary_chart_source(root, root))
             self.assertFalse(needs_temporary_chart_source(root, None))
+
+
+class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live2d_postprocess_uses_live2d_sources_and_storage(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            extracted_dir = root / "extracted"
+            model_dir = extracted_dir / "live2d" / "model" / "unit"
+            model_dir.mkdir(parents=True)
+            (model_dir / "unit.model3.json").write_text("{}", encoding="utf-8")
+            bundle_cache = root / "bundle-cache"
+            config = SimpleNamespace(
+                ASSET_LOCAL_EXTRACTED_DIR=extracted_dir,
+                LIVE2D_BUNDLE_CACHE_DIR=bundle_cache,
+                UNITY_VERSION="2022.3",
+                REGION=SimpleNamespace(name="JP"),
+                ASSET_REMOTE_STORAGE=[
+                    {"type": "live2d", "base": "live-target", "program": "rclone", "args": []},
+                    {"type": "charts", "base": "chart-target", "program": "rclone", "args": []},
+                ],
+            )
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+                    await run_specialized_postprocess("live2d", config)
+
+            restore.assert_awaited_once_with(
+                specialized.Path(str(bundle_cache / "live2d" / "motion")),
+                specialized.Path(str(extracted_dir / "live2d" / "motion")),
+                specialized.Path(str(extracted_dir / "live2d" / "model")),
+                "2022.3",
+                config=config,
+            )
+            upload.assert_awaited_once_with(
+                specialized.Path(str(extracted_dir / "live2d")),
+                specialized.Path("live-target/live2d"),
+                "rclone",
+                [],
+                config=config,
+            )
+
+    async def test_charts_postprocess_uses_local_scores_and_chart_storage(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            extracted_dir = Path(temp_dir)
+            score = extracted_dir / "music" / "music_score" / "001_song" / "master.txt"
+            score.parent.mkdir(parents=True)
+            score.write_text("# SUS", encoding="utf-8")
+            config = SimpleNamespace(
+                ASSET_LOCAL_EXTRACTED_DIR=extracted_dir,
+                REGION=SimpleNamespace(name="JP"),
+                ASSET_REMOTE_STORAGE=[
+                    {"type": "live2d", "base": "live-target", "program": "rclone", "args": []},
+                    {"type": "charts", "base": "chart-target", "program": "rclone", "args": []},
+                ],
+            )
+
+            rendered_dirs = []
+
+            async def render_charts(_config, source_dir):
+                rendered_dirs.append(source_dir)
+                (source_dir / "charts" / "jp").mkdir(parents=True)
+
+            with patch.object(
+                specialized, "fetch_chart_sources_from_storage", new=AsyncMock()
+            ) as fetch:
+                with patch.object(specialized, "_render_charts", new=render_charts) as render:
+                    with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+                        await run_specialized_postprocess("charts", config)
+
+            fetch.assert_not_awaited()
+            self.assertEqual(rendered_dirs, [extracted_dir])
+            upload.assert_awaited_once_with(
+                specialized.Path(str(extracted_dir / "charts" / "jp")),
+                specialized.Path("chart-target/jp"),
+                "rclone",
+                [],
+                config=config,
+            )

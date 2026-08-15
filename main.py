@@ -73,7 +73,7 @@ def require_config() -> ConfigLike:
     return config
 
 
-def validate_config(cfg: ConfigLike) -> None:
+def validate_config(cfg: ConfigLike, mode: str = "assets") -> None:
     """Reject unsafe or unusable runtime settings before starting the pipeline."""
     concurrency_names = (
         "MAX_CONCURRENCY",
@@ -130,10 +130,35 @@ def validate_config(cfg: ConfigLike) -> None:
     backend = str(getattr(cfg, "HCA_DECODE_BACKEND", "auto")).strip().lower()
     if backend == "vgmstream":
         require_program(os.environ.get("VGMSTREAM_CLI", "vgmstream-cli"), "vgmstream-cli")
-    if getattr(cfg, "ASSET_REMOTE_STORAGE", None):
-        for index, storage in enumerate(cfg.ASSET_REMOTE_STORAGE):
+    storage_targets = getattr(cfg, "ASSET_REMOTE_STORAGE", None) or []
+    if storage_targets:
+        for index, storage in enumerate(storage_targets):
             if storage.get("type") == "normal":
                 require_program(storage.get("program"), f"upload storage {index}")
+
+    enabled_specialized_modes = get_enabled_specialized_modes(mode, cfg)
+    for specialized_mode in enabled_specialized_modes:
+        for index, storage in enumerate(storage_targets):
+            if storage.get("type") == specialized_mode:
+                require_program(
+                    storage.get("program"),
+                    f"{specialized_mode} upload storage {index}",
+                )
+
+    if "live2d" in enabled_specialized_modes:
+        unity_version = getattr(cfg, "UNITY_VERSION", None)
+        if not isinstance(unity_version, str) or not unity_version.strip():
+            errors.append("LIVE2D post-processing requires UNITY_VERSION")
+
+    if (
+        "charts" in enabled_specialized_modes
+        and getattr(cfg, "ASSET_LOCAL_EXTRACTED_DIR", None) is None
+    ):
+        if not any(storage.get("type") == "normal" for storage in storage_targets):
+            errors.append(
+                "Charts post-processing requires ASSET_LOCAL_EXTRACTED_DIR or a normal "
+                "ASSET_REMOTE_STORAGE target for chart sources"
+            )
 
     if errors:
         raise ValueError("Invalid configuration:\n- " + "\n- ".join(errors))
@@ -764,7 +789,7 @@ def cli():
     spec.loader.exec_module(loaded_config)
     sys.modules["config"] = loaded_config
     config = cast(ConfigLike, loaded_config)
-    validate_config(config)
+    validate_config(config, mode=args.mode)
 
     # Set the logging level
     log_level = logging.INFO
