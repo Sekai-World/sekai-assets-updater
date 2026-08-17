@@ -91,43 +91,6 @@ class RetryableDownloadError(DownloadIntegrityError):
         self.retry_after = retry_after
 
 
-def _resolve_expected_bundle_size(bundle: Dict | None) -> int | None:
-    """Resolve the optional manifest byte size without coercing untrusted values."""
-    if not bundle:
-        return None
-    provided = [(key, bundle[key]) for key in ("fileSize", "size") if key in bundle]
-    if not provided:
-        return None
-    values = []
-    for key, value in provided:
-        if type(value) is not int or value < 0:
-            raise DownloadIntegrityError(f"{key} must be a non-negative integer")
-        values.append(value)
-    if len(values) == 2 and values[0] != values[1]:
-        raise DownloadIntegrityError("fileSize and size conflict")
-    return values[0]
-
-
-_LIVE2D_BUNDLE_SIZE_DELTA_MIN = -1024
-_LIVE2D_BUNDLE_SIZE_DELTA_MAX = 1024
-
-
-def _expected_bundle_size_matches(
-    expected_bundle: Dict | None, expected_size: int | None, stored_bytes: int
-) -> bool:
-    """Return whether stored bytes satisfy the manifest-size integrity policy.
-
-    Live2D metadata can differ from the decoded UnityFS bytes by the observed,
-    bounded delta below. All other bundles require an exact match.
-    """
-    if expected_size is None or expected_size == stored_bytes:
-        return True
-    if not expected_bundle or not is_live2d_bundle(expected_bundle):
-        return False
-    delta = expected_size - stored_bytes
-    return _LIVE2D_BUNDLE_SIZE_DELTA_MIN <= delta <= _LIVE2D_BUNDLE_SIZE_DELTA_MAX
-
-
 _UNITYFS_SIGNATURE = b"UnityFS\0"
 _UNITYFS_FIELD_LIMIT = 1024
 _UNITYFS_FIXED_HEADER_SIZE = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4
@@ -2020,7 +1983,6 @@ async def download_deobfuscate_bundle(
     headers: Dict[str, str],
     config=None,
     session: aiohttp.ClientSession | None = None,
-    expected_bundle: Dict | None = None,
 ) -> None:
     """Download, validate, and atomically promote a bundle.
 
@@ -2030,7 +1992,6 @@ async def download_deobfuscate_bundle(
     """
     bundle_save_path = Path(resolve_secure_path(trusted_root, relative_destination).as_posix())
     validate_output_target(trusted_root, bundle_save_path)
-    expected_size = _resolve_expected_bundle_size(expected_bundle)
     max_retries = get_download_max_retries(config)
     retry_base_delay = get_download_retry_base_delay(config)
     retry_max_delay = get_download_retry_max_delay(config)
@@ -2133,8 +2094,6 @@ async def download_deobfuscate_bundle(
                 if stored_bytes == 0:
                     raise DownloadIntegrityError("downloaded bundle is empty")
                 _validate_unityfs_bundle(temporary_path, stored_bytes)
-                if not _expected_bundle_size_matches(expected_bundle, expected_size, stored_bytes):
-                    raise DownloadIntegrityError("fileSize does not match stored bytes")
                 validate_output_target(trusted_root, bundle_save_path)
                 os.replace(temporary_path, StdPath(bundle_save_path.as_posix()))
                 temporary_path = None

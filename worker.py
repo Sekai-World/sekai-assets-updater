@@ -11,7 +11,6 @@ import aiohttp
 from anyio import Path
 
 from bundle import (
-    _resolve_expected_bundle_size,
     download_deobfuscate_bundle,
     extract_asset_bundle,
     is_live2d_bundle,
@@ -112,7 +111,12 @@ def get_stage_queue_size(config, downstream_concurrency: int) -> int:
 
 
 def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
-    return _resolve_expected_bundle_size(bundle) or 0
+    """Return an optional manifest size only for disk-space reservation."""
+    for field in ("fileSize", "size"):
+        value = bundle.get(field)
+        if type(value) is int and value >= 0:
+            return value
+    return 0
 
 
 def _bundle_staging_identity(bundle_name: Any) -> str:
@@ -311,7 +315,6 @@ async def _download_stage(
                             headers=build_cdn_headers(cookie),
                             config=config,
                             session=session,
-                            expected_bundle=bundle,
                         )
                 else:
                     await download_deobfuscate_bundle(
@@ -321,7 +324,6 @@ async def _download_stage(
                         headers=build_cdn_headers(cookie),
                         config=config,
                         session=session,
-                        expected_bundle=bundle,
                     )
 
                 await extract_queue.put(

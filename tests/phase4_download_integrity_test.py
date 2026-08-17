@@ -83,7 +83,6 @@ def _start_run(tmp_path: Path, body: bytes, *, bundle_data=None, headers=None, e
         {},
         config=config,
         session=_Session(response),
-        expected_bundle=bundle_data,
     )
     return target, download
 
@@ -108,11 +107,7 @@ def _unityfs_with_payload(size: int = 1024) -> bytes:
 
 def test_plain_unityfs_is_promoted_atomically(tmp_path: Path) -> None:
     data = _unityfs()
-    target = _run(
-        tmp_path,
-        data,
-        bundle_data={"fileSize": len(data)},
-    )
+    target = _run(tmp_path, data)
     assert target.read_bytes() == data
 
 
@@ -121,7 +116,7 @@ def test_obfuscated_unityfs_is_deobfuscated_and_promoted(tmp_path: Path) -> None
     mask = (b"\xff" * 5 + b"\x00" * 3) * 16
     encoded_header = bytes(a ^ b for a, b in zip(plain[:128], mask))
     body = b"\x10\x00\x00\x00" + encoded_header + plain[128:]
-    target = _run(tmp_path, body, bundle_data={"fileSize": len(plain)})
+    target = _run(tmp_path, body)
     assert target.read_bytes() == plain
 
 
@@ -143,75 +138,34 @@ def test_content_length_mismatch_preserves_existing(tmp_path: Path) -> None:
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
-def test_file_size_mismatch_preserves_existing(tmp_path: Path) -> None:
-    body = b"\x20\x00\x00\x00" + _unityfs()
+def test_unityfs_declared_size_mismatch_preserves_existing(tmp_path: Path) -> None:
+    body = _unityfs(declared_size=1)
     with pytest.raises(bundle.DownloadIntegrityError):
-        _run(tmp_path, body, bundle_data={"fileSize": 1})
+        _run(tmp_path, body)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
-@pytest.mark.parametrize("delta", [-1024, 1024])
-def test_live2d_file_size_delta_within_observed_bounds_is_accepted(
-    tmp_path: Path, delta: int
+@pytest.mark.parametrize(
+    "bundle_data",
+    [
+        {"fileSize": 1},
+        {"size": 2},
+        {"fileSize": 1, "size": 2},
+        {"bundleName": "live2d/model", "fileSize": 999999},
+        {"fileSize": "not-an-int"},
+    ],
+)
+def test_manifest_size_metadata_does_not_participate_in_integrity_validation(
+    tmp_path: Path, bundle_data: dict[str, int | str]
 ) -> None:
     data = _unityfs_with_payload()
-    target = _run(
-        tmp_path,
-        data,
-        bundle_data={"bundleName": "live2d/model", "fileSize": len(data) + delta},
-    )
+    target = _run(tmp_path, data, bundle_data=bundle_data)
     assert target.read_bytes() == data
-
-
-@pytest.mark.parametrize("delta", [-1025, 1025])
-def test_live2d_file_size_delta_outside_observed_bounds_is_rejected(
-    tmp_path: Path, delta: int
-) -> None:
-    data = _unityfs_with_payload()
-    with pytest.raises(bundle.DownloadIntegrityError):
-        _run(
-            tmp_path,
-            data,
-            bundle_data={"bundleName": "live2d/model", "fileSize": len(data) + delta},
-        )
-    assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
-
-
-@pytest.mark.parametrize("delta", [-1024, 1024])
-def test_non_live2d_file_size_delta_is_rejected(tmp_path: Path, delta: int) -> None:
-    data = _unityfs_with_payload()
-    with pytest.raises(bundle.DownloadIntegrityError):
-        _run(
-            tmp_path,
-            data,
-            bundle_data={"bundleName": "character/model", "fileSize": len(data) + delta},
-        )
-    assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
-
-
-def test_size_only_metadata_is_validated(tmp_path: Path) -> None:
-    data = _unityfs()
-    target = _run(tmp_path, data, bundle_data={"size": len(data)})
-    assert target.read_bytes() == data
-
-
-def test_conflicting_size_metadata_is_rejected(tmp_path: Path) -> None:
-    _, download = _start_run(tmp_path, _unityfs(), bundle_data={"fileSize": 1, "size": 2})
-    with pytest.raises(bundle.DownloadIntegrityError):
-        asyncio.run(download)
 
 
 def test_same_size_malformed_unityfs_is_rejected(tmp_path: Path) -> None:
     data = b"UnityFS\0" + b"x" * 35
-    _, download = _start_run(tmp_path, data, bundle_data={"fileSize": len(data)})
-    with pytest.raises(bundle.DownloadIntegrityError):
-        asyncio.run(download)
-    assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
-
-
-def test_invalid_expected_metadata_is_rejected_before_promotion(tmp_path: Path) -> None:
-    body = _unityfs()
-    _, download = _start_run(tmp_path, body, bundle_data={"fileSize": "not-an-int"})
+    _, download = _start_run(tmp_path, data)
     with pytest.raises(bundle.DownloadIntegrityError):
         asyncio.run(download)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
