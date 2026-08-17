@@ -307,6 +307,11 @@ def get_http_session_options(config=None) -> dict[str, object]:
     }
 
 
+def get_download_http_session_options(config=None) -> dict[str, object]:
+    """Build direct-CDN session options while retaining configured timeouts."""
+    return {"timeout": get_request_timeout(config)}
+
+
 def _get_external_process_timeout(config=None) -> float:
     value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", DEFAULT_EXTERNAL_PROCESS_TIMEOUT)
     try:

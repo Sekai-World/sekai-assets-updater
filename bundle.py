@@ -38,6 +38,7 @@ from constants import (
 )
 from helpers import (
     get_download_max_retries,
+    get_download_http_session_options,
     get_download_retry_base_delay,
     get_download_retry_max_delay,
     get_http_session_options,
@@ -2115,7 +2116,7 @@ async def download_deobfuscate_bundle(
                 await fetch_once(session)
             else:
                 async with aiohttp.ClientSession(
-                    **get_http_session_options(config)
+                    **get_download_http_session_options(config)
                 ) as retry_session:
                     await fetch_once(retry_session)
             return

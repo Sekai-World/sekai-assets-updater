@@ -96,6 +96,33 @@ def test_common_http_options_include_proxy_and_configured_timeout():
     assert options["timeout"].total == 17  # type: ignore[union-attr]
 
 
+def test_download_http_options_omit_proxy_and_keep_configured_timeout():
+    options = helpers.get_download_http_session_options(_config())
+
+    assert "proxy" not in options
+    assert isinstance(options["timeout"], ClientTimeout)
+    assert options["timeout"].total == 17  # type: ignore[union-attr]
+
+
+def test_worker_cdn_session_omits_proxy(monkeypatch):
+    _Session.instances.clear()
+    monkeypatch.setattr(worker.aiohttp, "ClientSession", _Session)
+    config = SimpleNamespace(
+        PROXY_URL="http://proxy.test:8080",
+        REQUEST_TIMEOUT=17,
+        MAX_CONCURRENCY_DOWNLOADS=1,
+        MAX_CONCURRENCY_EXTRACTS=1,
+        MAX_CONCURRENCY_UPLOAD_STAGE=1,
+        PIPELINE_STAGE_QUEUE_SIZE=1,
+    )
+
+    assert asyncio.run(worker.run_pipeline([], config, {})) == []
+
+    session = _Session.instances[-1]
+    assert "proxy" not in session.options
+    assert session.options["timeout"].total == 17  # type: ignore[union-attr]
+
+
 def test_public_headers_are_metadata_only_and_cookie_cdn_headers_are_separate():
     config = _config(GAME_COOKIE_URL=None)
 

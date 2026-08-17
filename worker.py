@@ -18,7 +18,7 @@ from bundle import (
 from helpers import (
     build_cdn_headers,
     DownloadDiskSpaceGate,
-    get_http_session_options,
+    get_download_http_session_options,
     sanitize_log_label,
     upload_to_storage,
 )
@@ -579,7 +579,7 @@ async def run_pipeline(
         upload_queue_size,
     )
 
-    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
+    async with aiohttp.ClientSession(**get_download_http_session_options(config)) as session:
         download_tasks = [
             asyncio.create_task(
                 _download_stage(
