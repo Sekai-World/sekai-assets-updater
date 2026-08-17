@@ -149,6 +149,41 @@ def test_live2d_postprocess_outputs_use_the_shared_extraction_root(
     assert asyncio.run(AnyioPath(root / "live2d/model/base/base.model3.json").exists())
 
 
+def test_chart_score_postprocess_outputs_use_the_shared_extraction_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "extracted"
+    artifact = worker.PipelineArtifact(
+        "a", {"bundleName": "music/music_score/001_song"}, AnyioPath(tmp_path / "bundle")
+    )
+    config = _config(root)
+    config.UPDATER_MODE = "assets"
+    config.ENABLE_CHARTS_POSTPROCESS = True
+
+    output_artifact, failures = _run_extract_stage(
+        artifact, config, monkeypatch, "music/music_score/001_song/master.txt"
+    )
+
+    assert not failures
+    assert output_artifact.extracted_save_path == AnyioPath(root)
+
+
+def test_specialized_bundle_stays_isolated_without_matching_postprocess(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root = tmp_path / "extracted"
+    artifact = worker.PipelineArtifact(
+        "a", {"bundleName": "music/music_score/001_song"}, AnyioPath(tmp_path / "bundle")
+    )
+    config = _config(root)
+
+    output_artifact, failures = _run_extract_stage(artifact, config, monkeypatch, "score.txt")
+
+    assert not failures
+    assert output_artifact.extracted_save_path != AnyioPath(root)
+    assert output_artifact.extracted_save_path.is_relative_to(AnyioPath(root))
+
+
 def test_live2d_postprocess_uses_model_tree_from_pathlib_workspace(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -13,6 +13,7 @@ from anyio import Path
 from bundle import (
     download_deobfuscate_bundle,
     extract_asset_bundle,
+    is_chart_score_bundle,
     is_live2d_bundle,
 )
 from helpers import (
@@ -23,7 +24,7 @@ from helpers import (
     upload_to_storage,
 )
 from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
-from specialized import retains_live2d_extracted_outputs
+from specialized import get_enabled_specialized_modes
 
 logger = logging.getLogger("asset_updater")
 
@@ -59,6 +60,14 @@ def get_bundle_cache_path(config, bundle: Dict[str, Any]):
     if root is None or not bundle_name:
         return None
     return root / bundle_name
+
+
+def _uses_aggregate_workspace(bundle: Dict[str, Any], config) -> bool:
+    """Route only specialized bundle outputs into the run workspace."""
+    enabled_modes = get_enabled_specialized_modes(getattr(config, "UPDATER_MODE", "assets"), config)
+    return ("live2d" in enabled_modes and is_live2d_bundle(bundle)) or (
+        "charts" in enabled_modes and is_chart_score_bundle(bundle)
+    )
 
 
 def _configured_path(value) -> Path | None:
@@ -398,9 +407,7 @@ async def _extract_stage(
                     configured_root = Path(
                         prepare_secure_directory(configured_extracted_root).as_posix()
                     )
-                    if is_live2d_bundle(artifact.bundle) and retains_live2d_extracted_outputs(
-                        config
-                    ):
+                    if _uses_aggregate_workspace(artifact.bundle, config):
                         # Motion restoration consumes the aggregate live2d/model
                         # tree after the pipeline completes. Keep those outputs in
                         # the run workspace rather than per-bundle staging roots.

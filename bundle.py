@@ -140,6 +140,11 @@ def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
     return (bundle.get("bundleName") or "").startswith("live2d/")
 
 
+def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
+    """Return whether this individual bundle contains chart score assets."""
+    return (bundle.get("bundleName") or "").startswith("music/music_score/")
+
+
 def _sanitize_concurrency(value) -> int:
     try:
         concurrency = int(value)
