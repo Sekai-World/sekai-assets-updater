@@ -141,11 +141,49 @@ def test_success_clears_queue_only_after_pipeline_success(tmp_path: Path, monkey
         seen_queue_exists.append(_paths(tmp_path).queue.exists())
         return []
 
+    async def verify_postprocess_after_queue_cleanup(*_args, **_kwargs):
+        assert not _paths(tmp_path).queue.exists()
+
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(main, "_run_enabled_specialized_postprocess", verify_postprocess_after_queue_cleanup)
     asyncio.run(main.main(force_full_download=True))
     assert seen_queue_exists == [True]
     assert not _paths(tmp_path).queue.exists()
+
+
+def test_specialized_failure_does_not_restore_successful_download_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    paths = _paths(tmp_path)
+    download_list = [("url", {"bundleName": "bundle", "hash": "stable"})]
+
+    async def successful_download(*_args, **_kwargs):
+        return True
+
+    async def failing_postprocess(*_args, **_kwargs):
+        assert not paths.queue.exists()
+        raise FileNotFoundError("live2d/model is unavailable")
+
+    monkeypatch.setattr(main, "do_download", successful_download)
+    monkeypatch.setattr(main, "_run_enabled_specialized_postprocess", failing_postprocess)
+
+    completion = main._complete_with_download_list(
+        config,
+        "assets",
+        {},
+        None,
+        download_list,
+        [],
+        True,
+        0,
+        paths,
+    )
+    with pytest.raises(FileNotFoundError, match="live2d/model"):
+        asyncio.run(completion)
+
+    assert not paths.queue.exists()
 
 
 def test_partial_failure_persists_exact_failed_subset(tmp_path: Path, monkeypatch) -> None:

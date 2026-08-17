@@ -534,10 +534,10 @@ async def _complete_with_download_list(
     if not is_success:
         await _restore_pending_cache_on_failure(cfg, mode, pending_items_outside_mode, paths)
     else:
-        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
         await _cleanup_pending_cache_on_success(
             cfg, download_list, pending_items_outside_mode, paths
         )
+        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
 
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
