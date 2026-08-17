@@ -309,3 +309,24 @@ def test_lock_contention_blocks_second_main_run(tmp_path: Path, monkeypatch) -> 
             asyncio.run(run)
     finally:
         holder.release()
+
+
+def test_charts_uses_legacy_lock_without_replaying_journal_and_releases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    config.ASSET_LOCAL_EXTRACTED_DIR = AnyioPath(tmp_path / "extracted")
+    paths = state.derive_state_paths(config.DL_LIST_CACHE_PATH)
+    state.create_journal(paths, [], _metadata(), _version(), "must-not-replay")
+    monkeypatch.setattr(main, "config", config)
+
+    async def fake_postprocess(*_args, **_kwargs):
+        with pytest.raises(state.StateLockError, match="already held"):
+            state.StateLock(paths.lock).acquire()
+
+    monkeypatch.setattr(main, "run_specialized_postprocess", fake_postprocess)
+    asyncio.run(main.main(mode="charts"))
+
+    assert paths.journal.exists()
+    released = state.StateLock(paths.lock).acquire()
+    released.release()

@@ -233,6 +233,31 @@ def test_paths_are_predictable_without_backup_selection(tmp_path: Path) -> None:
     assert paths.game_version.name == "version.json"
 
 
+def test_live2d_state_paths_are_owned_separately_but_share_region_lock(tmp_path: Path) -> None:
+    assets = state.derive_active_state_paths(
+        "assets",
+        tmp_path / "dl.json",
+        tmp_path / "metadata.json",
+        tmp_path / "version.json",
+    )
+    live2d = state.derive_active_state_paths(
+        "live2d",
+        tmp_path / "dl.json",
+        tmp_path / "metadata.json",
+        tmp_path / "version.json",
+    )
+
+    assert assets.queue == tmp_path / "dl.json"
+    assert assets.asset_metadata == tmp_path / "metadata.json"
+    assert assets.game_version == tmp_path / "version.json"
+    assert assets.journal == tmp_path / "dl.json.journal"
+    assert live2d.queue == tmp_path / "live2d_dl_list.json"
+    assert live2d.asset_metadata == tmp_path / "live2d_asset_bundle_info.json"
+    assert live2d.game_version == tmp_path / "live2d_version.json"
+    assert live2d.journal == tmp_path / "live2d_dl_list.json.journal"
+    assert live2d.lock == assets.lock
+
+
 def test_state_paths_reject_cross_directory_and_alias_sets(tmp_path: Path) -> None:
     with pytest.raises(state.StateValidationError, match="share one parent"):
         state.derive_state_paths(tmp_path / "dl.json", tmp_path / "other" / "metadata.json")

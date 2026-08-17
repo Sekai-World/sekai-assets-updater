@@ -146,7 +146,9 @@ def test_success_clears_queue_only_after_pipeline_success(tmp_path: Path, monkey
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
-    monkeypatch.setattr(main, "_run_enabled_specialized_postprocess", verify_postprocess_after_queue_cleanup)
+    monkeypatch.setattr(
+        main, "_run_enabled_specialized_postprocess", verify_postprocess_after_queue_cleanup
+    )
     asyncio.run(main.main(force_full_download=True))
     assert seen_queue_exists == [True]
     assert not _paths(tmp_path).queue.exists()

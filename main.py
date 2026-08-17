@@ -39,6 +39,7 @@ from state import (
     StatePaths,
     atomic_write_json,
     create_journal,
+    derive_active_state_paths,
     derive_state_paths,
     durable_unlink,
     load_pending_queue,
@@ -55,6 +56,20 @@ DownloadItem = Tuple[str, Dict[str, Any]]
 
 
 config: Optional[ConfigLike] = None
+
+
+class _StatePathConfig:
+    """Read-through config view with the active mode's durable state paths."""
+
+    def __init__(self, base: ConfigLike, paths: StatePaths) -> None:
+        self._base = base
+        path_type = type(base.DL_LIST_CACHE_PATH)
+        self.DL_LIST_CACHE_PATH = path_type(paths.queue)
+        self.ASSET_BUNDLE_INFO_CACHE_PATH = path_type(paths.asset_metadata)
+        self.GAME_VERSION_JSON_CACHE_PATH = path_type(paths.game_version)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._base, name)
 
 
 def _pending_items_outside_mode(items: List[DownloadItem], mode: str) -> List[DownloadItem]:
@@ -610,6 +625,14 @@ async def _run_main(
     cfg = require_config()
     setattr(cfg, "UPDATER_MODE", mode)
 
+    paths = derive_active_state_paths(
+        mode,
+        cfg.DL_LIST_CACHE_PATH,
+        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
+        cfg.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    active_cfg = cast(ConfigLike, _StatePathConfig(cfg, paths) if mode == "live2d" else cfg)
+
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
     logger.info(
         "RUN | status=start | mode=%s | force_full_download=%s",
@@ -617,20 +640,15 @@ async def _run_main(
         force_full_download,
     )
 
-    await _ensure_run_cache_dirs(cfg)
-    shared_dir = cfg.DL_LIST_CACHE_PATH.parent
+    await _ensure_run_cache_dirs(active_cfg)
+    shared_dir = paths.queue.parent
     prepare_state_directory(shared_dir)
-    paths = derive_state_paths(
-        cfg.DL_LIST_CACHE_PATH,
-        cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
-        cfg.GAME_VERSION_JSON_CACHE_PATH,
-    )
     lock = StateLock(paths.lock)
     lock.acquire()
     try:
         replay_journal(paths)
         await _run_main_locked(
-            cfg,
+            active_cfg,
             update_asset_bundle_info_only,
             force_full_download,
             mode,
@@ -688,6 +706,25 @@ async def _run_main_locked(
     )
 
 
+async def _run_charts_with_shared_lock(
+    cfg: ConfigLike, *, extracted_dir_is_temporary: bool = False
+):
+    """Run queue-free Charts work while holding the legacy state-region lock."""
+    paths = derive_state_paths(cfg.DL_LIST_CACHE_PATH)
+    await ensure_dir_exists(cfg.DL_LIST_CACHE_PATH.parent)
+    prepare_state_directory(paths.queue.parent)
+    lock = StateLock(paths.lock)
+    lock.acquire()
+    try:
+        return await run_specialized_postprocess(
+            "charts",
+            cfg,
+            extracted_dir_is_temporary=extracted_dir_is_temporary,
+        )
+    finally:
+        lock.release()
+
+
 async def main(
     update_asset_bundle_info_only: bool = False,
     force_full_download: bool = False,
@@ -702,7 +739,7 @@ async def main(
 
         needs_extracted_workspace = needs_shared_workspace(mode, cfg)
         if not needs_extracted_workspace:
-            return await run_specialized_postprocess("charts", cfg)
+            return await _run_charts_with_shared_lock(cfg)
 
     needs_extracted_workspace = needs_shared_workspace(mode, cfg)
     needs_live2d_cache = needs_live2d_bundle_cache(mode, cfg)
@@ -713,8 +750,7 @@ async def main(
     original_live2d_dir = getattr(cfg, "LIVE2D_BUNDLE_CACHE_DIR", None)
     needs_run_temp_root = needs_extracted_workspace or needs_live2d_cache
     if not needs_run_temp_root:
-        await run_specialized_postprocess("charts", cfg)
-        return
+        return await _run_charts_with_shared_lock(cfg)
 
     with tempfile.TemporaryDirectory(prefix="sekai-assets-") as temp_dir:
         from anyio import Path
@@ -726,10 +762,8 @@ async def main(
             cfg.ASSET_LOCAL_EXTRACTED_DIR = root / "extracted"
         try:
             if mode == "charts":
-                return await run_specialized_postprocess(
-                    "charts",
-                    cfg,
-                    extracted_dir_is_temporary=needs_extracted_workspace,
+                return await _run_charts_with_shared_lock(
+                    cfg, extracted_dir_is_temporary=needs_extracted_workspace
                 )
             return await _run_main(
                 update_asset_bundle_info_only,

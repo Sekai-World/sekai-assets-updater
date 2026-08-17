@@ -400,6 +400,43 @@ def derive_state_paths(
     return paths
 
 
+def derive_live2d_state_paths(
+    dl_list_cache_path: os.PathLike[str] | str,
+) -> StatePaths:
+    """Derive the Live2D-owned state set beside the legacy asset queue.
+
+    Live2D retries and metadata must not become part of the assets generation.
+    The canonical region lock remains shared because both state sets have the
+    same parent directory.
+    """
+
+    legacy_queue = Path(dl_list_cache_path).resolve(strict=False)
+    queue = legacy_queue.with_name("live2d_dl_list.json")
+    return derive_state_paths(
+        queue,
+        queue.with_name("live2d_asset_bundle_info.json"),
+        queue.with_name("live2d_version.json"),
+    )
+
+
+def derive_active_state_paths(
+    mode: str,
+    dl_list_cache_path: os.PathLike[str] | str,
+    asset_metadata_path: os.PathLike[str] | str,
+    game_version_path: os.PathLike[str] | str,
+) -> StatePaths:
+    """Resolve durable state ownership for a bundle-pipeline mode.
+
+    Assets retain their configured legacy paths exactly.  Live2D owns a
+    sibling state generation; Charts do not use this resolver because they are
+    queue-free.
+    """
+
+    if mode == "live2d":
+        return derive_live2d_state_paths(dl_list_cache_path)
+    return derive_state_paths(dl_list_cache_path, asset_metadata_path, game_version_path)
+
+
 def _validate_journal(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != _JOURNAL_KEYS:
         _fail("journal envelope has unknown or missing fields")
