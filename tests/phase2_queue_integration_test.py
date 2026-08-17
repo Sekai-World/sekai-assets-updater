@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from anyio import Path as AnyioPath
+from unittest.mock import AsyncMock
 
 import worker
 
@@ -125,6 +126,44 @@ def test_run_pipeline_upload_failure_cleans_temporary_roots(
     assert failed_upload[1] != successful_upload[1]
     assert failed_upload[2].parent == failed_upload[1]
     assert successful_upload[2].parent == successful_upload[1]
+
+
+def test_run_pipeline_download_workers_reuse_the_supplied_cookie(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(None)
+    config.MAX_CONCURRENCY_DOWNLOADS = 2
+    contents = {"first": b"first bytes", "second": b"second bytes"}
+    uploads: list[tuple[str, Path, Path, bytes]] = []
+    _install_pipeline_fakes(monkeypatch, contents, uploads)
+
+    refresh_mock = AsyncMock()
+    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock, raising=False)
+
+    download_headers: list[dict[str, str]] = []
+    original_download = worker.download_deobfuscate_bundle
+
+    async def record_download(*args, **kwargs):
+        download_headers.append(kwargs["headers"])
+        await original_download(*args, **kwargs)
+
+    monkeypatch.setattr(worker, "download_deobfuscate_bundle", record_download)
+
+    failed = worker.asyncio.run(
+        worker.run_pipeline(
+            [("first-url", {"bundleName": "first"}), ("second-url", {"bundleName": "second"})],
+            config,
+            {"User-Agent": "public-agent"},
+            cookie="pipeline-cookie",
+        )
+    )
+
+    assert failed == []
+    assert download_headers == [
+        {"Cookie": "pipeline-cookie"},
+        {"Cookie": "pipeline-cookie"},
+    ]
+    refresh_mock.assert_not_awaited()
 
 
 def test_run_pipeline_propagates_unexpected_stage_worker_failure(

@@ -278,21 +278,12 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
     assert "exception-secret" not in records
 
 
-def test_worker_download_uses_only_cdn_cookie_headers(monkeypatch, tmp_path):
+def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp_path):
     download_mock = AsyncMock()
     monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
 
-    refresh_mock = AsyncMock(
-        return_value=(
-            {
-                "Cookie": "CloudFront-Policy=private",
-                "User-Agent": "public-agent",
-                "X-Unity-Version": "2024.1",
-            },
-            "CloudFront-Policy=private",
-        )
-    )
-    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock)
+    refresh_mock = AsyncMock()
+    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock, raising=False)
 
     config = SimpleNamespace(ASSET_LOCAL_BUNDLE_CACHE_DIR=None)
     input_queue: asyncio.Queue = asyncio.Queue()
@@ -317,9 +308,9 @@ def test_worker_download_uses_only_cdn_cookie_headers(monkeypatch, tmp_path):
 
     asyncio.run(run())
 
-    refresh_mock.assert_awaited_once()
+    refresh_mock.assert_not_awaited()
     download_kwargs = download_mock.await_args.kwargs
-    assert download_kwargs["headers"] == {"Cookie": "CloudFront-Policy=private"}
+    assert download_kwargs["headers"] == {"Cookie": "old-cookie"}
 
 
 def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(

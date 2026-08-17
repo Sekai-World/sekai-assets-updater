@@ -20,7 +20,6 @@ from helpers import (
     build_cdn_headers,
     DownloadDiskSpaceGate,
     get_http_session_options,
-    refresh_cookie,
     sanitize_log_label,
     upload_to_storage,
 )
@@ -254,9 +253,6 @@ async def _download_stage(
     download_disk_space_gate: DownloadDiskSpaceGate | None,
     session: aiohttp.ClientSession,
 ) -> None:
-    worker_headers = headers.copy()
-    worker_cookie = cookie
-
     while True:
         item = await input_queue.get()
         try:
@@ -280,13 +276,6 @@ async def _download_stage(
             download_relative_path: str
 
             try:
-                if worker_cookie:
-                    worker_headers, worker_cookie = await refresh_cookie(
-                        config,
-                        worker_headers,
-                        worker_cookie,
-                    )
-
                 bundle_cache_root = _configured_path(get_bundle_cache_root(config, bundle))
                 if bundle_cache_root is not None:
                     bundle_cache_root = Path(prepare_secure_directory(bundle_cache_root).as_posix())
@@ -319,7 +308,7 @@ async def _download_stage(
                             url,
                             download_root,
                             download_relative_path,
-                            headers=build_cdn_headers(worker_cookie),
+                            headers=build_cdn_headers(cookie),
                             config=config,
                             session=session,
                             expected_bundle=bundle,
@@ -329,7 +318,7 @@ async def _download_stage(
                         url,
                         download_root,
                         download_relative_path,
-                        headers=build_cdn_headers(worker_cookie),
+                        headers=build_cdn_headers(cookie),
                         config=config,
                         session=session,
                         expected_bundle=bundle,
