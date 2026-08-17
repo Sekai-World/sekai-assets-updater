@@ -431,6 +431,7 @@ async def _run_enabled_specialized_postprocess(
             specialized_mode,
             cfg,
             extracted_dir_is_temporary=extracted_dir_is_temporary,
+            skip_missing_sources=mode == "assets",
         )
 
 

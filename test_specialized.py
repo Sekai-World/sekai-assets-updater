@@ -283,6 +283,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             model_dir.mkdir(parents=True)
             (model_dir / "unit.model3.json").write_text("{}", encoding="utf-8")
             bundle_cache = root / "bundle-cache"
+            (bundle_cache / "live2d" / "motion").mkdir(parents=True)
             config = SimpleNamespace(
                 ASSET_LOCAL_EXTRACTED_DIR=extracted_dir,
                 LIVE2D_BUNDLE_CACHE_DIR=bundle_cache,
@@ -379,6 +380,61 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
         restore.assert_not_awaited()
         upload.assert_not_awaited()
         execute.assert_not_awaited()
+
+    async def test_optional_live2d_skips_when_sources_are_missing(self):
+        config = SimpleNamespace(
+            ASSET_LOCAL_EXTRACTED_DIR=Path("extracted"),
+            LIVE2D_BUNDLE_CACHE_DIR=Path("cache"),
+            UNITY_VERSION="2022.3",
+            ASSET_REMOTE_STORAGE=[
+                {
+                    "type": "live2d",
+                    "base": "live",
+                    "program": "rclone",
+                    "args": ["copy", "src", "dst"],
+                }
+            ],
+        )
+        with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+            await run_specialized_postprocess("live2d", config, skip_missing_sources=True)
+        restore.assert_not_awaited()
+
+    async def test_forced_live2d_raises_when_sources_are_missing(self):
+        config = SimpleNamespace(
+            ASSET_LOCAL_EXTRACTED_DIR=Path("extracted"),
+            LIVE2D_BUNDLE_CACHE_DIR=Path("cache"),
+            UNITY_VERSION="2022.3",
+            ASSET_REMOTE_STORAGE=[],
+        )
+        with self.assertRaisesRegex(RuntimeError, "sources are missing"):
+            await run_specialized_postprocess("live2d", config)
+
+    async def test_optional_charts_skips_when_sources_and_fallback_are_missing(self):
+        with __import__("tempfile").TemporaryDirectory() as temp_dir:
+            config = SimpleNamespace(
+                ASSET_LOCAL_EXTRACTED_DIR=Path(temp_dir),
+                REGION=SimpleNamespace(name="JP"),
+                ASSET_REMOTE_STORAGE=[],
+            )
+            with patch.object(
+                specialized,
+                "fetch_chart_sources_from_storage",
+                new=AsyncMock(side_effect=RuntimeError("no source")),
+            ) as fetch:
+                with patch.object(specialized, "_render_charts", new=AsyncMock()) as render:
+                    await run_specialized_postprocess("charts", config, skip_missing_sources=True)
+            fetch.assert_awaited_once()
+            render.assert_not_awaited()
+
+    async def test_forced_charts_raises_when_sources_and_fallback_are_missing(self):
+        with __import__("tempfile").TemporaryDirectory() as temp_dir:
+            config = SimpleNamespace(
+                ASSET_LOCAL_EXTRACTED_DIR=Path(temp_dir),
+                REGION=SimpleNamespace(name="JP"),
+                ASSET_REMOTE_STORAGE=[],
+            )
+            with self.assertRaisesRegex(RuntimeError, "normal ASSET_REMOTE_STORAGE"):
+                await run_specialized_postprocess("charts", config)
 
     async def test_empty_listing_does_not_publish_index_and_uses_process_timeout(self):
         process = MagicMock(returncode=0)

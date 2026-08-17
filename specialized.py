@@ -370,6 +370,7 @@ async def run_specialized_postprocess(
     config,
     *,
     extracted_dir_is_temporary: bool = False,
+    skip_missing_sources: bool = False,
 ) -> None:
     """Run mode-specific work only after every bundle has succeeded."""
     if config.ASSET_LOCAL_EXTRACTED_DIR is None:
@@ -381,8 +382,17 @@ async def run_specialized_postprocess(
         live2d_storages = get_specialized_storage(config, "live2d")
         for storage in live2d_storages:
             _validate_live2d_storage(storage)
+        motion_source = StdPath(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion"
+        model_source = extracted_dir / "live2d" / "model"
+        missing_sources = [str(path) for path in (motion_source, model_source) if not path.is_dir()]
+        if missing_sources:
+            message = "Live2D post-processing sources are missing: " + ", ".join(missing_sources)
+            if skip_missing_sources:
+                logger.warning("Skipping optional Live2D post-processing: %s", message)
+                return
+            raise RuntimeError(message)
         await restore_live2d_motions(
-            Path(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion",
+            Path(str(motion_source)),
             Path(str(extracted_dir / "live2d" / "motion")),
             Path(str(extracted_dir / "live2d" / "model")),
             config.UNITY_VERSION,
@@ -403,7 +413,13 @@ async def run_specialized_postprocess(
         if temporary_source:
             with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
                 chart_source_dir = StdPath(temp_dir)
-                await fetch_chart_sources_from_storage(config, chart_source_dir)
+                try:
+                    await fetch_chart_sources_from_storage(config, chart_source_dir)
+                except Exception as exc:
+                    if skip_missing_sources:
+                        logger.warning("Skipping optional Charts post-processing: %s", exc)
+                        return
+                    raise
                 await _render_charts(config, chart_source_dir)
                 await _upload_specialized_directory(
                     "charts",
@@ -412,7 +428,13 @@ async def run_specialized_postprocess(
                 )
         else:
             if not has_local_chart_sources(extracted_dir):
-                await fetch_chart_sources_from_storage(config, extracted_dir)
+                try:
+                    await fetch_chart_sources_from_storage(config, extracted_dir)
+                except Exception as exc:
+                    if skip_missing_sources:
+                        logger.warning("Skipping optional Charts post-processing: %s", exc)
+                        return
+                    raise
             await _render_charts(config, extracted_dir)
             await _upload_specialized_directory(
                 "charts", extracted_dir / "charts" / _region_name(config), config
