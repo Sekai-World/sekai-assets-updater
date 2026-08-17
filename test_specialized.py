@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import specialized
 import main
@@ -211,6 +211,34 @@ class SpecializedHelpersTest(unittest.TestCase):
             self.assertFalse(needs_temporary_chart_source(root, root))
             self.assertFalse(needs_temporary_chart_source(root, None))
 
+    def test_remote_model_paths_reject_unsafe_entries(self):
+        with self.assertRaises(ValueError):
+            specialized._models_from_remote_entries(
+                [{"Path": "../old.model3.json", "IsDir": False}]
+            )
+        with self.assertRaises(ValueError):
+            specialized._models_from_remote_entries(
+                [{"Path": "/absolute.model3.json", "IsDir": False}]
+            )
+
+    def test_listing_args_preserve_flags_and_use_exact_target(self):
+        storage = {
+            "base": "sekai-ts:",
+            "program": "rclone",
+            "args": ["copyto", "src", "dst", "--s3-no-check-bucket", "--config", "opaque.conf"],
+        }
+        self.assertEqual(
+            specialized._listing_args(storage, "sekai-ts:/live2d/model"),
+            [
+                "lsjson",
+                "sekai-ts:/live2d/model",
+                "--recursive",
+                "--s3-no-check-bucket",
+                "--config",
+                "opaque.conf",
+            ],
+        )
+
 
 class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
     async def test_assets_noop_does_not_run_specialized_postprocessing(self):
@@ -261,14 +289,32 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 UNITY_VERSION="2022.3",
                 REGION=SimpleNamespace(name="JP"),
                 ASSET_REMOTE_STORAGE=[
-                    {"type": "live2d", "base": "live-target", "program": "rclone", "args": []},
+                    {
+                        "type": "live2d",
+                        "base": "live-target",
+                        "program": "rclone",
+                        "args": ["copy", "src", "dst"],
+                    },
                     {"type": "charts", "base": "chart-target", "program": "rclone", "args": []},
                 ],
             )
 
             with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
                 with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
-                    await run_specialized_postprocess("live2d", config)
+                    process = MagicMock(returncode=0)
+                    process.communicate = AsyncMock(
+                        return_value=(
+                            b'[{"Path":"unit/unit.model3.json","IsDir":false}]',
+                            b"",
+                        )
+                    )
+                    process.wait = AsyncMock()
+                    with patch.object(
+                        specialized.asyncio,
+                        "create_subprocess_exec",
+                        new=AsyncMock(return_value=process),
+                    ):
+                        await run_specialized_postprocess("live2d", config)
 
             restore.assert_awaited_once_with(
                 specialized.Path(str(bundle_cache / "live2d" / "motion")),
@@ -277,13 +323,88 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 "2022.3",
                 config=config,
             )
-            upload.assert_awaited_once_with(
-                specialized.Path(str(extracted_dir / "live2d")),
-                specialized.Path("live-target/live2d"),
-                "rclone",
-                [],
-                config=config,
+            self.assertEqual(upload.await_count, 2)
+            self.assertEqual(
+                upload.await_args_list[0].args[1], specialized.Path("live-target/live2d")
             )
+            self.assertEqual(
+                upload.await_args_list[1].args[1], specialized.Path("live-target/live2d")
+            )
+
+    async def test_live2d_listing_failure_does_not_publish_index(self):
+        with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()) as assets:
+            with patch.object(
+                specialized, "_publish_live2d_model_list", new=AsyncMock()
+            ) as publish:
+                process = MagicMock(returncode=1)
+                process.communicate = AsyncMock(return_value=(b"[]", b"failed"))
+                with patch.object(
+                    specialized.asyncio,
+                    "create_subprocess_exec",
+                    new=AsyncMock(return_value=process),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        await specialized._remote_model_list(
+                            {
+                                "base": "sekai-ts:",
+                                "program": "rclone",
+                                "args": ["copy", "src", "dst"],
+                            },
+                            SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=5),
+                        )
+                assets.assert_not_awaited()
+                publish.assert_not_awaited()
+
+    async def test_live2d_rejects_destructive_storage_before_processing(self):
+        config = SimpleNamespace(
+            ASSET_LOCAL_EXTRACTED_DIR=Path("extracted"),
+            LIVE2D_BUNDLE_CACHE_DIR=Path("cache"),
+            UNITY_VERSION="2022.3",
+            ASSET_REMOTE_STORAGE=[
+                {
+                    "type": "live2d",
+                    "base": "live-target",
+                    "program": "rclone",
+                    "args": ["sync", "src", "dst"],
+                }
+            ],
+        )
+        with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+            with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+                with patch.object(
+                    specialized.asyncio, "create_subprocess_exec", new=AsyncMock()
+                ) as execute:
+                    with self.assertRaisesRegex(ValueError, "copy or copyto"):
+                        await run_specialized_postprocess("live2d", config)
+        restore.assert_not_awaited()
+        upload.assert_not_awaited()
+        execute.assert_not_awaited()
+
+    async def test_empty_listing_does_not_publish_index_and_uses_process_timeout(self):
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(b"[]", b""))
+        with patch.object(
+            specialized.asyncio,
+            "create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ) as execute:
+            with patch.object(
+                specialized, "_get_external_process_timeout", return_value=7
+            ) as timeout:
+                with self.assertRaises(RuntimeError):
+                    await specialized._remote_model_list(
+                        {"base": "sekai-ts:", "program": "rclone", "args": ["copy", "src", "dst"]},
+                        SimpleNamespace(),
+                    )
+        timeout.assert_called_once()
+        execute.assert_awaited_once_with(
+            "rclone",
+            "lsjson",
+            "sekai-ts:/live2d/model",
+            "--recursive",
+            stdout=specialized.asyncio.subprocess.PIPE,
+            stderr=specialized.asyncio.subprocess.PIPE,
+        )
 
     async def test_charts_postprocess_uses_local_scores_and_chart_storage(self):
         import tempfile

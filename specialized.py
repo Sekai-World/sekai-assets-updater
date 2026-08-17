@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import shutil
 import tempfile
 from pathlib import Path as StdPath
 
@@ -9,6 +10,7 @@ import orjson as json
 from anyio import Path
 
 from helpers import upload_directory
+from helpers import _get_external_process_timeout
 from helpers import get_request_timeout
 from utils.chart import get_json_url, get_list, render_chart
 from utils.live2d import restore_live2d_motions
@@ -114,6 +116,116 @@ def _model_list(model_dir: StdPath) -> list[dict[str, str]]:
             }
         )
     return models
+
+
+def _models_from_remote_entries(entries) -> list[dict[str, str]]:
+    """Convert an rclone lsjson corpus (relative to ``live2d/model``)."""
+    models = []
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("IsDir"):
+            continue
+        relative_path = str(entry.get("Path", "")).replace("\\", "/")
+        path = StdPath(relative_path)
+        if not relative_path or relative_path.startswith("/") or path.drive or ".." in path.parts:
+            raise ValueError(f"unsafe remote Live2D model path: {relative_path!r}")
+        if not relative_path.endswith(".model3.json"):
+            continue
+        models.append(
+            {
+                "modelName": path.name.removesuffix(".model3.json"),
+                "modelBase": path.parent.name,
+                "modelPath": path.parent.as_posix() if path.parent != StdPath(".") else "",
+                "modelFile": path.name,
+            }
+        )
+    return sorted(models, key=lambda model: (model["modelPath"], model["modelFile"]))
+
+
+def _validate_live2d_storage(storage: dict) -> None:
+    """Allow only non-destructive rclone operations for Live2D publishing."""
+    args = storage.get("args")
+    operation = args[0] if args else None
+    if operation not in {"copy", "copyto"}:
+        raise ValueError(
+            f"Live2D storage requires a copy or copyto operation; got {operation or '<missing>'!r}"
+        )
+
+
+def _listing_args(storage: dict, remote_model_root: str) -> list[str]:
+    """Build lsjson arguments while retaining configured opaque rclone flags."""
+    _validate_live2d_storage(storage)
+    configured = list(storage.get("args", []))
+    if len(configured) >= 3 and configured[1:3] == ["src", "dst"]:
+        configured = configured[3:]
+    return ["lsjson", remote_model_root, "--recursive", *configured]
+
+
+async def _remote_model_list(storage: dict, config) -> list[dict[str, str]]:
+    """Read and validate the authoritative remote Live2D model corpus."""
+    remote_root = f"{str(storage['base']).rstrip('/')}/live2d/model"
+    process = await asyncio.create_subprocess_exec(
+        storage["program"],
+        *_listing_args(storage, remote_root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    timeout = _get_external_process_timeout(config)
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.wait()
+        raise RuntimeError("remote Live2D model listing timed out") from exc
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"remote Live2D model listing failed with status {process.returncode}: "
+            f"{stderr.decode(errors='replace').strip()}"
+        )
+    try:
+        entries = json.loads(stdout)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("remote Live2D model listing was not valid JSON") from exc
+    models = _models_from_remote_entries(entries)
+    if not models:
+        raise RuntimeError("remote Live2D model listing was empty or contained no model files")
+    return models
+
+
+async def _publish_live2d_model_list(models: list[dict[str, str]], storage: dict, config) -> None:
+    """Publish only the generated index after the remote corpus is validated."""
+    with tempfile.TemporaryDirectory(prefix="sekai-live2d-index-") as temp_dir:
+        index_dir = StdPath(temp_dir) / "live2d"
+        index_dir.mkdir()
+        (index_dir / "model_list.json").write_bytes(json.dumps(models, option=json.OPT_INDENT_2))
+        await upload_directory(
+            Path(str(index_dir)),
+            Path(f"{str(storage['base']).rstrip('/')}/live2d"),
+            storage["program"],
+            storage["args"],
+            config=config,
+        )
+
+
+async def _upload_live2d_assets(source_dir: StdPath, storage: dict, config) -> None:
+    """Upload current assets without allowing a stale local index to leak through."""
+    with tempfile.TemporaryDirectory(prefix="sekai-live2d-assets-") as temp_dir:
+        staged = StdPath(temp_dir) / "live2d"
+        staged.mkdir()
+        for child in source_dir.iterdir():
+            if child.name == "model_list.json":
+                continue
+            destination = staged / child.name
+            if child.is_dir():
+                shutil.copytree(child, destination)
+            else:
+                shutil.copy2(child, destination)
+        await upload_directory(
+            Path(str(staged)),
+            Path(f"{str(storage['base']).rstrip('/')}/live2d"),
+            storage["program"],
+            storage["args"],
+            config=config,
+        )
 
 
 def collect_score_files(extracted_dir: StdPath) -> list[StdPath]:
@@ -266,6 +378,9 @@ async def run_specialized_postprocess(
         raise ValueError("live2d mode requires LIVE2D_BUNDLE_CACHE_DIR")
     extracted_dir = StdPath(str(config.ASSET_LOCAL_EXTRACTED_DIR))
     if mode == "live2d":
+        live2d_storages = get_specialized_storage(config, "live2d")
+        for storage in live2d_storages:
+            _validate_live2d_storage(storage)
         await restore_live2d_motions(
             Path(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion",
             Path(str(extracted_dir / "live2d" / "motion")),
@@ -273,10 +388,10 @@ async def run_specialized_postprocess(
             config.UNITY_VERSION,
             config=config,
         )
-        model_dir = extracted_dir / "live2d" / "model"
-        model_list_path = extracted_dir / "live2d" / "model_list.json"
-        model_list_path.write_bytes(json.dumps(_model_list(model_dir), option=json.OPT_INDENT_2))
-        await _upload_specialized_directory("live2d", extracted_dir / "live2d", config)
+        for storage in live2d_storages:
+            await _upload_live2d_assets(extracted_dir / "live2d", storage, config)
+            models = await _remote_model_list(storage, config)
+            await _publish_live2d_model_list(models, storage, config)
     elif mode == "charts":
         # A run-scoped extracted directory is already safe to populate. When
         # the user supplied a persistent directory, use a separate workspace
