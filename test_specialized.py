@@ -24,7 +24,7 @@ from specialized import (
     run_specialized_postprocess,
 )
 from bundle import is_live2d_bundle
-from worker import get_bundle_cache_path, get_bundle_cache_root
+from worker import get_bundle_cache_path, get_bundle_cache_root, recover_live2d_model_outputs
 
 
 class SpecializedHelpersTest(unittest.TestCase):
@@ -241,6 +241,144 @@ class SpecializedHelpersTest(unittest.TestCase):
 
 
 class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forced_live2d_recovers_missing_model_output_from_raw_cache(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache = root / "cache"
+            extracted = root / "extracted"
+            motion = cache / "live2d" / "motion"
+            motion.mkdir(parents=True)
+            cached_model = cache / "live2d" / "model" / "unit"
+            cached_model.parent.mkdir(parents=True)
+            cached_model.write_bytes(b"raw bundle")
+            config = SimpleNamespace(
+                LIVE2D_BUNDLE_CACHE_DIR=AsyncPath(str(cache)),
+                ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(extracted)),
+                UNITY_VERSION="2022.3",
+            )
+            bundles = {"unit": {"bundleName": "live2d/model/unit"}}
+
+            async def extract(_raw, _bundle, target, **_kwargs):
+                output = Path(str(target)) / "live2d" / "model" / "unit"
+                output.mkdir(parents=True)
+                (output / "unit.model3.json").write_text("{}", encoding="utf-8")
+                return [AsyncPath(str(output / "unit.model3.json"))]
+
+            extract_bundle = AsyncMock(side_effect=extract)
+            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("worker.extract_asset_bundle", new=extract_bundle):
+                    await recover_live2d_model_outputs(config, bundles)
+
+            self.assertTrue((extracted / "live2d" / "model").is_dir())
+            self.assertTrue(motion.is_dir())
+            extract_bundle.assert_awaited_once()
+
+    async def test_failed_recovery_keeps_existing_aggregate_model_tree(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache = root / "cache"
+            (cache / "live2d" / "motion").mkdir(parents=True)
+            for name in ("one", "two"):
+                path = cache / "live2d" / "model" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"raw")
+            existing = root / "extracted" / "live2d" / "model" / "good.model3.json"
+            existing.parent.mkdir(parents=True)
+            existing.write_text("old", encoding="utf-8")
+            config = SimpleNamespace(
+                LIVE2D_BUNDLE_CACHE_DIR=AsyncPath(str(cache)),
+                ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(root / "extracted")),
+                UNITY_VERSION="2022.3",
+            )
+            calls = 0
+
+            async def extract(_raw, _bundle, target, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise ValueError("bad cache")
+                output = Path(str(target)) / "live2d" / "model" / "one.model3.json"
+                output.parent.mkdir(parents=True)
+                output.write_text("new", encoding="utf-8")
+                return [AsyncPath(str(output))]
+
+            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("worker.extract_asset_bundle", new=AsyncMock(side_effect=extract)):
+                    with self.assertRaisesRegex(RuntimeError, "extracting cached model bundle"):
+                        await recover_live2d_model_outputs(
+                            config,
+                            {
+                                "one": {"bundleName": "live2d/model/one"},
+                                "two": {"bundleName": "live2d/model/two"},
+                            },
+                        )
+            self.assertEqual(existing.read_text(encoding="utf-8"), "old")
+
+    async def test_recovery_prevalidates_all_model_cache_files(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache = root / "cache"
+            (cache / "live2d" / "motion").mkdir(parents=True)
+            first = cache / "live2d" / "model" / "one"
+            first.parent.mkdir(parents=True)
+            first.write_bytes(b"raw")
+            config = SimpleNamespace(
+                LIVE2D_BUNDLE_CACHE_DIR=AsyncPath(str(cache)),
+                ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(root / "extracted")),
+                UNITY_VERSION="2022.3",
+            )
+            extract = AsyncMock()
+            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("worker.extract_asset_bundle", new=extract):
+                    with self.assertRaisesRegex(RuntimeError, "bundle file is missing"):
+                        await recover_live2d_model_outputs(
+                            config,
+                            {
+                                "one": {"bundleName": "live2d/model/one"},
+                                "two": {"bundleName": "live2d/model/two"},
+                            },
+                        )
+            extract.assert_not_awaited()
+
+    async def test_forced_postprocess_recovers_even_with_partial_model_directory(self):
+        config = SimpleNamespace(
+            ASSET_LOCAL_EXTRACTED_DIR=AsyncPath("extracted"),
+            LIVE2D_BUNDLE_CACHE_DIR=AsyncPath("cache"),
+        )
+        with patch.object(main, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
+            with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+                await main._run_enabled_specialized_postprocess(
+                    "live2d", config, False, {"unit": {"bundleName": "live2d/model/unit"}}
+                )
+        recover.assert_awaited_once()
+        postprocess.assert_awaited_once()
+
+    async def test_forced_live2d_recovery_requires_cached_motion_source(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            cache = root / "cache"
+            cached_model = cache / "live2d" / "model" / "unit"
+            cached_model.parent.mkdir(parents=True)
+            cached_model.write_bytes(b"raw bundle")
+            config = SimpleNamespace(
+                LIVE2D_BUNDLE_CACHE_DIR=AsyncPath(str(cache)),
+                ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(root / "extracted")),
+                UNITY_VERSION="2022.3",
+            )
+            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with self.assertRaisesRegex(RuntimeError, "cached motion source is missing"):
+                    await recover_live2d_model_outputs(
+                        config, {"unit": {"bundleName": "live2d/model/unit"}}
+                    )
+
     async def test_assets_noop_does_not_run_specialized_postprocessing(self):
         config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))
 

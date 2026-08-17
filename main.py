@@ -32,7 +32,7 @@ from specialized import (
     needs_shared_workspace,
     run_specialized_postprocess,
 )
-from worker import get_bundle_cache_path, run_pipeline
+from worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
 from state import (
     StateLock,
     StateNotFoundError,
@@ -425,7 +425,12 @@ async def _run_enabled_specialized_postprocess(
     mode: str,
     cfg: ConfigLike,
     extracted_dir_is_temporary: bool,
+    live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
+    # A forced Live2D repair must rebuild from current cached raw bundles. An
+    # existing aggregate directory can be empty, stale, or partially extracted.
+    if mode == "live2d" and live2d_bundles is not None:
+        await recover_live2d_model_outputs(cfg, live2d_bundles)
     for specialized_mode in get_enabled_specialized_modes(mode, cfg):
         await run_specialized_postprocess(
             specialized_mode,
@@ -494,6 +499,7 @@ async def _complete_with_empty_download_list(
     extracted_dir_is_temporary: bool,
     start_time: float,
     paths: StatePaths | None = None,
+    live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
     # An ordinary assets run can legitimately have no current downloads.  Do
     # not treat that as a signal to run enabled specialized processors: their
@@ -519,7 +525,12 @@ async def _complete_with_empty_download_list(
     else:
         durable_unlink(paths.queue)
     if should_postprocess:
-        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
+        if live2d_bundles is None:
+            await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
+        else:
+            await _run_enabled_specialized_postprocess(
+                mode, cfg, extracted_dir_is_temporary, live2d_bundles
+            )
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
 
@@ -533,6 +544,7 @@ async def _complete_with_download_list(
     extracted_dir_is_temporary: bool,
     start_time: float,
     paths: StatePaths | None = None,
+    live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
     logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
 
@@ -553,7 +565,12 @@ async def _complete_with_download_list(
         await _cleanup_pending_cache_on_success(
             cfg, download_list, pending_items_outside_mode, paths
         )
-        await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
+        if live2d_bundles is None:
+            await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
+        else:
+            await _run_enabled_specialized_postprocess(
+                mode, cfg, extracted_dir_is_temporary, live2d_bundles
+            )
 
     logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
 
@@ -601,6 +618,7 @@ async def _run_full_download_pipeline(
             extracted_dir_is_temporary,
             start_time,
             paths,
+            fetch_result.asset_bundle_info.get("bundles", {}),
         )
         return
 
@@ -614,6 +632,7 @@ async def _run_full_download_pipeline(
         extracted_dir_is_temporary,
         start_time,
         paths,
+        fetch_result.asset_bundle_info.get("bundles", {}),
     )
 
 
