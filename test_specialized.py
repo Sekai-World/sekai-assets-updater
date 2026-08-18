@@ -241,6 +241,35 @@ class SpecializedHelpersTest(unittest.TestCase):
 
 
 class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_chart_rendering_preserves_source_music_id_padding_in_output_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            extracted_dir = Path(temp_dir)
+            for directory_name in ("0001_song", "12345_song"):
+                score = extracted_dir / "music" / "music_score" / directory_name / "master.txt"
+                score.parent.mkdir(parents=True)
+                score.write_text("# SUS", encoding="utf-8")
+            config = SimpleNamespace(REGION=SimpleNamespace(name="JP"))
+
+            with patch.object(
+                specialized,
+                "get_list",
+                new=AsyncMock(return_value=[{"id": 1}, {"id": 12345}]),
+            ):
+                with patch.object(specialized, "render_chart", new=AsyncMock()) as render:
+                    await specialized._render_charts(config, extracted_dir)
+
+            self.assertEqual(render.await_count, 2)
+            rendered_paths = {call.args[1] for call in render.await_args_list}
+            self.assertEqual(
+                rendered_paths,
+                {
+                    str(extracted_dir / "charts" / "jp" / "0001" / "master.svg"),
+                    str(extracted_dir / "charts" / "jp" / "12345" / "master.svg"),
+                },
+            )
+
     async def test_forced_live2d_recovers_missing_model_output_from_raw_cache(self):
         import tempfile
 
@@ -379,8 +408,12 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                         config, {"unit": {"bundleName": "live2d/model/unit"}}
                     )
 
-    async def test_assets_noop_does_not_run_specialized_postprocessing(self):
-        config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))
+    async def test_assets_noop_runs_enabled_specialized_postprocessing(self):
+        config = SimpleNamespace(
+            DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"),
+            ENABLE_LIVE2D_POSTPROCESS=True,
+            ENABLE_CHARTS_POSTPROCESS=False,
+        )
 
         with patch.object(
             main, "_run_enabled_specialized_postprocess", new=AsyncMock()
@@ -393,7 +426,31 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 0,
             )
 
-        postprocess.assert_not_awaited()
+        postprocess.assert_awaited_once_with("assets", config, True)
+
+    async def test_assets_noop_live2d_recovers_models_from_cache_before_postprocessing(self):
+        config = SimpleNamespace(
+            DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"),
+            ENABLE_LIVE2D_POSTPROCESS=True,
+            ENABLE_CHARTS_POSTPROCESS=False,
+        )
+        bundles = {"unit": {"bundleName": "live2d/model/unit"}}
+
+        with patch.object(main, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
+            with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as process:
+                await main._complete_with_empty_download_list(
+                    config,
+                    "assets",
+                    [],
+                    True,
+                    0,
+                    live2d_bundles=bundles,
+                )
+
+        recover.assert_awaited_once_with(config, bundles)
+        process.assert_awaited_once_with(
+            "live2d", config, extracted_dir_is_temporary=True, skip_missing_sources=True
+        )
 
     async def test_forced_specialized_noop_retains_postprocessing(self):
         config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))

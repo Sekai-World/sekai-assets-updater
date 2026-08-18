@@ -427,11 +427,20 @@ async def _run_enabled_specialized_postprocess(
     extracted_dir_is_temporary: bool,
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
-    # A forced Live2D repair must rebuild from current cached raw bundles. An
-    # existing aggregate directory can be empty, stale, or partially extracted.
-    if mode == "live2d" and live2d_bundles is not None:
-        await recover_live2d_model_outputs(cfg, live2d_bundles)
-    for specialized_mode in get_enabled_specialized_modes(mode, cfg):
+    enabled_modes = get_enabled_specialized_modes(mode, cfg)
+    # Live2D post-processing in assets mode may run with no downloads (and its
+    # extracted workspace may consequently be empty). Rebuild the model tree
+    # from the configured raw bundle cache instead of requiring this run to
+    # download the model bundles again. Forced live2d mode keeps its existing
+    # fail-fast behavior; optional assets mode follows skip_missing_sources.
+    if "live2d" in enabled_modes and live2d_bundles is not None:
+        try:
+            await recover_live2d_model_outputs(cfg, live2d_bundles)
+        except RuntimeError as exc:
+            if mode != "assets":
+                raise
+            logger.warning("Skipping optional Live2D cache recovery: %s", exc)
+    for specialized_mode in enabled_modes:
         await run_specialized_postprocess(
             specialized_mode,
             cfg,
@@ -501,12 +510,10 @@ async def _complete_with_empty_download_list(
     paths: StatePaths | None = None,
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
 ) -> None:
-    # An ordinary assets run can legitimately have no current downloads.  Do
-    # not treat that as a signal to run enabled specialized processors: their
-    # inputs are produced by this run, and a fresh temporary workspace is
-    # intentionally empty in this case.  Forced specialized modes retain
-    # their explicit rebuild/repair semantics.
-    should_postprocess = mode != "assets"
+    # An assets run can legitimately have no current downloads. Specialized
+    # processors still need to run: Live2D may restore its inputs from the raw
+    # bundle cache, while each processor handles unavailable sources safely.
+    should_postprocess = bool(get_enabled_specialized_modes(mode, cfg))
     logger.info(
         "RUN | result=noop | reason=no_items | postprocess=%s",
         should_postprocess,

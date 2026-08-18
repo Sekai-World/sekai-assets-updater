@@ -351,7 +351,13 @@ async def _render_charts(config, extracted_dir: StdPath) -> None:
                 "Skipping chart %s: music id %s is not in musics.json", score_file, music_id
             )
             return
-        chart_path = extracted_dir / "charts" / region / str(music_id) / f"{score_file.stem}.svg"
+        # The directory name is part of the published chart layout. Keep its
+        # source spelling (for example, ``0001_song`` -> ``0001``), while the
+        # numeric value above remains the musics.json lookup key.
+        source_music_id = score_file.parent.name.split("_", 1)[0]
+        chart_path = (
+            extracted_dir / "charts" / region / source_music_id / f"{score_file.stem}.svg"
+        )
         chart_path.parent.mkdir(parents=True, exist_ok=True)
         async with semaphore:
             await render_chart(
