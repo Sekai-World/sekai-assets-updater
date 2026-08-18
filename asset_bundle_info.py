@@ -21,24 +21,28 @@ from model import ConfigLike
 logger = logging.getLogger("asset_updater")
 
 
-def normalize_asset_bundle_info(asset_bundle_info: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_asset_bundle_info(
+    asset_bundle_info: Dict[str, Any], *, fallback_asset_ver: str | None = None
+) -> Dict[str, Any]:
     """Normalize API compatibility values without inventing integrity data.
 
     CN, KR, and TC metadata can represent the absent ``hash`` value as JSON
-    ``null`` while supplying ``crc`` as the bundle's usable checksum.  State
-    records encode that known absence as an empty string paired with CRC.  Do
+    ``null`` while supplying ``crc`` as the bundle's usable checksum. State
+    records encode that known absence as an empty string paired with CRC. Do
     not normalize a null hash when no CRC was supplied: the strict state
     validation path must reject bundles with no integrity identifier.
+
+    Those endpoints can also omit the metadata revision despite returning an
+    authoritative asset-version response. Only use that fetched value when the
+    metadata revision is not already a non-empty string. All other malformed
+    values continue to reach the strict state-validation boundary unchanged.
     """
     normalized_info = dict(asset_bundle_info)
-    # Nuverse regional endpoints return the metadata revision as a JSON number,
-    # whereas persisted state deliberately represents revisions as strings.
-    # Normalize only a real integer revision; absent, boolean, or other shapes
-    # remain invalid at the strict state-validation boundary.
     version = normalized_info.get("version")
-    if type(version) is int:
-        normalized_info["version"] = str(version)
-
+    if isinstance(version, str) and version.strip():
+        pass
+    elif isinstance(fallback_asset_ver, str) and fallback_asset_ver.strip():
+        normalized_info["version"] = fallback_asset_ver
     bundles = normalized_info.get("bundles")
     if not isinstance(bundles, dict):
         return normalized_info
@@ -245,7 +249,9 @@ async def fetch_asset_bundle_info(
                     asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
                     if not isinstance(asset_bundle_info, dict):
                         raise ValueError(f"Invalid json from {sanitize_url(asset_bundle_info_url)}")
-                    asset_bundle_info = normalize_asset_bundle_info(asset_bundle_info)
+                    asset_bundle_info = normalize_asset_bundle_info(
+                        asset_bundle_info, fallback_asset_ver=asset_ver
+                    )
                 else:
                     logger.error(
                         "Failed to fetch asset bundle info from %s, status: %s, "

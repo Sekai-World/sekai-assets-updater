@@ -14,6 +14,7 @@ import bundle
 import helpers
 import main
 import worker
+from model import SekaiServerRegion
 
 
 class _Response:
@@ -236,6 +237,32 @@ def test_metadata_requests_use_common_options_and_public_headers(monkeypatch):
         assert session.options["proxy"] == "http://proxy.test:8080"
         assert session.options["timeout"].total == 17  # type: ignore[union-attr]
     assert _Session.instances[0].calls[0][2]["headers"]["User-Agent"] == "public-agent"
+
+
+def test_fetch_uses_nonempty_asset_ver_when_regional_metadata_version_is_missing(monkeypatch):
+    _Session.instances.clear()
+    _Session.responses[:] = [
+        _Response(json_value={"appVersion": "1", "dataVersion": "2", "assetVersion": "3"}),
+        _Response(body=b"38"),
+        _Response(body=b"asset-info"),
+    ]
+    monkeypatch.setattr(asset_bundle_info.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(
+        asset_bundle_info,
+        "unpack",
+        lambda *_args: {"version": None, "bundles": {"a": {"bundleName": "a", "hash": "h"}}},
+    )
+    config = _config(
+        GAME_COOKIE_URL=None,
+        ASSET_VER_URL="https://meta.test/{appVersion}/assetver",
+        ASSET_BUNDLE_INFO_URL="https://cdn.test/{assetVer}/info",
+        REGION=SekaiServerRegion.TW,
+    )
+
+    result = asyncio.run(asset_bundle_info.fetch_asset_bundle_info(config, headers={}))
+
+    assert result.asset_ver == "38"
+    assert result.asset_bundle_info["version"] == "38"
 
 
 def test_http_logs_redact_headers_urls_and_response_bodies(monkeypatch, caplog):

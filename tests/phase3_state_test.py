@@ -72,12 +72,15 @@ def test_null_hash_with_crc_is_normalized_before_journal_creation(tmp_path: Path
     assert journal["queue"][0][1]["crc"] == "12345"
 
 
-def test_numeric_metadata_version_is_normalized_before_journal_creation(tmp_path: Path) -> None:
+def test_invalid_numeric_metadata_version_uses_authoritative_asset_ver_fallback(
+    tmp_path: Path,
+) -> None:
     metadata = normalize_asset_bundle_info(
         {
             "version": 38,
             "bundles": {"regional": {"bundleName": "regional", "hash": "abc"}},
-        }
+        },
+        fallback_asset_ver="39",
     )
 
     journal = state.create_journal(
@@ -88,7 +91,28 @@ def test_numeric_metadata_version_is_normalized_before_journal_creation(tmp_path
         "tx",
     )
 
-    assert journal["asset_metadata"]["version"] == "38"
+    assert journal["asset_metadata"]["version"] == "39"
+
+
+def test_invalid_metadata_version_uses_authoritative_asset_ver_fallback() -> None:
+    metadata = normalize_asset_bundle_info(
+        {"version": None, "bundles": {"regional": {"bundleName": "regional", "hash": "abc"}}},
+        fallback_asset_ver="38",
+    )
+
+    validated = state.validate_asset_metadata(metadata)
+
+    assert validated["version"] == "38"
+
+
+def test_invalid_metadata_version_without_asset_ver_fallback_is_rejected() -> None:
+    metadata = normalize_asset_bundle_info(
+        {"version": "", "bundles": {"regional": {"bundleName": "regional", "hash": "abc"}}},
+        fallback_asset_ver=None,
+    )
+
+    with pytest.raises(state.StateValidationError):
+        state.validate_asset_metadata(metadata)
 
 
 @pytest.mark.parametrize("version", [None, True, False, "", 1.5, {}])
