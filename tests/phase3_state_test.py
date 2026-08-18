@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from asset_bundle_info import normalize_asset_bundle_info
+from asset_bundle_info import normalize_asset_bundle_info, normalize_game_version
 import state
 
 
@@ -70,6 +70,27 @@ def test_null_hash_with_crc_is_normalized_before_journal_creation(tmp_path: Path
 
     assert journal["queue"][0][1]["hash"] == ""
     assert journal["queue"][0][1]["crc"] == "12345"
+
+
+def test_empty_optional_game_version_fields_are_removed_at_fetch_boundary() -> None:
+    version = normalize_game_version(
+        {
+            "appVersion": "1.0.0",
+            "assetHash": None,
+            "appHash": "",
+            "assetVersion": "12",
+        }
+    )
+
+    assert version == {"appVersion": "1.0.0", "assetVersion": "12"}
+    assert state.validate_game_version(version) == version
+
+
+def test_nonempty_invalid_optional_game_version_value_is_not_normalized() -> None:
+    version = normalize_game_version({"appVersion": "1.0.0", "assetHash": 12})
+
+    with pytest.raises(state.StateValidationError):
+        state.validate_game_version(version)
 
 
 def test_invalid_numeric_metadata_version_uses_authoritative_asset_ver_fallback(

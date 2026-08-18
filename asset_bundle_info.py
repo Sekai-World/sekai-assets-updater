@@ -61,6 +61,21 @@ def normalize_asset_bundle_info(
     return normalized_info
 
 
+def normalize_game_version(game_version: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove empty optional fields emitted by regional version endpoints.
+
+    ``appVersion`` remains untouched because it is required for every region.
+    Empty optional hashes carry no usable data and cannot be persisted by the
+    strict state schema; non-empty values with an invalid type remain visible
+    to that schema and are rejected.
+    """
+    normalized = dict(game_version)
+    for field in {"assetVersion", "dataVersion", "assetHash", "appHash", "assetver"}:
+        if field in normalized and normalized[field] in (None, ""):
+            normalized.pop(field)
+    return normalized
+
+
 def _transport_error(operation: str, url: str, exc: BaseException) -> RuntimeError:
     return RuntimeError(f"{operation} failed for {sanitize_url(url)} ({type(exc).__name__})")
 
@@ -126,6 +141,7 @@ async def fetch_asset_bundle_info(
                             raise ValueError(
                                 f"Invalid JSON from {sanitize_url(config.GAME_VERSION_JSON_URL)}"
                             )
+                        game_version_json = normalize_game_version(game_version_json)
                     else:
                         raise RuntimeError(
                             "Failed to fetch game version json from "
