@@ -23,6 +23,7 @@ from anyio import Path, open_file
 from security import derive_remote_key, validate_contained_file
 from state import (
     StateNotFoundError,
+    StateValidationError,
     load_asset_metadata,
     load_game_version,
 )
@@ -640,10 +641,26 @@ async def get_download_list(
             cached_asset_bundle_info = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
         except StateNotFoundError:
             pass
+        except StateValidationError:
+            # Cache formats are intentionally strict. An older or malformed
+            # metadata cache is not authoritative; refresh it from the already
+            # fetched network response by treating it as absent.
+            logger.warning(
+                "Ignoring incompatible asset metadata cache: %s",
+                config.ASSET_BUNDLE_INFO_CACHE_PATH,
+            )
         try:
             cached_game_version_json = load_game_version(config.GAME_VERSION_JSON_CACHE_PATH)
         except StateNotFoundError:
             pass
+        except StateValidationError:
+            # Only tolerate validation failures while reading a prior cache.
+            # Validation of the current fetched response still happens when it
+            # is committed below the lifecycle layer.
+            logger.warning(
+                "Ignoring incompatible game version cache: %s",
+                config.GAME_VERSION_JSON_CACHE_PATH,
+            )
 
     if assetver is not None:
         game_version_json = dict(game_version_json)

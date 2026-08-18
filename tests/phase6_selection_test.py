@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,33 @@ def test_nuverse_assetver_change_alone_does_not_redownload(tmp_path: Path) -> No
 
     assert plan.candidates == []
 
+
+@pytest.mark.parametrize(
+    ("cache_name", "legacy_payload"),
+    [
+        ("metadata.json", {"assetBundles": []}),
+        ("version.json", {"version": "legacy-game-version"}),
+    ],
+)
+def test_incompatible_metadata_caches_are_treated_as_missing(
+    tmp_path: Path,
+    cache_name: str,
+    legacy_payload: dict,
+) -> None:
+    """Legacy cache schemas must trigger a refresh, not block selection."""
+    config = _config(tmp_path)
+    (tmp_path / cache_name).write_text(json.dumps(legacy_payload))
+
+    plan = asyncio.run(
+        helpers.get_download_list(
+            _metadata({"bundleName": "fresh", "hash": "new"}),
+            _version(),
+            config=config,
+            assetver="current-assetver",
+        )
+    )
+
+    assert [bundle["bundleName"] for _, bundle in plan.candidates] == ["fresh"]
 
 def test_missing_nuverse_template_value_is_descriptive(monkeypatch) -> None:
     class Response:

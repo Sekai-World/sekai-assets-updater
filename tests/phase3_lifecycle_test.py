@@ -87,6 +87,33 @@ def test_replay_restores_generation_after_each_commit_boundary(
     assert not paths.journal.exists()
 
 
+def test_current_invalid_network_version_remains_a_commit_error(tmp_path: Path, monkeypatch) -> None:
+    """Compatibility handling applies only to prior cache reads, never fetched data."""
+    config = _config(tmp_path)
+    monkeypatch.setattr(main, "config", config)
+    invalid_version = {"appVersion": "1.0", "assetVersion": 2}
+    fetch_result = SimpleNamespace(
+        headers={},
+        cookie=None,
+        game_version_json=invalid_version,
+        asset_ver="fetched",
+        assetbundle_host_hash=None,
+        asset_bundle_info=_metadata(),
+    )
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def fake_plan(*_args, **_kwargs):
+        return helpers.DownloadPlan([], _metadata(), invalid_version)
+
+    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(main, "get_download_list", fake_plan)
+
+    with pytest.raises(state.StateValidationError, match="assetVersion"):
+        asyncio.run(main.main(force_full_download=True))
+
+
 def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue(
     tmp_path: Path, monkeypatch
 ) -> None:
