@@ -105,6 +105,15 @@ def _region_name(config) -> str:
     return getattr(region, "name", str(getattr(region, "value", region))).lower()
 
 
+def get_chart_data_server(config) -> str:
+    """Return the master-data server used while rendering charts.
+
+    This is normally the asset region, but can differ when a region's master
+    data is published under a distinct server name (for example, TC vs. TW).
+    """
+    return getattr(config, "CHART_DATA_SERVER", None) or _region_name(config)
+
+
 def _model_list(model_dir: StdPath) -> list[dict[str, str]]:
     models = []
     for model_file in sorted(model_dir.rglob("*.model3.json")):
@@ -358,7 +367,7 @@ async def _render_charts(
         logger.info("No music score TextAssets found")
         return
 
-    music_info = await get_list(get_json_url(_region_name(config), "musics"))
+    music_info = await get_list(get_json_url(get_chart_data_server(config), "musics"))
     music_by_id = {music["id"]: music for music in music_info}
     region = _region_name(config)
     semaphore = asyncio.Semaphore(CHART_SOURCE_CONCURRENCY)

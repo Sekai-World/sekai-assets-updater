@@ -406,6 +406,43 @@ def test_journal_replay_repairs_corrupt_targets_in_required_order(
     assert not paths.journal.exists()
 
 
+def test_immediate_replay_uses_verified_envelope_but_still_verifies_targets(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = state.derive_state_paths(
+        tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
+    )
+    verified = state.create_journal(paths, _queue(), _metadata(), _version(), "tx-immediate")
+    monkeypatch.setattr(
+        state,
+        "load_journal",
+        lambda _path: (_ for _ in ()).throw(AssertionError("immediate replay read journal")),
+    )
+    assert state.replay_journal(paths, _verified_envelope=verified)
+    assert not paths.journal.exists()
+    assert state.load_asset_metadata(paths.asset_metadata) == _metadata()
+
+
+def test_immediate_replay_failure_retains_journal(tmp_path: Path, monkeypatch) -> None:
+    paths = state.derive_state_paths(
+        tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
+    )
+    verified = state.create_journal(paths, _queue(), _metadata(), _version(), "tx-failure")
+    original = state.atomic_write_json
+    monkeypatch.setattr(
+        state,
+        "atomic_write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            state.StatePersistenceError("injected immediate replay failure")
+        ),
+    )
+    with pytest.raises(state.StatePersistenceError, match="immediate replay"):
+        state.replay_journal(paths, _verified_envelope=verified)
+    assert paths.journal.exists()
+    monkeypatch.setattr(state, "atomic_write_json", original)
+    assert state.replay_journal(paths)
+
+
 def test_create_journal_rejects_every_existing_journal(tmp_path: Path) -> None:
     journal = tmp_path / "journal.json"
     for existing in (b"valid", b"{bad", b'{"schema_version": 99}'):

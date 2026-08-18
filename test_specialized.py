@@ -8,9 +8,11 @@ import main
 from anyio import Path as AsyncPath
 from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes
 from helpers import select_bundles_for_download
+from utils.chart import get_json_url
 from specialized import (
     collect_score_files,
     get_enabled_specialized_modes,
+    get_chart_data_server,
     get_required_bundle_prefixes,
     get_specialized_storage,
     get_normal_storage_candidates,
@@ -196,6 +198,17 @@ class SpecializedHelpersTest(unittest.TestCase):
         config.ENABLE_CHARTS_POSTPROCESS = True
         self.assertEqual(get_required_bundle_prefixes("assets", config), ())
         self.assertEqual(get_required_bundle_prefixes("charts", config), ())
+
+    def test_chart_data_server_can_differ_from_asset_region(self):
+        config = SimpleNamespace(
+            REGION=SimpleNamespace(name="TW"), CHART_DATA_SERVER="tc"
+        )
+        self.assertEqual(get_chart_data_server(config), "tc")
+        self.assertEqual(
+            get_json_url(get_chart_data_server(config), "musics"),
+            "https://sekai-world.github.io/sekai-master-db-tc-diff/musics.json",
+        )
+        self.assertEqual(get_chart_data_server(SimpleNamespace(REGION=config.REGION)), "tw")
 
     def test_chart_normal_storage_candidates_preserve_order(self):
         config = self.config()

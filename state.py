@@ -470,6 +470,19 @@ def validate_journal(value: Any) -> dict[str, Any]:
     return _validate_journal(value)
 
 
+class _VerifiedJournal(dict[str, Any]):
+    """A journal envelope validated before its durable publication.
+
+    This deliberately remains a dict so the public ``create_journal`` return
+    shape is unchanged.  The type is an internal capability: replay may use
+    it only for the journal it was created from in this process.
+    """
+
+    def __init__(self, envelope: dict[str, Any], journal_path: Path) -> None:
+        super().__init__(envelope)
+        self.journal_path = journal_path.resolve(strict=False)
+
+
 def create_journal(
     path: os.PathLike[str] | str | StatePaths,
     queue: Any,
@@ -477,7 +490,7 @@ def create_journal(
     game_version: Any,
     transaction_id: str | None = None,
     operation: str = "update",
-) -> dict[str, Any]:
+) -> _VerifiedJournal:
     """Validate and durably create an authoritative journal envelope.
 
     Publication uses ``link(temp, final)`` rather than ``replace``.  POSIX
@@ -541,7 +554,7 @@ def create_journal(
                 temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
-    return envelope
+    return _VerifiedJournal(envelope, journal_path)
 
 
 def load_journal(path: os.PathLike[str] | str) -> dict[str, Any]:
@@ -575,6 +588,8 @@ def replay_journal(
     queue_path: os.PathLike[str] | str | None = None,
     asset_metadata_path: os.PathLike[str] | str | None = None,
     game_version_path: os.PathLike[str] | str | None = None,
+    *,
+    _verified_envelope: _VerifiedJournal | None = None,
 ) -> bool:
     """Replay a valid journal in queue/metadata/version order, then remove it.
 
@@ -599,10 +614,22 @@ def replay_journal(
             game_version_path,  # type: ignore[arg-type]
         )
     journal = paths.journal
-    try:
-        envelope = load_journal(journal)
-    except StateNotFoundError:
-        return False
+    if _verified_envelope is None:
+        # Startup and all callers receiving a journal from disk must use this
+        # strict path.  In particular, do not optimize away full metadata
+        # validation for an envelope that was not created in this process.
+        try:
+            envelope = load_journal(journal)
+        except StateNotFoundError:
+            return False
+    else:
+        if not isinstance(_verified_envelope, _VerifiedJournal):
+            raise StateValidationError("replay received an unverified journal envelope")
+        if _verified_envelope.journal_path != journal:
+            raise StateValidationError("verified journal envelope path mismatch")
+        envelope = dict(_verified_envelope)
+        if not journal.exists():
+            raise StateNotFoundError(f"state file does not exist: {journal}")
     atomic_write_json(paths.queue, envelope["queue"], validate_pending_queue)
     atomic_write_json(paths.asset_metadata, envelope["asset_metadata"], validate_asset_metadata)
     atomic_write_json(paths.game_version, envelope["game_version"], validate_game_version)

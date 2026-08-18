@@ -339,6 +339,7 @@ async def _build_new_download_list(
     force_full_download: bool,
 ) -> tuple[List[DownloadItem], DownloadPlan]:
     logger.info("RUN | step=2/4 | action=build_download_list")
+    build_started = time.perf_counter()
     # get_download_list applies the user filters and writes the metadata cache;
     # the mandatory mode scope is applied both before and after it so it cannot
     # be bypassed by a cached queue or a broad include expression.
@@ -360,6 +361,11 @@ async def _build_new_download_list(
     )
     new_download_list = filter_download_items_for_mode(plan.candidates, mode)
     logger.debug("New download candidates: %d item(s)", len(new_download_list))
+    logger.info(
+        "RUN | step=2/4 | timing=build_list | duration_sec=%.6f | candidates=%d",
+        time.perf_counter() - build_started,
+        len(new_download_list),
+    )
     return new_download_list, plan
 
 
@@ -369,14 +375,28 @@ async def _load_pending_download_lists(
     force_full_download: bool,
 ) -> Tuple[List[DownloadItem], List[DownloadItem]]:
     """Load cached pending items and the subset belonging to the current mode."""
+    pending_started = time.perf_counter()
     if not await cfg.DL_LIST_CACHE_PATH.exists():
+        logger.info(
+            "RUN | step=2/4 | timing=pending_load_merge | duration_sec=%.6f | loaded=0 | merged=0",
+            time.perf_counter() - pending_started,
+        )
         return [], []
 
     try:
         cached_pending_list = cast(List[DownloadItem], load_pending_queue(cfg.DL_LIST_CACHE_PATH))
     except StateNotFoundError:
+        logger.info(
+            "RUN | step=2/4 | timing=pending_load_merge | duration_sec=%.6f | loaded=0 | merged=0",
+            time.perf_counter() - pending_started,
+        )
         return [], []
     if force_full_download:
+        logger.info(
+            "RUN | step=2/4 | timing=pending_load_merge | duration_sec=%.6f | loaded=%d | merged=0 | force_full=true",
+            time.perf_counter() - pending_started,
+            len(cached_pending_list),
+        )
         return cached_pending_list, []
 
     pending_list = filter_download_items_for_mode(cached_pending_list, mode)
@@ -384,6 +404,12 @@ async def _load_pending_download_lists(
         "RUN | action=load_pending | count=%d | path=%s",
         len(pending_list),
         cfg.DL_LIST_CACHE_PATH,
+    )
+    logger.info(
+        "RUN | step=2/4 | timing=pending_load_merge | duration_sec=%.6f | loaded=%d | merged=%d",
+        time.perf_counter() - pending_started,
+        len(cached_pending_list),
+        len(pending_list),
     )
     return cached_pending_list, pending_list
 
@@ -617,14 +643,34 @@ async def _run_full_download_pipeline(
         cfg, mode, force_full_download
     )
     pending_items_outside_mode = _pending_items_outside_mode(cached_pending_list, mode)
+    merge_started = time.perf_counter()
     download_list = _merge_pending_and_new_download_lists(pending_list, new_download_list)
+    logger.info(
+        "RUN | step=2/4 | timing=pending_merge | duration_sec=%.6f | pending=%d | new=%d | total=%d",
+        time.perf_counter() - merge_started,
+        len(pending_list),
+        len(new_download_list),
+        len(download_list),
+    )
 
     if paths is not None and not paths.journal.exists():
         queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
-        create_journal(
+        journal_started = time.perf_counter()
+        verified_journal = create_journal(
             paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version
         )
-        replay_journal(paths)
+        logger.info(
+            "RUN | step=2/4 | timing=journal_create | duration_sec=%.6f | items=%d",
+            time.perf_counter() - journal_started,
+            len(queue_items),
+        )
+        replay_started = time.perf_counter()
+        replay_journal(paths, _verified_envelope=verified_journal)
+        logger.info(
+            "RUN | step=2/4 | timing=journal_replay | duration_sec=%.6f | items=%d",
+            time.perf_counter() - replay_started,
+            len(queue_items),
+        )
 
     if not download_list:
         await _complete_with_empty_download_list(
@@ -682,7 +728,13 @@ async def _run_main(
     lock = StateLock(paths.lock)
     lock.acquire()
     try:
-        replay_journal(paths)
+        replay_started = time.perf_counter()
+        recovered = replay_journal(paths)
+        logger.info(
+            "RUN | step=2/4 | timing=journal_replay_startup | duration_sec=%.6f | recovered=%s",
+            time.perf_counter() - replay_started,
+            recovered,
+        )
         await _run_main_locked(
             active_cfg,
             update_asset_bundle_info_only,

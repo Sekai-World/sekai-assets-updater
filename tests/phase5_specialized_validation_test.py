@@ -1,3 +1,5 @@
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -79,3 +81,15 @@ def test_validate_config_allows_charts_with_configured_extraction_directory(
     config = _valid_config(ASSET_LOCAL_EXTRACTED_DIR=tmp_path)
 
     main.validate_config(config, mode="charts")  # type: ignore[arg-type]
+
+
+def test_tc_config_satisfies_runtime_validation(monkeypatch) -> None:
+    monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
+    config_path = Path(__file__).parent.parent / "config.tc.py"
+    spec = importlib.util.spec_from_file_location("config_tc_validation", config_path)
+    assert spec is not None
+    assert spec.loader is not None
+    config = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config)
+
+    main.validate_config(config)  # type: ignore[arg-type]
