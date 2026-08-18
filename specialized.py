@@ -2,6 +2,7 @@
 
 import logging
 import asyncio
+import re
 import shutil
 import tempfile
 from pathlib import Path as StdPath
@@ -228,23 +229,42 @@ async def _upload_live2d_assets(source_dir: StdPath, storage: dict, config) -> N
         )
 
 
-def collect_score_files(extracted_dir: StdPath) -> list[StdPath]:
-    """Collect only chart TextAsset outputs, with deterministic de-duplication."""
+def _score_matches_include_list(score_path: StdPath, include_list: list[str] | None) -> bool:
+    """Match a score's reconstructed bundle directory using download semantics."""
+    if not include_list:
+        return True
+    score_directory = f"music/music_score/{score_path.parent.name}"
+    return any(re.match(pattern, score_directory) for pattern in include_list)
+
+
+def collect_score_files(
+    extracted_dir: StdPath, include_list: list[str] | None = None
+) -> list[StdPath]:
+    """Collect eligible chart TextAsset outputs with deterministic de-duplication."""
     score_root = extracted_dir / "music" / "music_score"
-    return sorted({path for path in score_root.rglob("*.txt") if path.is_file()})
+    return sorted(
+        {
+            path
+            for path in score_root.rglob("*.txt")
+            if path.is_file() and _score_matches_include_list(path, include_list)
+        }
+    )
 
 
-def has_local_chart_sources(extracted_dir: StdPath) -> bool:
+def has_local_chart_sources(extracted_dir: StdPath, include_list: list[str] | None = None) -> bool:
     """Whether an extraction root already contains usable chart source files."""
-    return bool(collect_score_files(extracted_dir))
+    return bool(collect_score_files(extracted_dir, include_list))
 
 
 def needs_temporary_chart_source(
     extracted_dir: StdPath,
     configured_extracted_dir,
+    include_list: list[str] | None = None,
 ) -> bool:
     """Avoid writing remote chart sources into a user's persistent extraction root."""
-    return configured_extracted_dir is not None and not has_local_chart_sources(extracted_dir)
+    return configured_extracted_dir is not None and not has_local_chart_sources(
+        extracted_dir, include_list
+    )
 
 
 def _storage_source_path(storage: dict) -> StdPath:
@@ -292,7 +312,9 @@ async def _copy_chart_sources_from_one_storage(
         raise RuntimeError(f"command exited with status {process.returncode}")
 
 
-async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> None:
+async def fetch_chart_sources_from_storage(
+    config, extracted_dir: StdPath, include_list: list[str] | None = None
+) -> None:
     """Copy chart sources from the first successful normal asset mirror."""
     target_dir = extracted_dir / "music" / "music_score"
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -300,7 +322,7 @@ async def fetch_chart_sources_from_storage(config, extracted_dir: StdPath) -> No
     for storage in get_normal_storage_candidates(config):
         try:
             await _copy_chart_sources_from_one_storage(storage, target_dir, config)
-            if not has_local_chart_sources(extracted_dir):
+            if not has_local_chart_sources(extracted_dir, include_list):
                 raise RuntimeError("storage did not provide any chart .txt files")
             logger.info("Loaded chart sources from normal storage %s", storage["base"])
             return
@@ -328,8 +350,10 @@ def get_chart_jacket_url(config, region: str, music_id: int) -> str:
     return f"{jacket_base_url.rstrip('/')}/jacket_s_{padded_id}/{jacket_name}"
 
 
-async def _render_charts(config, extracted_dir: StdPath) -> None:
-    score_files = collect_score_files(extracted_dir)
+async def _render_charts(
+    config, extracted_dir: StdPath, include_list: list[str] | None = None
+) -> None:
+    score_files = collect_score_files(extracted_dir, include_list)
     if not score_files:
         logger.info("No music score TextAssets found")
         return
@@ -377,6 +401,7 @@ async def run_specialized_postprocess(
     *,
     extracted_dir_is_temporary: bool = False,
     skip_missing_sources: bool = False,
+    score_include_list: list[str] | None = None,
 ) -> None:
     """Run mode-specific work only after every bundle has succeeded."""
     if config.ASSET_LOCAL_EXTRACTED_DIR is None:
@@ -415,33 +440,39 @@ async def run_specialized_postprocess(
         configured_extracted_dir = (
             None if extracted_dir_is_temporary else config.ASSET_LOCAL_EXTRACTED_DIR
         )
-        temporary_source = needs_temporary_chart_source(extracted_dir, configured_extracted_dir)
+        temporary_source = needs_temporary_chart_source(
+            extracted_dir, configured_extracted_dir, score_include_list
+        )
         if temporary_source:
             with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
                 chart_source_dir = StdPath(temp_dir)
                 try:
-                    await fetch_chart_sources_from_storage(config, chart_source_dir)
+                    await fetch_chart_sources_from_storage(
+                        config, chart_source_dir, score_include_list
+                    )
                 except Exception as exc:
                     if skip_missing_sources:
                         logger.warning("Skipping optional Charts post-processing: %s", exc)
                         return
                     raise
-                await _render_charts(config, chart_source_dir)
+                await _render_charts(config, chart_source_dir, score_include_list)
                 await _upload_specialized_directory(
                     "charts",
                     chart_source_dir / "charts" / _region_name(config),
                     config,
                 )
         else:
-            if not has_local_chart_sources(extracted_dir):
+            if not has_local_chart_sources(extracted_dir, score_include_list):
                 try:
-                    await fetch_chart_sources_from_storage(config, extracted_dir)
+                    await fetch_chart_sources_from_storage(
+                        config, extracted_dir, score_include_list
+                    )
                 except Exception as exc:
                     if skip_missing_sources:
                         logger.warning("Skipping optional Charts post-processing: %s", exc)
                         return
                     raise
-            await _render_charts(config, extracted_dir)
+            await _render_charts(config, extracted_dir, score_include_list)
             await _upload_specialized_directory(
                 "charts", extracted_dir / "charts" / _region_name(config), config
             )

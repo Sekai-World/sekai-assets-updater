@@ -441,12 +441,21 @@ async def _run_enabled_specialized_postprocess(
                 raise
             logger.warning("Skipping optional Live2D cache recovery: %s", exc)
     for specialized_mode in enabled_modes:
-        await run_specialized_postprocess(
-            specialized_mode,
-            cfg,
-            extracted_dir_is_temporary=extracted_dir_is_temporary,
-            skip_missing_sources=mode == "assets",
-        )
+        if specialized_mode == "charts":
+            await run_specialized_postprocess(
+                specialized_mode,
+                cfg,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
+                skip_missing_sources=mode == "assets",
+                score_include_list=cfg.DL_INCLUDE_LIST if mode == "assets" else None,
+            )
+        else:
+            await run_specialized_postprocess(
+                specialized_mode,
+                cfg,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
+                skip_missing_sources=mode == "assets",
+            )
 
 
 async def _restore_pending_cache_on_failure(

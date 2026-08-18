@@ -134,6 +134,17 @@ class SpecializedHelpersTest(unittest.TestCase):
                 self.assertEqual(music_id_from_score_path(score), 1)
                 self.assertEqual(collect_score_files(root), [score])
 
+    def test_chart_source_detection_honors_score_directory_include_patterns(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            score = root / "music" / "music_score" / "001_song" / "master.txt"
+            score.parent.mkdir(parents=True)
+            score.write_text("# SUS", encoding="utf-8")
+            include_list = [r"^music/music_score/002_song$"]
+            self.assertFalse(has_local_chart_sources(root, include_list))
+
     def test_live2d_extraction_is_decided_by_bundle_name(self):
         self.assertTrue(is_live2d_bundle({"bundleName": "live2d/motion/base"}))
         self.assertTrue(is_live2d_bundle({"bundleName": "live2d/model/base"}))
@@ -241,6 +252,59 @@ class SpecializedHelpersTest(unittest.TestCase):
 
 
 class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_assets_charts_passes_download_include_list_to_postprocess(self):
+        config = SimpleNamespace(
+            ENABLE_LIVE2D_POSTPROCESS=False,
+            ENABLE_CHARTS_POSTPROCESS=True,
+            DL_INCLUDE_LIST=[r"^music/music_score/001_song$"],
+        )
+        with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+            await main._run_enabled_specialized_postprocess("assets", config, False)
+        postprocess.assert_awaited_once_with(
+            "charts",
+            config,
+            extracted_dir_is_temporary=False,
+            skip_missing_sources=True,
+            score_include_list=config.DL_INCLUDE_LIST,
+        )
+
+    async def test_forced_charts_does_not_pass_download_include_list(self):
+        config = SimpleNamespace(DL_INCLUDE_LIST=[r"^music/music_score/001_song$"])
+        with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+            await main._run_enabled_specialized_postprocess("charts", config, False)
+        postprocess.assert_awaited_once_with(
+            "charts",
+            config,
+            extracted_dir_is_temporary=False,
+            skip_missing_sources=False,
+            score_include_list=None,
+        )
+
+    async def test_chart_rendering_honors_score_directory_include_patterns(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            extracted_dir = Path(temp_dir)
+            for directory_name in ("001_song", "002_song"):
+                score = extracted_dir / "music" / "music_score" / directory_name / "master.txt"
+                score.parent.mkdir(parents=True)
+                score.write_text("# SUS", encoding="utf-8")
+            config = SimpleNamespace(REGION=SimpleNamespace(name="JP"))
+
+            with patch.object(
+                specialized, "get_list", new=AsyncMock(return_value=[{"id": 1}, {"id": 2}])
+            ):
+                with patch.object(specialized, "render_chart", new=AsyncMock()) as render:
+                    await specialized._render_charts(
+                        config, extracted_dir, [r"^music/music_score/001_song$"]
+                    )
+
+            render.assert_awaited_once()
+            self.assertEqual(
+                render.await_args.args[1],
+                str(extracted_dir / "charts" / "jp" / "001" / "master.svg"),
+            )
+
     async def test_chart_rendering_preserves_source_music_id_padding_in_output_path(self):
         import tempfile
 
@@ -676,7 +740,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
 
             rendered_dirs = []
 
-            async def render_charts(_config, source_dir):
+            async def render_charts(_config, source_dir, _include_list=None):
                 rendered_dirs.append(source_dir)
                 (source_dir / "charts" / "jp").mkdir(parents=True)
 
