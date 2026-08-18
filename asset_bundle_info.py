@@ -21,6 +21,34 @@ from model import ConfigLike
 logger = logging.getLogger("asset_updater")
 
 
+def normalize_asset_bundle_info(asset_bundle_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize API compatibility values without inventing integrity data.
+
+    CN, KR, and TC metadata can represent the absent ``hash`` value as JSON
+    ``null`` while supplying ``crc`` as the bundle's usable checksum.  State
+    records encode that known absence as an empty string paired with CRC.  Do
+    not normalize a null hash when no CRC was supplied: the strict state
+    validation path must reject bundles with no integrity identifier.
+    """
+    bundles = asset_bundle_info.get("bundles")
+    if not isinstance(bundles, dict):
+        return asset_bundle_info
+
+    normalized_bundles: Dict[str, Any] = {}
+    for bundle_name, bundle in bundles.items():
+        if not isinstance(bundle, dict):
+            normalized_bundles[bundle_name] = bundle
+            continue
+        normalized_bundle = dict(bundle)
+        if normalized_bundle.get("hash") is None and normalized_bundle.get("crc") not in (None, ""):
+            normalized_bundle["hash"] = ""
+        normalized_bundles[bundle_name] = normalized_bundle
+
+    normalized_info = dict(asset_bundle_info)
+    normalized_info["bundles"] = normalized_bundles
+    return normalized_info
+
+
 def _transport_error(operation: str, url: str, exc: BaseException) -> RuntimeError:
     return RuntimeError(f"{operation} failed for {sanitize_url(url)} ({type(exc).__name__})")
 
@@ -209,6 +237,7 @@ async def fetch_asset_bundle_info(
                     asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
                     if not isinstance(asset_bundle_info, dict):
                         raise ValueError(f"Invalid json from {sanitize_url(asset_bundle_info_url)}")
+                    asset_bundle_info = normalize_asset_bundle_info(asset_bundle_info)
                 else:
                     logger.error(
                         "Failed to fetch asset bundle info from %s, status: %s, "

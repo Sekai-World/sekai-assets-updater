@@ -117,11 +117,10 @@ def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
             not isinstance(normalized[field], str) or not normalized[field].strip()
         ):
             _fail(f"{path}.{field} must be a non-empty string")
-    if "hash" in normalized and (
-        not isinstance(normalized["hash"], str)
-        or (not normalized["hash"].strip() and "crc" not in normalized)
-    ):
-        _fail(f"{path}.hash must be a string and may be empty only with CRC")
+    bundle_hash = normalized.get("hash")
+    has_hash = isinstance(bundle_hash, str) and bool(bundle_hash.strip())
+    if "hash" in normalized and not isinstance(bundle_hash, str):
+        _fail(f"{path}.hash must be a string")
     if "crc" in normalized:
         crc = normalized["crc"]
         if isinstance(crc, bool) or not isinstance(crc, (str, int, float)):
@@ -131,6 +130,9 @@ def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
         if isinstance(crc, str) and not crc.strip():
             _fail(f"{path}.crc must be non-empty when present")
         normalized["crc"] = str(crc)
+    has_crc = "crc" in normalized
+    if not has_hash and not has_crc:
+        _fail(f"{path} must contain a non-empty hash or CRC")
     for field in {"fileSize", "size"}:
         if field in normalized and (type(normalized[field]) is not int or normalized[field] < 0):
             _fail(f"{path}.{field} must be a non-negative integer")

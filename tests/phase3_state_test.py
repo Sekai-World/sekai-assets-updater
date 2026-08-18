@@ -8,11 +8,12 @@ import sys
 
 import pytest
 
+from asset_bundle_info import normalize_asset_bundle_info
 import state
 
 
 def _queue():
-    return [["https://example.test/a", {"bundleName": "a", "fileSize": 1}]]
+    return [["https://example.test/a", {"bundleName": "a", "hash": "h", "fileSize": 1}]]
 
 
 def _metadata():
@@ -42,8 +43,8 @@ def test_pending_queue_rejects_duplicate_bundle_names() -> None:
     with pytest.raises(state.StateValidationError, match="duplicate"):
         state.validate_pending_queue(
             [
-                ["url-a", {"bundleName": "same"}],
-                ["url-b", {"bundleName": "same"}],
+                ["url-a", {"bundleName": "same", "hash": "a"}],
+                ["url-b", {"bundleName": "same", "hash": "b"}],
             ]
         )
 
@@ -54,6 +55,34 @@ def test_bundle_crc_compatibility_accepts_empty_hash_and_normalizes_numeric_crc(
     )[0][1]
     assert bundle["hash"] == ""
     assert bundle["crc"] == "12345"
+
+
+def test_null_hash_with_crc_is_normalized_before_journal_creation(tmp_path: Path) -> None:
+    metadata = normalize_asset_bundle_info(
+        {
+            "version": "v1",
+            "bundles": {"regional": {"bundleName": "regional", "hash": None, "crc": 12345}},
+        }
+    )
+    queue = [["https://example.test/regional", metadata["bundles"]["regional"]]]
+
+    journal = state.create_journal(tmp_path / "journal.json", queue, metadata, _version(), "tx")
+
+    assert journal["queue"][0][1]["hash"] == ""
+    assert journal["queue"][0][1]["crc"] == "12345"
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        {"bundleName": "missing"},
+        {"bundleName": "null-hash", "hash": None},
+        {"bundleName": "empty-hash", "hash": ""},
+    ],
+)
+def test_bundle_without_hash_or_crc_is_rejected(bundle: dict) -> None:
+    with pytest.raises(state.StateValidationError):
+        state.validate_pending_queue([["https://example.test/bundle", bundle]])
 
 
 def test_metadata_and_version_validation_is_strict() -> None:
