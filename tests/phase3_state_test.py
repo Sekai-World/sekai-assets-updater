@@ -72,6 +72,35 @@ def test_null_hash_with_crc_is_normalized_before_journal_creation(tmp_path: Path
     assert journal["queue"][0][1]["crc"] == "12345"
 
 
+def test_numeric_metadata_version_is_normalized_before_journal_creation(tmp_path: Path) -> None:
+    metadata = normalize_asset_bundle_info(
+        {
+            "version": 38,
+            "bundles": {"regional": {"bundleName": "regional", "hash": "abc"}},
+        }
+    )
+
+    journal = state.create_journal(
+        tmp_path / "journal.json",
+        [["https://example.test/regional", metadata["bundles"]["regional"]]],
+        metadata,
+        _version(),
+        "tx",
+    )
+
+    assert journal["asset_metadata"]["version"] == "38"
+
+
+@pytest.mark.parametrize("version", [None, True, False, "", 1.5, {}])
+def test_invalid_metadata_versions_are_not_normalized(version: object) -> None:
+    metadata = normalize_asset_bundle_info(
+        {"version": version, "bundles": {"regional": {"bundleName": "regional", "hash": "abc"}}}
+    )
+
+    with pytest.raises(state.StateValidationError):
+        state.validate_asset_metadata(metadata)
+
+
 @pytest.mark.parametrize(
     "bundle",
     [

@@ -30,9 +30,18 @@ def normalize_asset_bundle_info(asset_bundle_info: Dict[str, Any]) -> Dict[str, 
     not normalize a null hash when no CRC was supplied: the strict state
     validation path must reject bundles with no integrity identifier.
     """
-    bundles = asset_bundle_info.get("bundles")
+    normalized_info = dict(asset_bundle_info)
+    # Nuverse regional endpoints return the metadata revision as a JSON number,
+    # whereas persisted state deliberately represents revisions as strings.
+    # Normalize only a real integer revision; absent, boolean, or other shapes
+    # remain invalid at the strict state-validation boundary.
+    version = normalized_info.get("version")
+    if type(version) is int:
+        normalized_info["version"] = str(version)
+
+    bundles = normalized_info.get("bundles")
     if not isinstance(bundles, dict):
-        return asset_bundle_info
+        return normalized_info
 
     normalized_bundles: Dict[str, Any] = {}
     for bundle_name, bundle in bundles.items():
@@ -44,7 +53,6 @@ def normalize_asset_bundle_info(asset_bundle_info: Dict[str, Any]) -> Dict[str, 
             normalized_bundle["hash"] = ""
         normalized_bundles[bundle_name] = normalized_bundle
 
-    normalized_info = dict(asset_bundle_info)
     normalized_info["bundles"] = normalized_bundles
     return normalized_info
 

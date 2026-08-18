@@ -152,9 +152,12 @@ def validate_asset_metadata(value: Any) -> dict[str, Any]:
         _fail("asset metadata must be an object")
     if set(value) - {"version", "os", "bundles"}:
         _fail("asset metadata contains unknown fields")
-    for field in {"version", "os"}:
-        if field in value and not isinstance(value[field], str):
-            _fail(f"asset metadata.{field} must be a string")
+    if "version" in value and (
+        not isinstance(value["version"], str) or not value["version"].strip()
+    ):
+        _fail("asset metadata.version must be a non-empty string")
+    if "os" in value and not isinstance(value["os"], str):
+        _fail("asset metadata.os must be a string")
     bundles = value.get("bundles")
     if not isinstance(bundles, dict):
         _fail("asset metadata.bundles must be a mapping")
