@@ -153,6 +153,71 @@ def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatc
     assert state.load_game_version(tmp_path / "version.json") == _version()
 
 
+def test_empty_download_plan_commits_metadata_without_journal_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(main, "config", config)
+    events: list[str] = []
+
+    async def fake_fetch(*_args, **_kwargs):
+        return _fetch_result()
+
+    async def fake_plan(*_args, **_kwargs):
+        return helpers.DownloadPlan([], _metadata("fresh", "new"), _version())
+
+    original_replay = main.replay_journal
+
+    def replay(*args, **kwargs):
+        events.append("replay")
+        return original_replay(*args, **kwargs)
+
+    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(main, "get_download_list", fake_plan)
+    monkeypatch.setattr(main, "replay_journal", replay)
+    asyncio.run(main.main())
+
+    assert events == ["replay"]  # startup recovery only
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert state.load_asset_metadata(paths.asset_metadata) == _metadata("fresh", "new")
+    assert state.load_game_version(paths.game_version) == _version()
+    assert not paths.queue.exists()
+    assert not paths.journal.exists()
+
+
+def test_empty_transaction_failure_retains_journal_for_recovery(tmp_path: Path, monkeypatch) -> None:
+    config = _config(tmp_path)
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    original_write = state.atomic_write_json
+    writes = 0
+
+    def fail_after_queue(path, data, validator):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise state.StatePersistenceError("simulated metadata failure")
+        return original_write(path, data, validator)
+
+    monkeypatch.setattr(state, "atomic_write_json", fail_after_queue)
+    with pytest.raises(state.StatePersistenceError):
+        state.commit_empty_transaction(paths, _metadata("recovered", "fresh"), _version())
+    assert paths.journal.exists()
+
+    monkeypatch.setattr(state, "atomic_write_json", original_write)
+    assert state.replay_journal(paths)
+    assert state.load_asset_metadata(paths.asset_metadata) == _metadata("recovered", "fresh")
+    assert state.load_game_version(paths.game_version) == _version()
+    assert not paths.journal.exists()
+
+
 def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
     monkeypatch.setattr(main, "config", config)

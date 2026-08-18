@@ -643,6 +643,30 @@ def replay_journal(
     return True
 
 
+def commit_empty_transaction(
+    paths: StatePaths, asset_metadata: Any, game_version: Any
+) -> None:
+    """Commit metadata/version for an empty queue without replay overhead.
+
+    This is still journaled: two independent cache files cannot be updated
+    atomically.  The journal is published before either target is changed, and
+    is removed only after all writes have been validated.  Consequently a
+    crash at any point leaves a journal which normal startup recovery can
+    replay.  Unlike ``replay_journal`` this deliberately avoids the extra
+    read-back/rewrite path used for a general queue transaction.
+    """
+    envelope = create_journal(paths, [], asset_metadata, game_version)
+    try:
+        atomic_write_json(paths.queue, envelope["queue"], validate_pending_queue)
+        atomic_write_json(paths.asset_metadata, envelope["asset_metadata"], validate_asset_metadata)
+        atomic_write_json(paths.game_version, envelope["game_version"], validate_game_version)
+        durable_unlink(paths.journal)
+    except BaseException:
+        # Keep the authoritative journal for startup recovery.  In particular,
+        # do not attempt cleanup after a partial commit.
+        raise
+
+
 class StateLock:
     """Stable exclusive whole-run lock backed by POSIX ``fcntl.flock``.
 

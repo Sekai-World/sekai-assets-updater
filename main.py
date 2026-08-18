@@ -38,6 +38,7 @@ from state import (
     StateNotFoundError,
     StatePaths,
     atomic_write_json,
+    commit_empty_transaction,
     create_journal,
     derive_active_state_paths,
     derive_state_paths,
@@ -655,22 +656,30 @@ async def _run_full_download_pipeline(
 
     if paths is not None and not paths.journal.exists():
         queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
-        journal_started = time.perf_counter()
-        verified_journal = create_journal(
-            paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version
-        )
-        logger.info(
-            "RUN | step=2/4 | timing=journal_create | duration_sec=%.6f | items=%d",
-            time.perf_counter() - journal_started,
-            len(queue_items),
-        )
-        replay_started = time.perf_counter()
-        replay_journal(paths, _verified_envelope=verified_journal)
-        logger.info(
-            "RUN | step=2/4 | timing=journal_replay | duration_sec=%.6f | items=%d",
-            time.perf_counter() - replay_started,
-            len(queue_items),
-        )
+        if not download_list and not pending_items_outside_mode:
+            commit_started = time.perf_counter()
+            commit_empty_transaction(paths, plan.asset_metadata, plan.game_version)
+            logger.info(
+                "RUN | step=2/4 | timing=empty_transaction_commit | duration_sec=%.6f",
+                time.perf_counter() - commit_started,
+            )
+        else:
+            journal_started = time.perf_counter()
+            verified_journal = create_journal(
+                paths, [list(item) for item in queue_items], plan.asset_metadata, plan.game_version
+            )
+            logger.info(
+                "RUN | step=2/4 | timing=journal_create | duration_sec=%.6f | items=%d",
+                time.perf_counter() - journal_started,
+                len(queue_items),
+            )
+            replay_started = time.perf_counter()
+            replay_journal(paths, _verified_envelope=verified_journal)
+            logger.info(
+                "RUN | step=2/4 | timing=journal_replay | duration_sec=%.6f | items=%d",
+                time.perf_counter() - replay_started,
+                len(queue_items),
+            )
 
     if not download_list:
         await _complete_with_empty_download_list(
