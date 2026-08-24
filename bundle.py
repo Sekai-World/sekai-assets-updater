@@ -1,7 +1,6 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
 import asyncio
-import atexit
 import logging
 import os
 import random
@@ -10,7 +9,6 @@ import shutil
 import struct
 import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
 from functools import partial
 from io import BytesIO
@@ -30,6 +28,12 @@ from UnityPy.enums.ClassIDType import ClassIDType
 from UnityPy.enums.SpritePackingRotation import SpritePackingRotation
 from UnityPy.export.SpriteHelper import SpriteSettings, get_image
 
+from bundle_runtime import (
+    get_hca_decode_concurrency as _get_hca_decode_concurrency,
+)
+from bundle_runtime import (
+    runtime as _bundle_runtime,
+)
 from constants import (
     UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
@@ -64,13 +68,6 @@ from utils.playable import extract_playable
 logger = logging.getLogger("live2d")
 
 _ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
-_audio_file_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_hca_decode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_audio_encoder_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_video_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_extract_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
-_audio_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
-_usm_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
 _vgmstream_cli_cache: str | None = None
 _vgmstream_cli_checked = False
 _hca_decoder_reported: str | None = None
@@ -141,16 +138,6 @@ def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
 def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
     """Return whether this individual bundle contains chart score assets."""
     return (bundle.get("bundleName") or "").startswith("music/music_score/")
-
-
-def _sanitize_concurrency(value) -> int:
-    try:
-        concurrency = int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"concurrency must be a positive integer, got {value!r}") from None
-    if concurrency <= 0:
-        raise ValueError(f"concurrency must be a positive integer, got {value!r}")
-    return concurrency
 
 
 def _get_external_process_timeout(config) -> float:
@@ -282,76 +269,6 @@ def _cleanup_process_output(process, *, remove_direct_output: bool = False) -> N
                 logger.exception("Failed to remove failed process output %s", output_path)
 
 
-def _get_legacy_audio_transcode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_AUDIO_TRANSCODES",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
-
-
-def _get_max_concurrent_audio_files(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENT_AUDIO_FILES",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_hca_decode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_HCA_DECODES",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_audio_encoder_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_AUDIO_ENCODERS",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_video_transcode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_VIDEO_TRANSCODES",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
-
-
-def _get_usm_demux_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_USM_DEMUXES",
-            _get_video_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_extract_process_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_EXTRACTS",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
-
-
 def _get_texture_output_formats(config) -> tuple[str, ...]:
     value = getattr(config, "TEXTURE_OUTPUT_FORMATS", ("png", "webp"))
     if isinstance(value, str):
@@ -370,138 +287,13 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
     return tuple(valid_formats)
 
 
-def _get_shared_audio_file_semaphore(config) -> asyncio.Semaphore:
-    global _audio_file_semaphore_cache
-
-    concurrency = _get_max_concurrent_audio_files(config)
-    if _audio_file_semaphore_cache is None or _audio_file_semaphore_cache[0] != concurrency:
-        _audio_file_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _audio_file_semaphore_cache[1]
-
-
-def _get_shared_hca_decode_semaphore(config) -> asyncio.Semaphore:
-    global _hca_decode_semaphore_cache
-
-    concurrency = _get_hca_decode_concurrency(config)
-    if _hca_decode_semaphore_cache is None or _hca_decode_semaphore_cache[0] != concurrency:
-        _hca_decode_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _hca_decode_semaphore_cache[1]
-
-
-def _get_shared_audio_encoder_semaphore(config) -> asyncio.Semaphore:
-    global _audio_encoder_semaphore_cache
-
-    concurrency = _get_audio_encoder_concurrency(config)
-    if _audio_encoder_semaphore_cache is None or _audio_encoder_semaphore_cache[0] != concurrency:
-        _audio_encoder_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _audio_encoder_semaphore_cache[1]
-
-
-def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
-    global _video_transcode_semaphore_cache
-
-    concurrency = _get_video_transcode_concurrency(config)
-    if (
-        _video_transcode_semaphore_cache is None
-        or _video_transcode_semaphore_cache[0] != concurrency
-    ):
-        _video_transcode_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _video_transcode_semaphore_cache[1]
-
-
-def _shutdown_audio_process_pool() -> None:
-    global _audio_process_pool_cache
-
-    if _audio_process_pool_cache is None:
-        return
-
-    _, executor = _audio_process_pool_cache
-    _audio_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
-
-
-def _shutdown_usm_process_pool() -> None:
-    global _usm_process_pool_cache
-
-    if _usm_process_pool_cache is None:
-        return
-
-    _, executor = _usm_process_pool_cache
-    _usm_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
-
-
-def _shutdown_extract_process_pool() -> None:
-    global _extract_process_pool_cache
-
-    if _extract_process_pool_cache is None:
-        return
-
-    _, executor = _extract_process_pool_cache
-    _extract_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
-
-
-atexit.register(_shutdown_extract_process_pool)
-atexit.register(_shutdown_audio_process_pool)
-atexit.register(_shutdown_usm_process_pool)
-
-
-def _get_shared_extract_process_pool(config) -> ProcessPoolExecutor:
-    global _extract_process_pool_cache
-
-    concurrency = _get_extract_process_concurrency(config)
-    if _extract_process_pool_cache is None or _extract_process_pool_cache[0] != concurrency:
-        if _extract_process_pool_cache is not None:
-            _extract_process_pool_cache[1].shutdown(
-                wait=False,
-                cancel_futures=False,
-            )
-        _extract_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _extract_process_pool_cache[1]
-
-
-def _get_shared_audio_process_pool(config) -> ProcessPoolExecutor:
-    global _audio_process_pool_cache
-
-    concurrency = _get_hca_decode_concurrency(config)
-    if _audio_process_pool_cache is None or _audio_process_pool_cache[0] != concurrency:
-        if _audio_process_pool_cache is not None:
-            _audio_process_pool_cache[1].shutdown(wait=False, cancel_futures=False)
-        _audio_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _audio_process_pool_cache[1]
-
-
-def _get_shared_usm_process_pool(config) -> ProcessPoolExecutor:
-    global _usm_process_pool_cache
-
-    concurrency = _get_usm_demux_concurrency(config)
-    if _usm_process_pool_cache is None or _usm_process_pool_cache[0] != concurrency:
-        if _usm_process_pool_cache is not None:
-            _usm_process_pool_cache[1].shutdown(wait=False, cancel_futures=False)
-        _usm_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _usm_process_pool_cache[1]
+_get_shared_audio_file_semaphore = _bundle_runtime.audio_file_semaphore
+_get_shared_hca_decode_semaphore = _bundle_runtime.hca_decode_semaphore
+_get_shared_audio_encoder_semaphore = _bundle_runtime.audio_encoder_semaphore
+_get_shared_video_transcode_semaphore = _bundle_runtime.video_transcode_semaphore
+_get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
+_get_shared_audio_process_pool = _bundle_runtime.audio_process_pool
+_get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
 
 
 def _get_hca_decode_backend(config) -> HcaDecodeBackend:
