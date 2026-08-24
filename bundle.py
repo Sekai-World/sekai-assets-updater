@@ -6,10 +6,8 @@ import os
 import random
 import re
 import shutil
-import struct
 import sys
 import tempfile
-from contextlib import ExitStack
 from functools import partial
 from io import BytesIO
 from pathlib import Path as StdPath
@@ -28,16 +26,48 @@ from UnityPy.enums.ClassIDType import ClassIDType
 from UnityPy.enums.SpritePackingRotation import SpritePackingRotation
 from UnityPy.export.SpriteHelper import SpriteSettings, get_image
 
+from bundle_integrity import (
+    DownloadIntegrityError,
+    RetryableDownloadError,
+)
+from bundle_integrity import (
+    validate_unityfs_bundle as _validate_unityfs_bundle,
+)
+from bundle_paths import (
+    build_unityfs_save_path as _build_unityfs_save_path,
+)
+from bundle_paths import (
+    canonical_root as _canonical_root,
+)
+from bundle_paths import (
+    discard_exported_file as _discard_exported_file_sync,
+)
+from bundle_paths import (
+    replace_suffix_secure as _replace_suffix_secure,
+)
+from bundle_paths import (
+    resolve_existing_path as _resolve_existing_path_sync,
+)
+from bundle_paths import (
+    resolve_existing_usm_path as _resolve_existing_usm_path_sync,
+)
+from bundle_paths import (
+    resolve_generated_child_path as _resolve_generated_child_path,
+)
+from bundle_paths import (
+    resolve_local_audio_outputs as _resolve_local_audio_outputs_sync,
+)
+from bundle_paths import (
+    resolve_shared_audio_outputs as _resolve_shared_audio_outputs_sync,
+)
+from bundle_paths import (
+    stream_files as _stream_files,
+)
 from bundle_runtime import (
     get_hca_decode_concurrency as _get_hca_decode_concurrency,
 )
 from bundle_runtime import (
     runtime as _bundle_runtime,
-)
-from constants import (
-    UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
-    UNITY_FS_BUILT_IN_CONTAINER_BASE,
-    UNITY_FS_CONTAINER_BASE,
 )
 from helpers import (
     get_download_http_session_options,
@@ -73,61 +103,6 @@ _vgmstream_cli_checked = False
 _hca_decoder_reported: str | None = None
 HcaDecodeBackend = Literal["auto", "python", "vgmstream"]
 _EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
-
-
-class DownloadIntegrityError(ValueError):
-    """Raised when a downloaded bundle fails its wire or content checks."""
-
-
-class RetryableDownloadError(DownloadIntegrityError):
-    """A transient download failure that may be retried."""
-
-    def __init__(self, message: str, retry_after: float | None = None):
-        super().__init__(message)
-        self.retry_after = retry_after
-
-
-_UNITYFS_SIGNATURE = b"UnityFS\0"
-_UNITYFS_FIELD_LIMIT = 1024
-_UNITYFS_FIXED_HEADER_SIZE = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4
-
-
-def _validate_unityfs_bundle(path: StdPath, stored_bytes: int) -> None:
-    """Validate the bounded UnityFS header and its declared file offsets."""
-    with path.open("rb") as stream:
-        header = stream.read(_UNITYFS_FIXED_HEADER_SIZE + 2 * _UNITYFS_FIELD_LIMIT)
-    if len(header) < len(_UNITYFS_SIGNATURE) or not header.startswith(_UNITYFS_SIGNATURE):
-        raise DownloadIntegrityError("stored bundle does not begin with UnityFS")
-
-    offset = len(_UNITYFS_SIGNATURE)
-    if len(header) < offset + 4:
-        raise DownloadIntegrityError("incomplete UnityFS format header")
-    format_version = struct.unpack_from(">I", header, offset)[0]
-    offset += 4
-    if format_version == 0:
-        raise DownloadIntegrityError("invalid UnityFS format version")
-
-    fields = []
-    for field_name in ("unity version", "revision"):
-        end = header.find(b"\0", offset, offset + _UNITYFS_FIELD_LIMIT + 1)
-        if end < 0 or end == offset + _UNITYFS_FIELD_LIMIT:
-            raise DownloadIntegrityError(f"incomplete UnityFS {field_name} field")
-        if end == offset:
-            raise DownloadIntegrityError(f"empty UnityFS {field_name} field")
-        fields.append(header[offset:end])
-        offset = end + 1
-
-    if len(header) < offset + 20:
-        raise DownloadIntegrityError("incomplete UnityFS fixed header")
-    declared_size, compressed_info_size, uncompressed_info_size, flags = struct.unpack_from(
-        ">QIII", header, offset
-    )
-    del uncompressed_info_size, flags
-    offset += 20
-    if declared_size != stored_bytes or declared_size < offset:
-        raise DownloadIntegrityError("UnityFS declared file size is invalid")
-    if compressed_info_size > declared_size - offset:
-        raise DownloadIntegrityError("UnityFS block info offset is invalid")
 
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
@@ -1034,173 +1009,6 @@ def _render_image_asset(
     return data.image
 
 
-def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) -> StdPath:
-    if not isinstance(unityfs_path, str) or not unityfs_path:
-        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-    if "\\" in unityfs_path or "\x00" in unityfs_path:
-        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-
-    source_path = PurePosixPath(unityfs_path)
-    base_paths = (
-        PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix()),
-        PurePosixPath(UNITY_FS_BUILT_IN_CONTAINER_BASE.as_posix()),
-        PurePosixPath(UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE.as_posix()),
-    )
-
-    for index, base_path in enumerate(base_paths):
-        base_text = base_path.as_posix()
-        prefix = f"{base_text}/"
-        if not unityfs_path.startswith(prefix):
-            continue
-
-        raw_relative_path = unityfs_path[len(prefix) :]
-        if not raw_relative_path or any(
-            component in ("", ".", "..") for component in raw_relative_path.split("/")
-        ):
-            raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-
-        try:
-            relpath = source_path.relative_to(base_path)
-        except ValueError:
-            continue
-
-        if index == 0:
-            relpath = PurePosixPath(*relpath.parts[1:])
-        return StdPath(resolve_secure_path(extracted_save_path, relpath.as_posix()).as_posix())
-
-    raise ValueError(f"Failed to get relative path for {unityfs_path}")
-
-
-def _resolve_generated_child_path(root: StdPath, name: str, suffix: str = "") -> StdPath:
-    """Resolve an untrusted generated filename below a local extraction root."""
-
-    relative_name = f"{name}{suffix}"
-    return StdPath(resolve_secure_path(root, relative_name).as_posix())
-
-
-def _canonical_root(path: StdPath) -> StdPath:
-    return path.resolve(strict=False)
-
-
-def _replace_suffix_secure(root: StdPath, name: str, suffix: str) -> StdPath:
-    if not isinstance(name, str) or not name or "\x00" in name:
-        raise SecurityError("generated name must be a non-empty filename")
-    if "/" in name or "\\" in name or name in (".", ".."):
-        raise SecurityError("generated name must be a single relative filename")
-    return _resolve_generated_child_path(root, StdPath(name).with_suffix(suffix).name)
-
-
-def _stream_files(paths: list[StdPath], chunk_size: int = 1024 * 1024):
-    with ExitStack() as stack:
-        files = [stack.enter_context(path.open("rb")) for path in paths]
-        for file in files:
-            while chunk := file.read(chunk_size):
-                yield chunk
-
-
-def _discard_exported_file_sync(exported_files: list[StdPath], file_path: StdPath) -> None:
-    try:
-        exported_files.remove(file_path)
-        return
-    except ValueError:
-        pass
-
-    file_path_lower = file_path.with_name(file_path.name.lower())
-    try:
-        exported_files.remove(file_path_lower)
-    except ValueError:
-        logger.debug("%s not tracked in exported_files, skip removal", file_path)
-
-
-def _resolve_existing_path_sync(
-    expected_path: StdPath,
-    save_dir: StdPath,
-    expected_suffix: str | None = None,
-) -> StdPath:
-    try:
-        relative_path = expected_path.relative_to(save_dir).as_posix()
-    except ValueError as exc:
-        raise ValueError(f"Expected path is outside save directory: {expected_path}") from exc
-    expected_path = StdPath(resolve_secure_path(save_dir, relative_path).as_posix())
-
-    if expected_path.exists():
-        return validate_contained_file(save_dir, relative_path)
-
-    expected_name_lower = expected_path.name.lower()
-    expected_path_lower = expected_path.with_name(expected_name_lower)
-    if expected_path_lower.exists():
-        logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
-        return validate_contained_file(
-            save_dir,
-            expected_path_lower.relative_to(save_dir).as_posix(),
-        )
-
-    candidate_paths = [
-        path
-        for path in save_dir.iterdir()
-        if path.name.lower() == expected_name_lower
-        and (expected_suffix is None or path.suffix.lower() == expected_suffix.lower())
-        and path.is_file()
-        and not path.is_symlink()
-    ]
-    if len(candidate_paths) == 1:
-        logger.debug(
-            "Found %s instead of %s via case-insensitive lookup",
-            candidate_paths[0],
-            expected_path.name,
-        )
-        return validate_contained_file(
-            save_dir,
-            candidate_paths[0].relative_to(save_dir).as_posix(),
-        )
-
-    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
-
-
-def _resolve_shared_audio_outputs_sync(
-    output_root: StdPath,
-    save_dir: StdPath,
-    cue_sheet_name: str,
-) -> list[StdPath]:
-    expected_names = {
-        f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
-    }
-    return [
-        validate_contained_file(
-            output_root,
-            path.relative_to(output_root).as_posix(),
-        )
-        for path in output_root.rglob("*")
-        if (
-            path.is_file()
-            and not path.is_symlink()
-            and path.parent != save_dir
-            and path.name.lower() in expected_names
-        )
-    ]
-
-
-def _resolve_local_audio_outputs_sync(
-    save_dir: StdPath,
-    cue_sheet_name: str,
-) -> list[StdPath]:
-    """Find audio files matching the cue sheet name directly in save_dir.
-
-    This covers the case where an AudioClip in the same bundle has already
-    been extracted directly (e.g. via UnityPy's AudioClip handler) and the
-    referenced ACB TextAsset lives in a different bundle that may not be
-    available in the bundle cache.
-    """
-    expected_names = {
-        f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
-    }
-    return [
-        path
-        for path in save_dir.iterdir()
-        if path.is_file() and not path.is_symlink() and path.name.lower() in expected_names
-    ]
-
-
 def _extract_acb_from_cached_bundles_sync(
     bundle_save_path: StdPath,
     acb_textasset_filename: str,
@@ -1271,32 +1079,6 @@ def _extract_acb_from_cached_bundles_sync(
             return True
 
     return False
-
-
-def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -> StdPath:
-    try:
-        return _resolve_existing_path_sync(expected_path, save_dir, ".usm")
-    except FileNotFoundError:
-        pass
-
-    candidate_paths = [
-        path
-        for path in save_dir.iterdir()
-        if path.suffix.lower() == ".usm" and path.is_file() and not path.is_symlink()
-    ]
-    if len(candidate_paths) == 1:
-        logger.warning(
-            "Expected %s in %s, falling back to discovered usm %s",
-            expected_path.name,
-            save_dir,
-            candidate_paths[0].name,
-        )
-        return validate_contained_file(
-            save_dir,
-            candidate_paths[0].relative_to(save_dir).as_posix(),
-        )
-
-    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
 
 def _save_image_formats(
