@@ -14,7 +14,6 @@ from typing import Dict, List, assert_never
 
 import aiohttp
 import cridecoder as cridecoder
-import orjson as json
 import UnityPy
 import UnityPy.classes
 import UnityPy.config
@@ -32,11 +31,9 @@ from bundle_audio import (
 from bundle_audio import (
     runtime as _audio_runtime,
 )
+from bundle_extraction import extract_unity_objects
 from bundle_images import (
-    render_image_asset as _render_image_asset,
-)
-from bundle_images import (
-    save_image_formats as _save_image_formats,
+    save_image_formats as _save_image_formats,  # noqa: F401
 )
 from bundle_integrity import (
     DownloadIntegrityError,
@@ -46,7 +43,7 @@ from bundle_integrity import (
     validate_unityfs_bundle as _validate_unityfs_bundle,
 )
 from bundle_paths import (
-    build_unityfs_save_path as _build_unityfs_save_path,
+    build_unityfs_save_path as _build_unityfs_save_path,  # noqa: F401
 )
 from bundle_paths import (
     canonical_root as _canonical_root,
@@ -106,7 +103,6 @@ from helpers import (
 )
 from security import (
     SecurityError,
-    atomic_write_bytes,
     atomic_write_stream,
     resolve_secure_path,
     secure_existing_output,
@@ -115,12 +111,6 @@ from security import (
 )
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file as decode_hca_file
-from utils.live2d import (
-    correct_param_ids,
-    extract_params_ids_from_moc3,
-    restore_unity_object_to_motion3,
-)
-from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
 
@@ -617,158 +607,14 @@ def _extract_bundle_files_sync(
 
     logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
 
-    exported_files: list[StdPath] = []
-    post_process_acb_files: list[tuple[StdPath, list[Dict]]] = []
-    post_process_movie_bundles: list[tuple[StdPath, list[Dict]]] = []
+    exported_files, post_process_acb_files, post_process_movie_bundles = extract_unity_objects(
+        unity_file,
+        output_root,
+        texture_output_formats,
+        live2d_bundle=live2d_bundle,
+    )
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
-    additional_motion_jobs = []
-    param_id_map: dict[str, str] = {}
-
-    for unityfs_path, unityfs_obj in unity_file.container.items():
-        try:
-            save_path = _build_unityfs_save_path(unityfs_path, output_root)
-        except Exception as e:
-            logger.exception("Failed to get relative path for %s", unityfs_path)
-            raise e
-
-        save_path = save_path.with_name(save_path.name.strip())
-        if live2d_bundle and "motion" in save_path.parts:
-            logger.debug("Skipping live2d motion asset %s for post-processing", unityfs_path)
-            continue
-        save_dir = save_path.parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            match unityfs_obj.type.name:
-                case "MonoBehaviour":
-                    tree = None
-                    try:
-                        if unityfs_obj.serialized_type.node:
-                            tree = unityfs_obj.read_typetree()
-                    except AttributeError:
-                        tree = unityfs_obj.read_typetree()
-                    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
-
-                    if unityfs_path.endswith(".playable"):
-                        tree = extract_playable(unity_file, unityfs_path)
-
-                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-
-                    if (
-                        live2d_bundle
-                        and isinstance(tree, dict)
-                        and tree.get("AdditionalMotionData")
-                    ):
-                        additional_motion_jobs.append((unityfs_obj.read(), save_dir))
-
-                    if "acbFiles" in tree:
-                        post_process_acb_files.append((save_dir, tree["acbFiles"]))
-                        logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
-                    elif "movieBundleDatas" in tree:
-                        post_process_movie_bundles.append((save_dir, tree["movieBundleDatas"]))
-                        logger.debug(
-                            "Found movieBundleDatas in %s: %s",
-                            unityfs_path,
-                            tree["movieBundleDatas"],
-                        )
-                case "TextAsset":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.TextAsset):
-                        if save_path.suffix == ".bytes":
-                            save_path = save_path.with_suffix("")
-                        data_bytes = data.m_Script.encode("utf-8", "surrogateescape")
-                        atomic_write_bytes(save_path, data_bytes)
-                        if live2d_bundle and save_path.suffix == ".moc3":
-                            param_id_map.update(extract_params_ids_from_moc3(data_bytes))
-                        exported_files.append(save_path)
-                    else:
-                        raise TypeError(f"Expected TextAsset, got {type(data)} for {unityfs_path}")
-                case "Texture2D" | "Sprite":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
-                        data, UnityPy.classes.Sprite
-                    ):
-                        image = _render_image_asset(data)
-                        exported_files.extend(
-                            _save_image_formats(image, save_path, texture_output_formats)
-                        )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2DArray":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2DArray):
-                        for i, image in enumerate(data.images):
-                            texture_path = save_path.with_name(f"{save_path.stem}_{i}")
-                            exported_files.extend(
-                                _save_image_formats(
-                                    image,
-                                    texture_path,
-                                    texture_output_formats,
-                                )
-                            )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
-                        )
-                case "AudioClip":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.AudioClip):
-                        for filename, sample_data in data.samples.items():
-                            sample_path = _resolve_generated_child_path(save_dir, filename)
-                            logger.debug("Saving audio clip %s to %s", filename, sample_path)
-                            atomic_write_bytes(sample_path, sample_data)
-                            exported_files.append(sample_path)
-                    else:
-                        raise TypeError(f"Expected AudioClip, got {type(data)} for {unityfs_path}")
-                case "Mesh":
-                    logger.warning("Mesh data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case "Cubemap":
-                    logger.warning("Cubemap data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case _:
-                    logger.warning(
-                        "Unknowen type %s of %s, extracting typetree",
-                        unityfs_obj.type.name,
-                        unityfs_path,
-                    )
-                    tree = unityfs_obj.read_typetree()
-                    try:
-                        json.dumps(tree)
-                    except (ValueError, TypeError):
-                        logger.warning("Failed to serialize %s, skipping", tree)
-                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-        except (ValueError, TypeError, AttributeError, OSError) as e:
-            logger.exception("Failed to extract %s: %s", unityfs_path, e)
-            raise e
-
-    if live2d_bundle:
-        for mono_behaviour, save_dir in additional_motion_jobs:
-            motions = [
-                restore_unity_object_to_motion3(motion)
-                for motion in mono_behaviour.AdditionalMotionData
-            ]
-            motions = [motion for motion in motions if motion is not None]
-            correct_param_ids(motions, param_id_map)
-            motion_dir = save_dir / "motions"
-            motion_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(
-                motion_dir / "BuildMotionData.json",
-                json.dumps(
-                    {"motions": [name for name, _ in motions]},
-                    option=json.OPT_INDENT_2,
-                ),
-            )
-            exported_files.append(motion_dir / "BuildMotionData.json")
-            for name, motion in motions:
-                motion_path = _resolve_generated_child_path(motion_dir, name, ".motion3.json")
-                atomic_write_bytes(motion_path, json.dumps(motion, option=json.OPT_INDENT_2))
-                exported_files.append(motion_path)
 
     logger.debug(
         "Extracted %d files from %s, list: %s",
