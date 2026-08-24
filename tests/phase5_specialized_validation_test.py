@@ -83,10 +83,10 @@ def test_validate_config_allows_charts_with_configured_extraction_directory(
     main.validate_config(config, mode="charts")  # type: ignore[arg-type]
 
 
-def test_tc_config_satisfies_runtime_validation(monkeypatch) -> None:
+def test_example_config_satisfies_runtime_validation(monkeypatch) -> None:
     monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
-    config_path = Path(__file__).parent.parent / "config.tc.py"
-    spec = importlib.util.spec_from_file_location("config_tc_validation", config_path)
+    config_path = Path(__file__).parent.parent / "config.example.py"
+    spec = importlib.util.spec_from_file_location("config_example_validation", config_path)
     assert spec is not None
     assert spec.loader is not None
     config = importlib.util.module_from_spec(spec)
