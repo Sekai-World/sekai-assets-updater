@@ -10,6 +10,7 @@ import orjson as json
 from anyio import open_file
 
 from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
+from bundle import shutdown_process_pools
 from helpers import (
     DownloadPlan,
     build_download_disk_space_gate,
@@ -956,13 +957,22 @@ def cli():
     )
 
     # Run the main function
-    asyncio.run(
-        main(
-            update_asset_bundle_info_only=args.update_asset_bundle_info_only,
-            force_full_download=args.force_full_download,
-            mode=args.mode,
+    try:
+        asyncio.run(
+            main(
+                update_asset_bundle_info_only=args.update_asset_bundle_info_only,
+                force_full_download=args.force_full_download,
+                mode=args.mode,
+            )
         )
-    )
+    finally:
+        # Reap pooled extraction (Live2D/bundle), audio, and video worker
+        # processes even when the pipeline fails or is cancelled so the CLI
+        # exits cleanly. Cleanup errors must never mask the pipeline result.
+        try:
+            shutdown_process_pools()
+        except Exception:
+            logger.exception("Failed to shut down process pools")
 
 
 if __name__ == "__main__":

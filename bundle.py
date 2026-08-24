@@ -421,7 +421,7 @@ def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
     return _video_transcode_semaphore_cache[1]
 
 
-def _shutdown_audio_process_pool() -> None:
+def _shutdown_audio_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
     global _audio_process_pool_cache
 
     if _audio_process_pool_cache is None:
@@ -429,10 +429,10 @@ def _shutdown_audio_process_pool() -> None:
 
     _, executor = _audio_process_pool_cache
     _audio_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
+    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
-def _shutdown_usm_process_pool() -> None:
+def _shutdown_usm_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
     global _usm_process_pool_cache
 
     if _usm_process_pool_cache is None:
@@ -440,10 +440,10 @@ def _shutdown_usm_process_pool() -> None:
 
     _, executor = _usm_process_pool_cache
     _usm_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
+    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
-def _shutdown_extract_process_pool() -> None:
+def _shutdown_extract_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
     global _extract_process_pool_cache
 
     if _extract_process_pool_cache is None:
@@ -451,12 +451,38 @@ def _shutdown_extract_process_pool() -> None:
 
     _, executor = _extract_process_pool_cache
     _extract_process_pool_cache = None
-    executor.shutdown(wait=False, cancel_futures=False)
+    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
 atexit.register(_shutdown_extract_process_pool)
 atexit.register(_shutdown_audio_process_pool)
 atexit.register(_shutdown_usm_process_pool)
+
+
+def shutdown_process_pools(*, wait: bool = True, cancel_futures: bool = True) -> None:
+    """Explicitly shut down every cached process pool used by the pipeline.
+
+    The CLI invokes this in a ``finally`` block around ``asyncio.run`` so
+    extraction (including Live2D bundles), audio decoding, and USM demux
+    worker processes are reaped as soon as a run ends - even when it fails
+    or is cancelled - instead of lingering until interpreter exit. Calls
+    are idempotent, and the ``atexit`` hooks registered above remain as a
+    safety net for other entry points.
+    """
+    cached = [
+        name
+        for name, cache in (
+            ("extract", _extract_process_pool_cache),
+            ("audio", _audio_process_pool_cache),
+            ("usm", _usm_process_pool_cache),
+        )
+        if cache is not None
+    ]
+    _shutdown_extract_process_pool(wait=wait, cancel_futures=cancel_futures)
+    _shutdown_audio_process_pool(wait=wait, cancel_futures=cancel_futures)
+    _shutdown_usm_process_pool(wait=wait, cancel_futures=cancel_futures)
+    if cached:
+        logger.debug("Shut down cached process pools: %s", ", ".join(cached))
 
 
 def _get_shared_extract_process_pool(config) -> ProcessPoolExecutor:
