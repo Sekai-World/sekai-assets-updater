@@ -87,7 +87,9 @@ def test_replay_restores_generation_after_each_commit_boundary(
     assert not paths.journal.exists()
 
 
-def test_current_invalid_network_version_remains_a_commit_error(tmp_path: Path, monkeypatch) -> None:
+def test_current_invalid_network_version_remains_a_commit_error(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Compatibility handling applies only to prior cache reads, never fetched data."""
     config = _config(tmp_path)
     monkeypatch.setattr(main, "config", config)

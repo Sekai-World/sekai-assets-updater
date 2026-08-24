@@ -137,6 +137,7 @@ def test_incompatible_metadata_caches_are_treated_as_missing(
 
     assert [bundle["bundleName"] for _, bundle in plan.candidates] == ["fresh"]
 
+
 def test_missing_nuverse_template_value_is_descriptive(monkeypatch) -> None:
     class Response:
         status = 200

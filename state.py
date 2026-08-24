@@ -643,9 +643,7 @@ def replay_journal(
     return True
 
 
-def commit_empty_transaction(
-    paths: StatePaths, asset_metadata: Any, game_version: Any
-) -> None:
+def commit_empty_transaction(paths: StatePaths, asset_metadata: Any, game_version: Any) -> None:
     """Commit metadata/version for an empty queue without replay overhead.
 
     This is still journaled: two independent cache files cannot be updated

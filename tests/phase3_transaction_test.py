@@ -189,7 +189,9 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
     assert not paths.journal.exists()
 
 
-def test_empty_transaction_failure_retains_journal_for_recovery(tmp_path: Path, monkeypatch) -> None:
+def test_empty_transaction_failure_retains_journal_for_recovery(
+    tmp_path: Path, monkeypatch
+) -> None:
     config = _config(tmp_path)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,

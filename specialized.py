@@ -388,9 +388,7 @@ async def _render_charts(
         # source spelling (for example, ``0001_song`` -> ``0001``), while the
         # numeric value above remains the musics.json lookup key.
         source_music_id = score_file.parent.name.split("_", 1)[0]
-        chart_path = (
-            extracted_dir / "charts" / region / source_music_id / f"{score_file.stem}.svg"
-        )
+        chart_path = extracted_dir / "charts" / region / source_music_id / f"{score_file.stem}.svg"
         chart_path.parent.mkdir(parents=True, exist_ok=True)
         async with semaphore:
             await render_chart(
