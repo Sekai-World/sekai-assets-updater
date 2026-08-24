@@ -585,6 +585,6 @@ def test_cancelled_communicate_preserves_cancellation_when_termination_fails(
     assert cancellation.__context__ is None
     assert terminate_calls["count"] == 1
     assert process.terminate_calls == 0
-    termination_task = getattr(process, "_bundle_terminate_task")
+    termination_task = process._bundle_terminate_task
     assert termination_task.done()
     assert termination_task.exception() is not None

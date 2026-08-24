@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-import worker
 import specialized
+import worker
 
 
 def _config(

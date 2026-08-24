@@ -11,14 +11,14 @@ from anyio import open_file
 
 from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
 from helpers import (
-    build_download_disk_space_gate,
     DownloadPlan,
+    build_download_disk_space_gate,
+    dedupe_download_items,
     ensure_dir_exists,
     filter_bundles_for_mode,
     filter_download_items_for_mode,
-    get_mode_bundle_prefixes,
     get_download_list,
-    dedupe_download_items,
+    get_mode_bundle_prefixes,
     sanitize_http_log_value,
     select_bundles_for_download,
     setup_logging_queue,
@@ -32,7 +32,6 @@ from specialized import (
     needs_shared_workspace,
     run_specialized_postprocess,
 )
-from worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
 from state import (
     StateLock,
     StateNotFoundError,
@@ -50,6 +49,7 @@ from state import (
     validate_game_version,
     validate_pending_queue,
 )
+from worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
 
 logger = logging.getLogger("asset_updater")
 
@@ -714,7 +714,7 @@ async def _run_main(
     extracted_dir_is_temporary: bool = False,
 ):
     cfg = require_config()
-    setattr(cfg, "UPDATER_MODE", mode)
+    cfg.UPDATER_MODE = mode
 
     paths = derive_active_state_paths(
         mode,

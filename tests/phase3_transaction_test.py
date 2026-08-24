@@ -61,15 +61,9 @@ def _fetch_result():
     )
 
 
-def test_download_selection_is_persistence_free(tmp_path: Path, monkeypatch) -> None:
+def test_download_selection_is_persistence_free(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    writes: list[str] = []
 
-    def fail_open(*_args, **_kwargs):
-        writes.append("open")
-        raise AssertionError("selection attempted persistence")
-
-    monkeypatch.setattr(helpers, "open_file", fail_open)
     plan = asyncio.run(
         helpers.get_download_list(
             _metadata(),
@@ -80,7 +74,6 @@ def test_download_selection_is_persistence_free(tmp_path: Path, monkeypatch) -> 
     )
     assert isinstance(plan, helpers.DownloadPlan)
     assert plan.candidates[0][1]["bundleName"] == "current"
-    assert writes == []
     assert not (tmp_path / "metadata.json").exists()
     assert not (tmp_path / "version.json").exists()
 

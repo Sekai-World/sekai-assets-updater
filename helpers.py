@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import orjson as json
-from anyio import Path, open_file
+from anyio import Path
 
 from security import derive_remote_key, validate_contained_file
 from state import (
@@ -1035,7 +1035,9 @@ async def deobfuscate(data: bytes) -> bytes:
         data = data[4:]
     elif data[:4] == b"\x10\x00\x00\x00":
         data = data[4:]
-        header = bytes(a ^ b for a, b in zip(data[:128], (b"\xff" * 5 + b"\x00" * 3) * 16))
+        header = bytes(
+            a ^ b for a, b in zip(data[:128], (b"\xff" * 5 + b"\x00" * 3) * 16, strict=True)
+        )
         data = header + data[128:]
     return data
 

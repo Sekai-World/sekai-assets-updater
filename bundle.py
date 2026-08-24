@@ -1,9 +1,7 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
-import atexit
 import asyncio
-from contextlib import ExitStack
-from functools import partial
+import atexit
 import logging
 import os
 import random
@@ -13,23 +11,24 @@ import struct
 import sys
 import tempfile
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
+from functools import partial
 from io import BytesIO
 from pathlib import Path as StdPath
 from pathlib import PurePosixPath
 from typing import Dict, List, Literal, assert_never
 
-import orjson as json
-
 import aiohttp
 import cridecoder
+import orjson as json
 import UnityPy
 import UnityPy.classes
 import UnityPy.config
+from anyio import Path, open_file
 from PIL import Image
 from UnityPy.enums.ClassIDType import ClassIDType
 from UnityPy.enums.SpritePackingRotation import SpritePackingRotation
 from UnityPy.export.SpriteHelper import SpriteSettings, get_image
-from anyio import Path, open_file
 
 from constants import (
     UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
@@ -37,11 +36,10 @@ from constants import (
     UNITY_FS_CONTAINER_BASE,
 )
 from helpers import (
-    get_download_max_retries,
     get_download_http_session_options,
+    get_download_max_retries,
     get_download_retry_base_delay,
     get_download_retry_max_delay,
-    get_http_session_options,
     sanitize_http_log_value,
     sanitize_url,
 )
@@ -51,17 +49,17 @@ from security import (
     atomic_write_stream,
     resolve_secure_path,
     secure_existing_output,
-    validate_output_target,
     validate_contained_file,
+    validate_output_target,
 )
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file
-from utils.playable import extract_playable
 from utils.live2d import (
     correct_param_ids,
     extract_params_ids_from_moc3,
     restore_unity_object_to_motion3,
 )
+from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
 
@@ -1028,6 +1026,7 @@ async def _process_extracted_audio_file(
             for (format_name, output_path, _), result in zip(
                 encode_tasks,
                 encode_results,
+                strict=True,
             ):
                 if isinstance(result, Exception):
                     logger.error(
@@ -2068,6 +2067,7 @@ async def download_deobfuscate_bundle(
                             for a, b in zip(
                                 header[4:132],
                                 (b"\xff" * 5 + b"\x00" * 3) * 16,
+                                strict=True,
                             )
                         )
                     )

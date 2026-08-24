@@ -1,4 +1,4 @@
-from struct import pack, unpack, Struct
+from struct import Struct, pack, unpack
 from typing import IO, Callable
 
 

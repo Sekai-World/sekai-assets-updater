@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import struct
 from pathlib import Path
-from typing import Any
 
 from aiohttp import web
 from anyio import Path as AnyioPath

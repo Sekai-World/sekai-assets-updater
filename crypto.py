@@ -1,5 +1,5 @@
-from Crypto.Cipher import AES
 import umsgpack
+from Crypto.Cipher import AES
 
 
 def unpack(key: bytes, iv: bytes, ciphertext: bytes) -> dict:

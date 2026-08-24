@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from asset_bundle_info import normalize_asset_bundle_info, normalize_game_version
 import state
+from asset_bundle_info import normalize_asset_bundle_info, normalize_game_version
 
 
 def _queue():

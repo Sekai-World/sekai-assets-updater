@@ -18,8 +18,8 @@ from bundle import (
     is_live2d_bundle,
 )
 from helpers import (
-    build_cdn_headers,
     DownloadDiskSpaceGate,
+    build_cdn_headers,
     get_download_http_session_options,
     sanitize_log_label,
     upload_to_storage,

@@ -1,12 +1,12 @@
+import asyncio
 import ctypes
 import ctypes.util
-import asyncio
 import logging
-import tempfile
 import sys
+import tempfile
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import List
+from urllib.parse import urlparse
 
 import aiohttp
 from anyio import open_file

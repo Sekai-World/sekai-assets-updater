@@ -114,7 +114,7 @@ def test_plain_unityfs_is_promoted_atomically(tmp_path: Path) -> None:
 def test_obfuscated_unityfs_is_deobfuscated_and_promoted(tmp_path: Path) -> None:
     plain = _unityfs(declared_size=150) + b"payload" * 15 + b"x"
     mask = (b"\xff" * 5 + b"\x00" * 3) * 16
-    encoded_header = bytes(a ^ b for a, b in zip(plain[:128], mask))
+    encoded_header = bytes(a ^ b for a, b in zip(plain[:128], mask, strict=True))
     body = b"\x10\x00\x00\x00" + encoded_header + plain[128:]
     target = _run(tmp_path, body)
     assert target.read_bytes() == plain

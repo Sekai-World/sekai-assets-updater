@@ -6,7 +6,6 @@ import logging
 import UnityPy
 import UnityPy.config
 
-
 # Track class names (tracks that contain m_Clips)
 TRACK_CLASSES = {
     "MCTimelineCharacterTalkTrack",
@@ -72,7 +71,7 @@ def build_character_map(all_objects: dict, script_map: dict) -> dict:
     """
     # Collect GroupTrack names (not currently used but available)
     group_names = {}
-    for pid, obj in all_objects.items():
+    for _pid, obj in all_objects.items():
         if obj["type"] == "MonoBehaviour":
             d = obj["data"]
             cls = get_class_name(d, script_map)
@@ -81,7 +80,7 @@ def build_character_map(all_objects: dict, script_map: dict) -> dict:
 
     # Extract from spawn tracks
     char_id_map = {}
-    for pid, obj in all_objects.items():
+    for _pid, obj in all_objects.items():
         if obj["type"] == "MonoBehaviour":
             d = obj["data"]
             cls = get_class_name(d, script_map)
@@ -93,7 +92,7 @@ def build_character_map(all_objects: dict, script_map: dict) -> dict:
                     char_id_map[cid] = char_name
 
     # Supplement using talk tracks
-    for pid, obj in all_objects.items():
+    for _pid, obj in all_objects.items():
         if obj["type"] == "MonoBehaviour":
             d = obj["data"]
             cls = get_class_name(d, script_map)
@@ -419,7 +418,7 @@ def extract_playable(env: UnityPy.load, container_path: str) -> dict:
 
     # Timeline name lookup
     timeline_name = ""
-    for pid, obj in all_objects.items():
+    for _pid, obj in all_objects.items():
         if obj["type"] == "MonoBehaviour":
             d = obj["data"]
             if get_class_name(d, script_map) == "TimelineAsset":
@@ -454,9 +453,9 @@ def extract_playable(env: UnityPy.load, container_path: str) -> dict:
 
 # CLI script
 if __name__ == "__main__":
+    import json
     import os
     import sys
-    import json
     from pathlib import Path
 
     if len(sys.argv) < 2:
@@ -576,7 +575,7 @@ if __name__ == "__main__":
 
         # Timeline name lookup
         timeline_name = ""
-        for pid, obj in all_objects.items():
+        for _pid, obj in all_objects.items():
             if obj["type"] == "MonoBehaviour":
                 d = obj["data"]
                 if get_class_name(d, script_map) == "TimelineAsset":

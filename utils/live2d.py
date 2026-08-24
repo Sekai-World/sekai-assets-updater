@@ -363,7 +363,7 @@ def _build_motion3_curves(motion: Dict) -> Tuple[List, int, int]:
     curves = []
     total_segment_count = 0
     total_point_count = 0
-    for idx, track in enumerate(motion["TrackList"]):
+    for _idx, track in enumerate(motion["TrackList"]):
         track_curves = track["Curve"]
         segments = [0, format_float(track_curves[0]["value"])]
         total_segment_count += 1

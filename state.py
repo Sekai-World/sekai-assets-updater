@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-
 JOURNAL_SCHEMA_VERSION = 1
 STATE_LOCK_FILENAME = ".updater-state.lock"
 _JOURNAL_KEYS = {
@@ -262,7 +261,7 @@ def prepare_state_directory(path: os.PathLike[str] | str) -> Path:
             if not directory.is_dir():
                 raise StatePersistenceError(
                     f"state directory component is not a directory: {directory}"
-                )
+                ) from None
         _fsync_parent(directory.parent)
     if not target.is_dir():
         raise StatePersistenceError(f"state directory is not a directory: {target}")
