@@ -158,14 +158,19 @@ class BundleRuntime:
         return self._usm_process_pool[1]
 
     @staticmethod
-    def _shutdown_pool(cache: tuple[int, ProcessPoolExecutor] | None) -> None:
+    def _shutdown_pool(
+        cache: tuple[int, ProcessPoolExecutor] | None,
+        *,
+        wait: bool,
+        cancel_futures: bool,
+    ) -> None:
         if cache is not None:
-            cache[1].shutdown(wait=False, cancel_futures=False)
+            cache[1].shutdown(wait=wait, cancel_futures=cancel_futures)
 
-    def shutdown(self) -> None:
-        self._shutdown_pool(self._extract_process_pool)
-        self._shutdown_pool(self._audio_process_pool)
-        self._shutdown_pool(self._usm_process_pool)
+    def shutdown(self, *, wait: bool = False, cancel_futures: bool = False) -> None:
+        self._shutdown_pool(self._extract_process_pool, wait=wait, cancel_futures=cancel_futures)
+        self._shutdown_pool(self._audio_process_pool, wait=wait, cancel_futures=cancel_futures)
+        self._shutdown_pool(self._usm_process_pool, wait=wait, cancel_futures=cancel_futures)
         self._extract_process_pool = None
         self._audio_process_pool = None
         self._usm_process_pool = None

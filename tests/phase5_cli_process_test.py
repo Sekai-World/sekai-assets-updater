@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -588,3 +589,73 @@ def test_cancelled_communicate_preserves_cancellation_when_termination_fails(
     termination_task = process._bundle_terminate_task
     assert termination_task.done()
     assert termination_task.exception() is not None
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.shutdown_calls: list[tuple[bool, bool]] = []
+
+    def shutdown(self, wait: bool = True, cancel_futures: bool = False) -> None:
+        self.shutdown_calls.append((wait, cancel_futures))
+
+
+def test_shutdown_process_pools_shuts_down_all_cached_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executors = {name: _RecordingExecutor() for name in ("extract", "audio", "usm")}
+    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", (4, executors["extract"]))
+    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", (2, executors["audio"]))
+    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", (2, executors["usm"]))
+
+    bundle.shutdown_process_pools()
+
+    for executor in executors.values():
+        assert executor.shutdown_calls == [(True, True)]
+    assert bundle._bundle_runtime._extract_process_pool is None
+    assert bundle._bundle_runtime._audio_process_pool is None
+    assert bundle._bundle_runtime._usm_process_pool is None
+
+
+def test_shutdown_process_pools_is_idempotent_without_cached_pools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", None)
+    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", None)
+    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", None)
+
+    bundle.shutdown_process_pools()
+
+
+@pytest.mark.parametrize("pipeline_error", [None, RuntimeError, KeyboardInterrupt])
+def test_cli_shuts_down_process_pools_on_completion_and_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_error: type[BaseException] | None,
+) -> None:
+    config_path = tmp_path / "config.py"
+    config_path.write_text("")
+    events: list[str] = []
+    monkeypatch.setattr(sys, "argv", ["sekai-updater", "-c", str(config_path)])
+    monkeypatch.setattr(main, "validate_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main, "setup_logging_queue", lambda: None)
+    monkeypatch.setattr(main, "config", None)
+
+    async def fake_main(**_kwargs):
+        events.append("main")
+        if pipeline_error is not None:
+            raise pipeline_error
+
+    def fake_shutdown():
+        events.append("shutdown")
+
+    monkeypatch.setattr(main, "main", fake_main)
+    monkeypatch.setattr(main, "shutdown_process_pools", fake_shutdown)
+
+    if pipeline_error is None:
+        main.cli()
+    else:
+        with pytest.raises(pipeline_error):
+            main.cli()
+
+    # Cleanup must run exactly once, after the pipeline, on success and failure.
+    assert events == ["main", "shutdown"]
