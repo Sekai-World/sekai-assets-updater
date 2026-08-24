@@ -59,6 +59,7 @@ docstring-code-line-length = "dynamic"
 
 [tool.pyright]
 include = [
+    "bundle_audio.py",
     "bundle_integrity.py",
     "bundle_paths.py",
     "bundle_runtime.py",

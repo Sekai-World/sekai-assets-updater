@@ -10,7 +10,7 @@ import tempfile
 from functools import partial
 from io import BytesIO
 from pathlib import Path as StdPath
-from typing import Dict, List, Literal, assert_never
+from typing import Dict, List, assert_never
 
 import aiohttp
 import cridecoder as cridecoder
@@ -22,6 +22,15 @@ from anyio import Path, open_file
 
 from bundle_acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
+)
+from bundle_audio import (
+    HcaDecodeBackend,
+    run_ffmpeg_audio_encode,
+    run_hca_with_cridecoder,
+    run_hca_with_vgmstream,
+)
+from bundle_audio import (
+    runtime as _audio_runtime,
 )
 from bundle_images import (
     render_image_asset as _render_image_asset,
@@ -105,7 +114,7 @@ from security import (
     validate_output_target,
 )
 from utils.acb import extract_acb
-from utils.hca import decode_hca_file
+from utils.hca import decode_hca_file as decode_hca_file
 from utils.live2d import (
     correct_param_ids,
     extract_params_ids_from_moc3,
@@ -115,10 +124,6 @@ from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
 
-_vgmstream_cli_cache: str | None = None
-_vgmstream_cli_checked = False
-_hca_decoder_reported: str | None = None
-HcaDecodeBackend = Literal["auto", "python", "vgmstream"]
 _EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
 
 
@@ -200,54 +205,15 @@ _get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
 
 
 def _get_hca_decode_backend(config) -> HcaDecodeBackend:
-    backend = str(getattr(config, "HCA_DECODE_BACKEND", "auto")).strip().lower()
-    match backend:
-        case "auto":
-            return "auto"
-        case "python":
-            return "python"
-        case "vgmstream":
-            return "vgmstream"
-
-    logger.warning("Unknown HCA_DECODE_BACKEND=%r, falling back to auto", backend)
-    return "auto"
+    return _audio_runtime.decode_backend(config)
 
 
 def _get_vgmstream_cli() -> str | None:
-    global _vgmstream_cli_cache, _vgmstream_cli_checked
-
-    if _vgmstream_cli_checked:
-        return _vgmstream_cli_cache
-
-    candidates: list[str] = []
-    env_candidate = os.environ.get("VGMSTREAM_CLI")
-    if env_candidate:
-        candidates.append(env_candidate)
-    candidates.append("vgmstream-cli")
-
-    for candidate in candidates:
-        resolved = shutil.which(candidate)
-        if resolved:
-            _vgmstream_cli_cache = resolved
-            _vgmstream_cli_checked = True
-            return _vgmstream_cli_cache
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            _vgmstream_cli_cache = candidate
-            _vgmstream_cli_checked = True
-            return _vgmstream_cli_cache
-
-    _vgmstream_cli_checked = True
-    return None
+    return _audio_runtime.vgmstream_cli()
 
 
 def _report_hca_decoder(message: str) -> None:
-    global _hca_decoder_reported
-
-    if _hca_decoder_reported == message:
-        return
-
-    _hca_decoder_reported = message
-    logger.info(message)
+    _audio_runtime.report_decoder(message)
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -360,32 +326,14 @@ async def _run_hca_to_wav_with_cridecoder(
     output_path: Path,
     config,
 ) -> bool:
-    staging_dir: StdPath | None = None
-    try:
-        _report_hca_decoder(
-            "Using cridecoder for HCA decoding via process pool "
-            f"({_get_hca_decode_concurrency(config)} workers)"
-        )
-        output_root = StdPath(output_path.parent.as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
-        staged_output = staging_dir / output_path.name
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            _get_shared_audio_process_pool(config),
-            decode_hca_file,
-            input_path.as_posix(),
-            staged_output.as_posix(),
-        )
-        produced = secure_existing_output(staging_dir, staged_output)
-        validate_output_target(output_root, output_path)
-        os.replace(produced, output_path)
-        shutil.rmtree(staging_dir, ignore_errors=True)
-    except Exception:
-        logger.exception("Failed to decode %s with cridecoder", input_path)
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        return False
-    return True
+    return await run_hca_with_cridecoder(
+        input_path,
+        output_path,
+        process_pool=_get_shared_audio_process_pool(config),
+        concurrency=_get_hca_decode_concurrency(config),
+        report_decoder=_report_hca_decoder,
+        decoder=decode_hca_file,
+    )
 
 
 async def _run_hca_to_wav_with_vgmstream(
@@ -393,63 +341,15 @@ async def _run_hca_to_wav_with_vgmstream(
     output_path: Path,
     config,
 ) -> bool:
-    vgmstream_cli = _get_vgmstream_cli()
-    if vgmstream_cli is None:
-        return False
-
-    _report_hca_decoder(f"Using vgmstream-cli for HCA decoding: {vgmstream_cli}")
-
-    staging_dir: StdPath | None = None
-    try:
-        output_root = StdPath(output_path.parent.as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
-        staged_output = staging_dir / output_path.name
-        validate_output_target(output_root, output_path)
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                vgmstream_cli,
-                "-i",
-                "-o",
-                staged_output.as_posix(),
-                input_path.as_posix(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        _set_process_output_paths(process, staged_output, staging_dir)
-        stdout, stderr = await _communicate_with_process(
-            process, _get_external_process_timeout(config)
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    except Exception:
-        logger.exception("Failed to decode %s with vgmstream-cli", input_path)
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        return False
-
-    try:
-        if process.returncode != 0 or not staged_output.exists():
-            error_output = (
-                stderr.decode(errors="ignore").strip() or stdout.decode(errors="ignore").strip()
-            )
-            logger.warning(
-                "vgmstream-cli failed to decode %s: %s",
-                input_path,
-                error_output or f"exit code {process.returncode}",
-            )
-            return False
-
-        secure_existing_output(staging_dir, staged_output)
-        os.replace(staged_output, output_path)
-        return True
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    return await run_hca_with_vgmstream(
+        input_path,
+        output_path,
+        executable=_get_vgmstream_cli(),
+        report_decoder=_report_hca_decoder,
+        communicate=_communicate_with_process,
+        timeout=_get_external_process_timeout(config),
+        set_output_paths=_set_process_output_paths,
+    )
 
 
 async def _run_hca_to_wav(
@@ -496,36 +396,15 @@ async def _run_ffmpeg_audio_encode(
     output_path: Path,
     config,
 ) -> bool:
-    async with _get_shared_audio_encoder_semaphore(config):
-        output_path = Path(resolve_secure_path(output_path.parent, output_path.name).as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
-        staged_output = staging_dir / output_path.name
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-loglevel",
-                "panic",
-                "-y",
-                "-i",
-                input_path.as_posix(),
-                staged_output.as_posix(),
-            )
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        _set_process_output_paths(process, staged_output, staging_dir)
-        try:
-            returncode = await _wait_for_process(process, _get_external_process_timeout(config))
-            if returncode != 0:
-                return False
-            secure_existing_output(staging_dir, staged_output)
-            validate_output_target(output_path.parent, output_path)
-            os.replace(staged_output, output_path)
-        except (FileNotFoundError, ValueError, SecurityError):
-            return False
-        finally:
-            _cleanup_process_output(process)
-        return True
+    return await run_ffmpeg_audio_encode(
+        input_path,
+        output_path,
+        semaphore=_get_shared_audio_encoder_semaphore(config),
+        wait=_wait_for_process,
+        timeout=_get_external_process_timeout(config),
+        set_output_paths=_set_process_output_paths,
+        cleanup_output=_cleanup_process_output,
+    )
 
 
 async def _process_extracted_audio_file(
