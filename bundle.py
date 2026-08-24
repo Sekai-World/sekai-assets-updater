@@ -11,7 +11,6 @@ import tempfile
 from functools import partial
 from io import BytesIO
 from pathlib import Path as StdPath
-from pathlib import PurePosixPath
 from typing import Dict, List, Literal, assert_never
 
 import aiohttp
@@ -22,6 +21,9 @@ import UnityPy.classes
 import UnityPy.config
 from anyio import Path, open_file
 
+from bundle_acb_cache import (
+    extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
+)
 from bundle_images import (
     render_image_asset as _render_image_asset,
 )
@@ -835,78 +837,6 @@ async def _process_video_jobs(
         for usm_output_path_text in video_jobs
     ]
     return await asyncio.gather(*video_tasks)
-
-
-def _extract_acb_from_cached_bundles_sync(
-    bundle_save_path: StdPath,
-    acb_textasset_filename: str,
-    acb_output_path: StdPath,
-    unity_version: str | None,
-    bundle_cache_root: StdPath | None = None,
-) -> bool:
-    if bundle_cache_root is None:
-        return False
-
-    bundle_cache_root = _canonical_root(bundle_cache_root)
-    if not bundle_cache_root.is_dir():
-        return False
-    bundle_path = _canonical_root(bundle_save_path)
-    output_root = _canonical_root(acb_output_path.parent)
-    validate_output_target(output_root, acb_output_path)
-
-    expected_textasset_name = acb_textasset_filename.lower()
-    for cached_bundle_path in bundle_cache_root.rglob("*"):
-        if cached_bundle_path.is_dir():
-            continue
-        try:
-            cached_bundle_path.resolve().relative_to(output_root)
-        except ValueError:
-            pass
-        else:
-            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
-            continue
-        try:
-            cached_bundle_path = validate_contained_file(
-                bundle_cache_root,
-                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
-            )
-        except (OSError, ValueError, SecurityError):
-            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
-            continue
-        if cached_bundle_path.resolve() == bundle_path:
-            continue
-
-        try:
-            UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-            cached_unity_file = UnityPy.load(cached_bundle_path.as_posix())
-            if not cached_unity_file:
-                continue
-        except Exception:
-            continue
-
-        for unityfs_path, unityfs_obj in cached_unity_file.container.items():
-            if unityfs_obj.type.name != "TextAsset":
-                continue
-            if PurePosixPath(unityfs_path).name.lower() != expected_textasset_name:
-                continue
-
-            data = unityfs_obj.read()
-            if not isinstance(data, UnityPy.classes.TextAsset):
-                continue
-
-            atomic_write_bytes(
-                acb_output_path,
-                data.m_Script.encode("utf-8", "surrogateescape"),
-            )
-            logger.debug(
-                "Extracted %s from cached bundle %s to %s",
-                acb_textasset_filename,
-                cached_bundle_path.relative_to(bundle_cache_root),
-                acb_output_path,
-            )
-            return True
-
-    return False
 
 
 def _extract_bundle_files_sync(
