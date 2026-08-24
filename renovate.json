@@ -2,5 +2,14 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Keep Python on the supported 3.12 release line",
+      "matchPackageNames": [
+        "python"
+      ],
+      "allowedVersions": "/^3\\.12(\\.|$)/"
+    }
   ]
 }
