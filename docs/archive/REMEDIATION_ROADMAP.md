@@ -1,5 +1,9 @@
 # Asset Updater Remediation Roadmap
 
+> **[ARCHIVED 2026-08-24]** All phases (0–7) are complete and verified. This document is historical
+> reference only — do not treat it as active or pending work. New remediation items should go in a
+> fresh roadmap under `docs/`.
+
 ## Purpose
 
 This roadmap records the remediation work identified by the July 2026 project review. Its goals are to make the updater safe to run against untrusted or malformed asset metadata, preserve recovery state across crashes, and make concurrent processing deterministic.

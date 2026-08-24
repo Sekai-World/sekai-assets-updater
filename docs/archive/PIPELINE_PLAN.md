@@ -1,5 +1,9 @@
 # Asset Updater Pipeline Plan
 
+> **[ARCHIVED 2026-08-24]** All planned phases are complete. This document is historical reference
+> only — do not treat it as active or pending work. New pipeline work should be planned in a fresh
+> document under `docs/`.
+
 ## Goals
 
 - Split download, extract, and upload into separate stages to improve throughput.
