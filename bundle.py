@@ -6,7 +6,6 @@ import os
 import random
 import re
 import shutil
-import sys
 import tempfile
 from functools import partial
 from io import BytesIO
@@ -14,7 +13,7 @@ from pathlib import Path as StdPath
 from typing import Dict, List, Literal, assert_never
 
 import aiohttp
-import cridecoder
+import cridecoder as cridecoder
 import orjson as json
 import UnityPy
 import UnityPy.classes
@@ -73,6 +72,13 @@ from bundle_runtime import (
 from bundle_runtime import (
     runtime as _bundle_runtime,
 )
+from bundle_video import (
+    demux_usm_to_m2v,
+    run_ffmpeg_video_to_mp4,
+)
+from bundle_video import (
+    runtime as _video_runtime,
+)
 from external_process import (
     cleanup_process_output,
     terminate_process,
@@ -109,7 +115,6 @@ from utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
 
-_ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
 _vgmstream_cli_cache: str | None = None
 _vgmstream_cli_checked = False
 _hca_decoder_reported: str | None = None
@@ -310,77 +315,15 @@ async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Pat
 
 
 async def _get_ffmpeg_video_encoder(config) -> tuple[str | None, list[str]]:
-    """Detect a usable hardware H.264 encoder for the current platform."""
-    global _ffmpeg_video_encoder_cache
-
-    if _ffmpeg_video_encoder_cache is not None:
-        return _ffmpeg_video_encoder_cache
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-hide_banner",
-            "-encoders",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        _ffmpeg_video_encoder_cache = (None, [])
-        return _ffmpeg_video_encoder_cache
-
-    stdout, stderr = await _communicate_with_process(process, _get_external_process_timeout(config))
-    if process.returncode != 0:
-        logger.warning(
-            "Failed to inspect ffmpeg encoders, falling back to software encoding: %s",
-            stderr.decode(errors="ignore").strip(),
-        )
-        _ffmpeg_video_encoder_cache = (None, [])
-        return _ffmpeg_video_encoder_cache
-
-    available_encoders = stdout.decode(errors="ignore")
-    candidates: list[tuple[str, list[str]]] = []
-
-    if sys.platform == "darwin":
-        candidates.append(("h264_videotoolbox", ["-c:v", "h264_videotoolbox"]))
-    elif sys.platform.startswith("linux"):
-        if await Path("/dev/nvidia0").exists() or await Path("/dev/nvidiactl").exists():
-            candidates.append(("h264_nvenc", ["-c:v", "h264_nvenc"]))
-        if await Path("/dev/dri/renderD128").exists():
-            candidates.append(
-                (
-                    "h264_vaapi",
-                    [
-                        "-vaapi_device",
-                        "/dev/dri/renderD128",
-                        "-vf",
-                        "format=nv12,hwupload",
-                        "-c:v",
-                        "h264_vaapi",
-                    ],
-                )
-            )
-    elif sys.platform == "win32":
-        candidates.extend(
-            [
-                ("h264_nvenc", ["-c:v", "h264_nvenc"]),
-                ("h264_amf", ["-c:v", "h264_amf"]),
-            ]
-        )
-
-    for encoder_name, encoder_args in candidates:
-        if encoder_name in available_encoders:
-            logger.info("Using ffmpeg hardware video encoder: %s", encoder_name)
-            _ffmpeg_video_encoder_cache = (encoder_name, encoder_args)
-            return _ffmpeg_video_encoder_cache
-
-    logger.info("No usable ffmpeg hardware video encoder detected, using software encoding")
-    _ffmpeg_video_encoder_cache = (None, [])
-    return _ffmpeg_video_encoder_cache
+    return await _video_runtime.get_encoder(
+        config,
+        communicate=_communicate_with_process,
+        timeout=_get_external_process_timeout(config),
+    )
 
 
 def _disable_ffmpeg_video_encoder() -> None:
-    global _ffmpeg_video_encoder_cache
-    _ffmpeg_video_encoder_cache = (None, [])
+    _video_runtime.disable_encoder()
 
 
 async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
@@ -390,52 +333,12 @@ async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
     stream was produced. Audio streams are not exported here — the video
     pipeline only needs the elementary video for ffmpeg to transcode.
     """
-    output_dir = usm_path.parent
-    output_root = _canonical_root(StdPath(output_dir.as_posix()))
-    staging_dir = StdPath(tempfile.mkdtemp(prefix=".usm-", dir=output_root))
-    loop = asyncio.get_running_loop()
-    try:
-        outputs = await loop.run_in_executor(
-            _get_shared_usm_process_pool(config),
-            cridecoder.extract_usm,
-            usm_path.as_posix(),
-            staging_dir.as_posix(),
-            None,
-            False,
-        )
-        selected_output = None
-        for output in outputs:
-            try:
-                candidate = validate_contained_file(
-                    staging_dir,
-                    StdPath(output).resolve().relative_to(staging_dir.resolve()).as_posix(),
-                )
-            except (ValueError, FileNotFoundError, SecurityError):
-                logger.warning("Ignoring unsafe decoder output %s", output)
-                continue
-            if str(output).lower().endswith(".m2v"):
-                selected_output = candidate
-                break
-            if selected_output is None:
-                selected_output = candidate
-
-        if selected_output is None:
-            logger.warning("cridecoder produced no usable video stream for %s", usm_path)
-            return None
-
-        final_output = _resolve_generated_child_path(output_root, selected_output.name)
-        validate_output_target(output_root, final_output)
-        os.replace(selected_output, final_output)
-        return Path(final_output.as_posix())
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    except Exception:
-        logger.exception("Failed to demux %s with cridecoder", usm_path)
-        return None
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    return await demux_usm_to_m2v(
+        usm_path,
+        process_pool=_get_shared_usm_process_pool(config),
+        canonical_root=_canonical_root,
+        resolve_generated_child_path=_resolve_generated_child_path,
+    )
 
 
 async def _run_ffmpeg_video_to_mp4(
@@ -443,37 +346,13 @@ async def _run_ffmpeg_video_to_mp4(
     output_path: Path,
     config,
 ) -> tuple[asyncio.subprocess.Process, str | None]:
-    encoder_name, encoder_args = await _get_ffmpeg_video_encoder(config)
-    output_path = Path(
-        resolve_secure_path(
-            output_path.parent,
-            output_path.name,
-        ).as_posix()
+    return await run_ffmpeg_video_to_mp4(
+        input_path,
+        output_path,
+        config,
+        get_encoder=_get_ffmpeg_video_encoder,
+        set_output_paths=_set_process_output_paths,
     )
-    command = [
-        "ffmpeg",
-        "-loglevel",
-        "panic",
-        "-y",
-        "-i",
-        input_path.as_posix(),
-    ]
-
-    if encoder_args:
-        command.extend(encoder_args)
-    else:
-        command.extend(["-tune", "animation"])
-
-    staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
-    staged_output = staging_dir / output_path.name
-    command.append(staged_output.as_posix())
-    try:
-        process = await asyncio.create_subprocess_exec(*command)
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    _set_process_output_paths(process, staged_output, staging_dir)
-    return process, encoder_name
 
 
 async def _run_hca_to_wav_with_cridecoder(

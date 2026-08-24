@@ -62,6 +62,7 @@ include = [
     "bundle_integrity.py",
     "bundle_paths.py",
     "bundle_runtime.py",
+    "bundle_video.py",
     "constants.py",
     "crypto.py",
     "external_process.py",
