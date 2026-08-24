@@ -69,6 +69,14 @@ from bundle_runtime import (
 from bundle_runtime import (
     runtime as _bundle_runtime,
 )
+from external_process import (
+    cleanup_process_output,
+    terminate_process,
+    wait_for_process,
+)
+from external_process import (
+    set_process_output_paths as _set_process_output_paths,
+)
 from helpers import (
     get_download_http_session_options,
     get_download_max_retries,
@@ -127,121 +135,32 @@ def _get_external_process_timeout(config) -> float:
 
 
 async def _terminate_process(process) -> None:
-    """Terminate a child, kill it if needed, and wait until it has exited."""
-    if process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), _EXTERNAL_PROCESS_TERMINATE_GRACE)
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-
-
-async def _ensure_process_terminated(process) -> BaseException | None:
-    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
-    task = getattr(process, "_bundle_terminate_task", None)
-    if task is None:
-        task = asyncio.create_task(_terminate_process(process))
-        process._bundle_terminate_task = task
-
-    cancellation_seen = False
-    cleanup_error: BaseException | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:  # NOSONAR - re-raised after the shared cleanup task finishes
-            # Keep waiting on the same shielded task. Never start a second
-            # termination sequence while the first one is still in progress.
-            cancellation_seen = True
-            if task.done():
-                break
-        except Exception as exc:
-            cleanup_error = exc
-            break
-
-    if task.done():
-        if task.cancelled():
-            cancellation_seen = True
-        elif cleanup_error is None:
-            # ``Task.exception`` returns the original exception object without
-            # catching it, so its traceback and cancellation state are not
-            # replaced by this cleanup bookkeeping.
-            cleanup_error = task.exception()
-
-    if cancellation_seen:
-        if cleanup_error is not None:
-            logger.error(
-                "Process termination cleanup failed while propagating cancellation: %s",
-                cleanup_error,
-            )
-        raise asyncio.CancelledError() from None
-    return cleanup_error
+    await terminate_process(process, _EXTERNAL_PROCESS_TERMINATE_GRACE)
 
 
 async def _wait_for_process(process, timeout: float) -> int:
-    original_error: BaseException | None = None
-    cancellation = False
-    try:
-        async with asyncio.timeout(timeout):
-            return await process.wait()
-    except asyncio.CancelledError as exc:
-        original_error = exc
-        cancellation = True
-    except asyncio.TimeoutError as exc:
-        original_error = exc
-
-    cleanup_error = await _ensure_process_terminated(process)
-    _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation:
-        raise asyncio.CancelledError() from None
-    if cleanup_error is not None:
-        raise cleanup_error from None
-    raise original_error
+    return await wait_for_process(
+        process,
+        timeout,
+        _terminate_process,
+        task_attribute="_bundle_terminate_task",
+        logger=logger,
+    )
 
 
 async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
-    original_error: BaseException | None = None
-    cancellation = False
-    try:
-        async with asyncio.timeout(timeout):
-            return await process.communicate()
-    except asyncio.CancelledError as exc:
-        original_error = exc
-        cancellation = True
-    except asyncio.TimeoutError as exc:
-        original_error = exc
-
-    cleanup_error = await _ensure_process_terminated(process)
-    _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation:
-        raise asyncio.CancelledError() from None
-    if cleanup_error is not None:
-        raise cleanup_error from None
-    raise original_error
-
-
-def _set_process_output_paths(process, output_path: StdPath, staging_dir: StdPath) -> None:
-    """Associate an external process with its private output staging area."""
-    process._bundle_output_path = output_path
-    process._bundle_staging_dir = staging_dir
+    return await wait_for_process(
+        process,
+        timeout,
+        _terminate_process,
+        task_attribute="_bundle_terminate_task",
+        logger=logger,
+        communicate=True,
+    )
 
 
 def _cleanup_process_output(process, *, remove_direct_output: bool = False) -> None:
-    """Remove process artifacts after the process has been fully reaped."""
-    staging_dir = getattr(process, "_bundle_staging_dir", None)
-    if staging_dir is not None:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-
-    if remove_direct_output:
-        output_path = getattr(process, "_bundle_output_path", None)
-        if output_path is not None:
-            try:
-                output_path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception("Failed to remove failed process output %s", output_path)
+    cleanup_process_output(process, remove_direct_output=remove_direct_output, logger=logger)
 
 
 def _get_texture_output_formats(config) -> tuple[str, ...]:

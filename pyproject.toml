@@ -64,6 +64,7 @@ include = [
     "bundle_runtime.py",
     "constants.py",
     "crypto.py",
+    "external_process.py",
     "main.py",
     "model.py",
     "security.py",
