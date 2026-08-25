@@ -456,13 +456,9 @@ def load_chart_state(path: StdPath) -> dict | None:
         return None
 
 
-def pending_score_paths(
-    current: dict[str, str], stored: dict[str, str]
-) -> list[str]:
+def pending_score_paths(current: dict[str, str], stored: dict[str, str]) -> list[str]:
     """Sorted relative paths that are new or whose content hash changed."""
-    return sorted(
-        path for path, digest in current.items() if digest != stored.get(path)
-    )
+    return sorted(path for path, digest in current.items() if digest != stored.get(path))
 
 
 # ---------------------------------------------------------------------------
@@ -553,13 +549,9 @@ def load_live2d_state(path: StdPath) -> dict | None:
         return None
 
 
-def pending_motion_bundles(
-    current: dict[str, str], stored: dict[str, str]
-) -> list[str]:
+def pending_motion_bundles(current: dict[str, str], stored: dict[str, str]) -> list[str]:
     """Sorted file names that are new or whose content hash changed."""
-    return sorted(
-        name for name, digest in current.items() if digest != stored.get(name)
-    )
+    return sorted(name for name, digest in current.items() if digest != stored.get(name))
 
 
 async def _process_live2d(
