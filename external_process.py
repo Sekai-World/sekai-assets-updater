@@ -42,7 +42,9 @@ async def ensure_process_terminated(
         try:
             await asyncio.shield(task)
             break
-        except asyncio.CancelledError:
+        # Cancellation is deliberately deferred until the shared termination task
+        # finishes, then re-raised below after cleanup, including repeated cancels.
+        except asyncio.CancelledError:  # NOSONAR
             cancellation_seen = True
             if task.done():
                 break
@@ -105,7 +107,9 @@ async def wait_for_process(
             if communicate:
                 return await process.communicate()
             return await process.wait()
-    except asyncio.CancelledError as exc:
+    # Cancellation is re-raised below after the child process has been terminated
+    # and its output removed.
+    except asyncio.CancelledError as exc:  # NOSONAR
         original_error = exc
         cancellation = True
     except asyncio.TimeoutError as exc:
