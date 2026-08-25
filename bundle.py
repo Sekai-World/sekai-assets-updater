@@ -1,39 +1,97 @@
 """This module contains functions to download, deobfuscate, and extract asset bundles."""
 
 import asyncio
-import atexit
 import logging
 import os
 import random
 import re
 import shutil
-import struct
-import sys
 import tempfile
-from concurrent.futures import ProcessPoolExecutor
-from contextlib import ExitStack
 from functools import partial
 from io import BytesIO
 from pathlib import Path as StdPath
-from pathlib import PurePosixPath
-from typing import Dict, List, Literal, assert_never
+from typing import Dict, List, assert_never
 
 import aiohttp
-import cridecoder
-import orjson as json
+import cridecoder as cridecoder
 import UnityPy
 import UnityPy.classes
 import UnityPy.config
 from anyio import Path, open_file
-from PIL import Image
-from UnityPy.enums.ClassIDType import ClassIDType
-from UnityPy.enums.SpritePackingRotation import SpritePackingRotation
-from UnityPy.export.SpriteHelper import SpriteSettings, get_image
 
-from constants import (
-    UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
-    UNITY_FS_BUILT_IN_CONTAINER_BASE,
-    UNITY_FS_CONTAINER_BASE,
+from bundle_acb_cache import (
+    extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
+)
+from bundle_audio import (
+    HcaDecodeBackend,
+    run_ffmpeg_audio_encode,
+    run_hca_with_cridecoder,
+    run_hca_with_vgmstream,
+)
+from bundle_audio import (
+    runtime as _audio_runtime,
+)
+from bundle_extraction import extract_unity_objects
+from bundle_images import (
+    save_image_formats as _save_image_formats,  # noqa: F401
+)
+from bundle_integrity import (
+    DownloadIntegrityError,
+    RetryableDownloadError,
+)
+from bundle_integrity import (
+    validate_unityfs_bundle as _validate_unityfs_bundle,
+)
+from bundle_paths import (
+    build_unityfs_save_path as _build_unityfs_save_path,  # noqa: F401
+)
+from bundle_paths import (
+    canonical_root as _canonical_root,
+)
+from bundle_paths import (
+    discard_exported_file as _discard_exported_file_sync,
+)
+from bundle_paths import (
+    replace_suffix_secure as _replace_suffix_secure,
+)
+from bundle_paths import (
+    resolve_existing_path as _resolve_existing_path_sync,
+)
+from bundle_paths import (
+    resolve_existing_usm_path as _resolve_existing_usm_path_sync,
+)
+from bundle_paths import (
+    resolve_generated_child_path as _resolve_generated_child_path,
+)
+from bundle_paths import (
+    resolve_local_audio_outputs as _resolve_local_audio_outputs_sync,
+)
+from bundle_paths import (
+    resolve_shared_audio_outputs as _resolve_shared_audio_outputs_sync,
+)
+from bundle_paths import (
+    stream_files as _stream_files,
+)
+from bundle_runtime import (
+    get_hca_decode_concurrency as _get_hca_decode_concurrency,
+)
+from bundle_runtime import (
+    runtime as _bundle_runtime,
+)
+from bundle_video import (
+    demux_usm_to_m2v,
+    run_ffmpeg_video_to_mp4,
+)
+from bundle_video import (
+    runtime as _video_runtime,
+)
+from external_process import (
+    cleanup_process_output,
+    terminate_process,
+    wait_for_process,
+)
+from external_process import (
+    set_process_output_paths as _set_process_output_paths,
 )
 from helpers import (
     get_download_http_session_options,
@@ -45,7 +103,6 @@ from helpers import (
 )
 from security import (
     SecurityError,
-    atomic_write_bytes,
     atomic_write_stream,
     resolve_secure_path,
     secure_existing_output,
@@ -53,84 +110,11 @@ from security import (
     validate_output_target,
 )
 from utils.acb import extract_acb
-from utils.hca import decode_hca_file
-from utils.live2d import (
-    correct_param_ids,
-    extract_params_ids_from_moc3,
-    restore_unity_object_to_motion3,
-)
-from utils.playable import extract_playable
+from utils.hca import decode_hca_file as decode_hca_file
 
 logger = logging.getLogger("live2d")
 
-_ffmpeg_video_encoder_cache: tuple[str | None, list[str]] | None = None
-_audio_file_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_hca_decode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_audio_encoder_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_video_transcode_semaphore_cache: tuple[int, asyncio.Semaphore] | None = None
-_extract_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
-_audio_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
-_usm_process_pool_cache: tuple[int, ProcessPoolExecutor] | None = None
-_vgmstream_cli_cache: str | None = None
-_vgmstream_cli_checked = False
-_hca_decoder_reported: str | None = None
-HcaDecodeBackend = Literal["auto", "python", "vgmstream"]
 _EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
-
-
-class DownloadIntegrityError(ValueError):
-    """Raised when a downloaded bundle fails its wire or content checks."""
-
-
-class RetryableDownloadError(DownloadIntegrityError):
-    """A transient download failure that may be retried."""
-
-    def __init__(self, message: str, retry_after: float | None = None):
-        super().__init__(message)
-        self.retry_after = retry_after
-
-
-_UNITYFS_SIGNATURE = b"UnityFS\0"
-_UNITYFS_FIELD_LIMIT = 1024
-_UNITYFS_FIXED_HEADER_SIZE = 8 + 4 + 8 + 8 + 8 + 4 + 4 + 4
-
-
-def _validate_unityfs_bundle(path: StdPath, stored_bytes: int) -> None:
-    """Validate the bounded UnityFS header and its declared file offsets."""
-    with path.open("rb") as stream:
-        header = stream.read(_UNITYFS_FIXED_HEADER_SIZE + 2 * _UNITYFS_FIELD_LIMIT)
-    if len(header) < len(_UNITYFS_SIGNATURE) or not header.startswith(_UNITYFS_SIGNATURE):
-        raise DownloadIntegrityError("stored bundle does not begin with UnityFS")
-
-    offset = len(_UNITYFS_SIGNATURE)
-    if len(header) < offset + 4:
-        raise DownloadIntegrityError("incomplete UnityFS format header")
-    format_version = struct.unpack_from(">I", header, offset)[0]
-    offset += 4
-    if format_version == 0:
-        raise DownloadIntegrityError("invalid UnityFS format version")
-
-    fields = []
-    for field_name in ("unity version", "revision"):
-        end = header.find(b"\0", offset, offset + _UNITYFS_FIELD_LIMIT + 1)
-        if end < 0 or end == offset + _UNITYFS_FIELD_LIMIT:
-            raise DownloadIntegrityError(f"incomplete UnityFS {field_name} field")
-        if end == offset:
-            raise DownloadIntegrityError(f"empty UnityFS {field_name} field")
-        fields.append(header[offset:end])
-        offset = end + 1
-
-    if len(header) < offset + 20:
-        raise DownloadIntegrityError("incomplete UnityFS fixed header")
-    declared_size, compressed_info_size, uncompressed_info_size, flags = struct.unpack_from(
-        ">QIII", header, offset
-    )
-    del uncompressed_info_size, flags
-    offset += 20
-    if declared_size != stored_bytes or declared_size < offset:
-        raise DownloadIntegrityError("UnityFS declared file size is invalid")
-    if compressed_info_size > declared_size - offset:
-        raise DownloadIntegrityError("UnityFS block info offset is invalid")
 
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
@@ -141,16 +125,6 @@ def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
 def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
     """Return whether this individual bundle contains chart score assets."""
     return (bundle.get("bundleName") or "").startswith("music/music_score/")
-
-
-def _sanitize_concurrency(value) -> int:
-    try:
-        concurrency = int(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"concurrency must be a positive integer, got {value!r}") from None
-    if concurrency <= 0:
-        raise ValueError(f"concurrency must be a positive integer, got {value!r}")
-    return concurrency
 
 
 def _get_external_process_timeout(config) -> float:
@@ -165,191 +139,32 @@ def _get_external_process_timeout(config) -> float:
 
 
 async def _terminate_process(process) -> None:
-    """Terminate a child, kill it if needed, and wait until it has exited."""
-    if process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), _EXTERNAL_PROCESS_TERMINATE_GRACE)
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-
-
-async def _ensure_process_terminated(process) -> BaseException | None:
-    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly."""
-    task = getattr(process, "_bundle_terminate_task", None)
-    if task is None:
-        task = asyncio.create_task(_terminate_process(process))
-        process._bundle_terminate_task = task
-
-    cancellation_seen = False
-    cleanup_error: BaseException | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:  # NOSONAR - re-raised after the shared cleanup task finishes
-            # Keep waiting on the same shielded task. Never start a second
-            # termination sequence while the first one is still in progress.
-            cancellation_seen = True
-            if task.done():
-                break
-        except Exception as exc:
-            cleanup_error = exc
-            break
-
-    if task.done():
-        if task.cancelled():
-            cancellation_seen = True
-        elif cleanup_error is None:
-            # ``Task.exception`` returns the original exception object without
-            # catching it, so its traceback and cancellation state are not
-            # replaced by this cleanup bookkeeping.
-            cleanup_error = task.exception()
-
-    if cancellation_seen:
-        if cleanup_error is not None:
-            logger.error(
-                "Process termination cleanup failed while propagating cancellation: %s",
-                cleanup_error,
-            )
-        raise asyncio.CancelledError() from None
-    return cleanup_error
+    await terminate_process(process, _EXTERNAL_PROCESS_TERMINATE_GRACE)
 
 
 async def _wait_for_process(process, timeout: float) -> int:
-    original_error: BaseException | None = None
-    cancellation = False
-    try:
-        async with asyncio.timeout(timeout):
-            return await process.wait()
-    except asyncio.CancelledError as exc:
-        original_error = exc
-        cancellation = True
-    except asyncio.TimeoutError as exc:
-        original_error = exc
-
-    cleanup_error = await _ensure_process_terminated(process)
-    _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation:
-        raise asyncio.CancelledError() from None
-    if cleanup_error is not None:
-        raise cleanup_error from None
-    raise original_error
+    return await wait_for_process(
+        process,
+        timeout,
+        _terminate_process,
+        task_attribute="_bundle_terminate_task",
+        logger=logger,
+    )
 
 
 async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
-    original_error: BaseException | None = None
-    cancellation = False
-    try:
-        async with asyncio.timeout(timeout):
-            return await process.communicate()
-    except asyncio.CancelledError as exc:
-        original_error = exc
-        cancellation = True
-    except asyncio.TimeoutError as exc:
-        original_error = exc
-
-    cleanup_error = await _ensure_process_terminated(process)
-    _cleanup_process_output(process, remove_direct_output=True)
-    if cancellation:
-        raise asyncio.CancelledError() from None
-    if cleanup_error is not None:
-        raise cleanup_error from None
-    raise original_error
-
-
-def _set_process_output_paths(process, output_path: StdPath, staging_dir: StdPath) -> None:
-    """Associate an external process with its private output staging area."""
-    process._bundle_output_path = output_path
-    process._bundle_staging_dir = staging_dir
+    return await wait_for_process(
+        process,
+        timeout,
+        _terminate_process,
+        task_attribute="_bundle_terminate_task",
+        logger=logger,
+        communicate=True,
+    )
 
 
 def _cleanup_process_output(process, *, remove_direct_output: bool = False) -> None:
-    """Remove process artifacts after the process has been fully reaped."""
-    staging_dir = getattr(process, "_bundle_staging_dir", None)
-    if staging_dir is not None:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-
-    if remove_direct_output:
-        output_path = getattr(process, "_bundle_output_path", None)
-        if output_path is not None:
-            try:
-                output_path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception("Failed to remove failed process output %s", output_path)
-
-
-def _get_legacy_audio_transcode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_AUDIO_TRANSCODES",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
-
-
-def _get_max_concurrent_audio_files(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENT_AUDIO_FILES",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_hca_decode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_HCA_DECODES",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_audio_encoder_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_AUDIO_ENCODERS",
-            _get_legacy_audio_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_video_transcode_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_VIDEO_TRANSCODES",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
-
-
-def _get_usm_demux_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_USM_DEMUXES",
-            _get_video_transcode_concurrency(config),
-        )
-    )
-
-
-def _get_extract_process_concurrency(config) -> int:
-    return _sanitize_concurrency(
-        getattr(
-            config,
-            "MAX_CONCURRENCY_EXTRACTS",
-            getattr(config, "MAX_CONCURRENCY", 1),
-        )
-    )
+    cleanup_process_output(process, remove_direct_output=remove_direct_output, logger=logger)
 
 
 def _get_texture_output_formats(config) -> tuple[str, ...]:
@@ -370,215 +185,30 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
     return tuple(valid_formats)
 
 
-def _get_shared_audio_file_semaphore(config) -> asyncio.Semaphore:
-    global _audio_file_semaphore_cache
-
-    concurrency = _get_max_concurrent_audio_files(config)
-    if _audio_file_semaphore_cache is None or _audio_file_semaphore_cache[0] != concurrency:
-        _audio_file_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _audio_file_semaphore_cache[1]
-
-
-def _get_shared_hca_decode_semaphore(config) -> asyncio.Semaphore:
-    global _hca_decode_semaphore_cache
-
-    concurrency = _get_hca_decode_concurrency(config)
-    if _hca_decode_semaphore_cache is None or _hca_decode_semaphore_cache[0] != concurrency:
-        _hca_decode_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _hca_decode_semaphore_cache[1]
-
-
-def _get_shared_audio_encoder_semaphore(config) -> asyncio.Semaphore:
-    global _audio_encoder_semaphore_cache
-
-    concurrency = _get_audio_encoder_concurrency(config)
-    if _audio_encoder_semaphore_cache is None or _audio_encoder_semaphore_cache[0] != concurrency:
-        _audio_encoder_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _audio_encoder_semaphore_cache[1]
-
-
-def _get_shared_video_transcode_semaphore(config) -> asyncio.Semaphore:
-    global _video_transcode_semaphore_cache
-
-    concurrency = _get_video_transcode_concurrency(config)
-    if (
-        _video_transcode_semaphore_cache is None
-        or _video_transcode_semaphore_cache[0] != concurrency
-    ):
-        _video_transcode_semaphore_cache = (
-            concurrency,
-            asyncio.Semaphore(concurrency),
-        )
-    return _video_transcode_semaphore_cache[1]
-
-
-def _shutdown_audio_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
-    global _audio_process_pool_cache
-
-    if _audio_process_pool_cache is None:
-        return
-
-    _, executor = _audio_process_pool_cache
-    _audio_process_pool_cache = None
-    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
-
-
-def _shutdown_usm_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
-    global _usm_process_pool_cache
-
-    if _usm_process_pool_cache is None:
-        return
-
-    _, executor = _usm_process_pool_cache
-    _usm_process_pool_cache = None
-    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
-
-
-def _shutdown_extract_process_pool(wait: bool = False, cancel_futures: bool = False) -> None:
-    global _extract_process_pool_cache
-
-    if _extract_process_pool_cache is None:
-        return
-
-    _, executor = _extract_process_pool_cache
-    _extract_process_pool_cache = None
-    executor.shutdown(wait=wait, cancel_futures=cancel_futures)
-
-
-atexit.register(_shutdown_extract_process_pool)
-atexit.register(_shutdown_audio_process_pool)
-atexit.register(_shutdown_usm_process_pool)
+_get_shared_audio_file_semaphore = _bundle_runtime.audio_file_semaphore
+_get_shared_hca_decode_semaphore = _bundle_runtime.hca_decode_semaphore
+_get_shared_audio_encoder_semaphore = _bundle_runtime.audio_encoder_semaphore
+_get_shared_video_transcode_semaphore = _bundle_runtime.video_transcode_semaphore
+_get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
+_get_shared_audio_process_pool = _bundle_runtime.audio_process_pool
+_get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
 
 
 def shutdown_process_pools(*, wait: bool = True, cancel_futures: bool = True) -> None:
-    """Explicitly shut down every cached process pool used by the pipeline.
-
-    The CLI invokes this in a ``finally`` block around ``asyncio.run`` so
-    extraction (including Live2D bundles), audio decoding, and USM demux
-    worker processes are reaped as soon as a run ends - even when it fails
-    or is cancelled - instead of lingering until interpreter exit. Calls
-    are idempotent, and the ``atexit`` hooks registered above remain as a
-    safety net for other entry points.
-    """
-    cached = [
-        name
-        for name, cache in (
-            ("extract", _extract_process_pool_cache),
-            ("audio", _audio_process_pool_cache),
-            ("usm", _usm_process_pool_cache),
-        )
-        if cache is not None
-    ]
-    _shutdown_extract_process_pool(wait=wait, cancel_futures=cancel_futures)
-    _shutdown_audio_process_pool(wait=wait, cancel_futures=cancel_futures)
-    _shutdown_usm_process_pool(wait=wait, cancel_futures=cancel_futures)
-    if cached:
-        logger.debug("Shut down cached process pools: %s", ", ".join(cached))
-
-
-def _get_shared_extract_process_pool(config) -> ProcessPoolExecutor:
-    global _extract_process_pool_cache
-
-    concurrency = _get_extract_process_concurrency(config)
-    if _extract_process_pool_cache is None or _extract_process_pool_cache[0] != concurrency:
-        if _extract_process_pool_cache is not None:
-            _extract_process_pool_cache[1].shutdown(
-                wait=False,
-                cancel_futures=False,
-            )
-        _extract_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _extract_process_pool_cache[1]
-
-
-def _get_shared_audio_process_pool(config) -> ProcessPoolExecutor:
-    global _audio_process_pool_cache
-
-    concurrency = _get_hca_decode_concurrency(config)
-    if _audio_process_pool_cache is None or _audio_process_pool_cache[0] != concurrency:
-        if _audio_process_pool_cache is not None:
-            _audio_process_pool_cache[1].shutdown(wait=False, cancel_futures=False)
-        _audio_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _audio_process_pool_cache[1]
-
-
-def _get_shared_usm_process_pool(config) -> ProcessPoolExecutor:
-    global _usm_process_pool_cache
-
-    concurrency = _get_usm_demux_concurrency(config)
-    if _usm_process_pool_cache is None or _usm_process_pool_cache[0] != concurrency:
-        if _usm_process_pool_cache is not None:
-            _usm_process_pool_cache[1].shutdown(wait=False, cancel_futures=False)
-        _usm_process_pool_cache = (
-            concurrency,
-            ProcessPoolExecutor(max_workers=concurrency),
-        )
-    return _usm_process_pool_cache[1]
+    """Shut down all cached process pools used by bundle processing."""
+    _bundle_runtime.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
 def _get_hca_decode_backend(config) -> HcaDecodeBackend:
-    backend = str(getattr(config, "HCA_DECODE_BACKEND", "auto")).strip().lower()
-    match backend:
-        case "auto":
-            return "auto"
-        case "python":
-            return "python"
-        case "vgmstream":
-            return "vgmstream"
-
-    logger.warning("Unknown HCA_DECODE_BACKEND=%r, falling back to auto", backend)
-    return "auto"
+    return _audio_runtime.decode_backend(config)
 
 
 def _get_vgmstream_cli() -> str | None:
-    global _vgmstream_cli_cache, _vgmstream_cli_checked
-
-    if _vgmstream_cli_checked:
-        return _vgmstream_cli_cache
-
-    candidates: list[str] = []
-    env_candidate = os.environ.get("VGMSTREAM_CLI")
-    if env_candidate:
-        candidates.append(env_candidate)
-    candidates.append("vgmstream-cli")
-
-    for candidate in candidates:
-        resolved = shutil.which(candidate)
-        if resolved:
-            _vgmstream_cli_cache = resolved
-            _vgmstream_cli_checked = True
-            return _vgmstream_cli_cache
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            _vgmstream_cli_cache = candidate
-            _vgmstream_cli_checked = True
-            return _vgmstream_cli_cache
-
-    _vgmstream_cli_checked = True
-    return None
+    return _audio_runtime.vgmstream_cli()
 
 
 def _report_hca_decoder(message: str) -> None:
-    global _hca_decoder_reported
-
-    if _hca_decoder_reported == message:
-        return
-
-    _hca_decoder_reported = message
-    logger.info(message)
+    _audio_runtime.report_decoder(message)
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -646,77 +276,15 @@ async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Pat
 
 
 async def _get_ffmpeg_video_encoder(config) -> tuple[str | None, list[str]]:
-    """Detect a usable hardware H.264 encoder for the current platform."""
-    global _ffmpeg_video_encoder_cache
-
-    if _ffmpeg_video_encoder_cache is not None:
-        return _ffmpeg_video_encoder_cache
-
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-hide_banner",
-            "-encoders",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except FileNotFoundError:
-        _ffmpeg_video_encoder_cache = (None, [])
-        return _ffmpeg_video_encoder_cache
-
-    stdout, stderr = await _communicate_with_process(process, _get_external_process_timeout(config))
-    if process.returncode != 0:
-        logger.warning(
-            "Failed to inspect ffmpeg encoders, falling back to software encoding: %s",
-            stderr.decode(errors="ignore").strip(),
-        )
-        _ffmpeg_video_encoder_cache = (None, [])
-        return _ffmpeg_video_encoder_cache
-
-    available_encoders = stdout.decode(errors="ignore")
-    candidates: list[tuple[str, list[str]]] = []
-
-    if sys.platform == "darwin":
-        candidates.append(("h264_videotoolbox", ["-c:v", "h264_videotoolbox"]))
-    elif sys.platform.startswith("linux"):
-        if await Path("/dev/nvidia0").exists() or await Path("/dev/nvidiactl").exists():
-            candidates.append(("h264_nvenc", ["-c:v", "h264_nvenc"]))
-        if await Path("/dev/dri/renderD128").exists():
-            candidates.append(
-                (
-                    "h264_vaapi",
-                    [
-                        "-vaapi_device",
-                        "/dev/dri/renderD128",
-                        "-vf",
-                        "format=nv12,hwupload",
-                        "-c:v",
-                        "h264_vaapi",
-                    ],
-                )
-            )
-    elif sys.platform == "win32":
-        candidates.extend(
-            [
-                ("h264_nvenc", ["-c:v", "h264_nvenc"]),
-                ("h264_amf", ["-c:v", "h264_amf"]),
-            ]
-        )
-
-    for encoder_name, encoder_args in candidates:
-        if encoder_name in available_encoders:
-            logger.info("Using ffmpeg hardware video encoder: %s", encoder_name)
-            _ffmpeg_video_encoder_cache = (encoder_name, encoder_args)
-            return _ffmpeg_video_encoder_cache
-
-    logger.info("No usable ffmpeg hardware video encoder detected, using software encoding")
-    _ffmpeg_video_encoder_cache = (None, [])
-    return _ffmpeg_video_encoder_cache
+    return await _video_runtime.get_encoder(
+        config,
+        communicate=_communicate_with_process,
+        timeout=_get_external_process_timeout(config),
+    )
 
 
 def _disable_ffmpeg_video_encoder() -> None:
-    global _ffmpeg_video_encoder_cache
-    _ffmpeg_video_encoder_cache = (None, [])
+    _video_runtime.disable_encoder()
 
 
 async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
@@ -726,52 +294,12 @@ async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
     stream was produced. Audio streams are not exported here — the video
     pipeline only needs the elementary video for ffmpeg to transcode.
     """
-    output_dir = usm_path.parent
-    output_root = _canonical_root(StdPath(output_dir.as_posix()))
-    staging_dir = StdPath(tempfile.mkdtemp(prefix=".usm-", dir=output_root))
-    loop = asyncio.get_running_loop()
-    try:
-        outputs = await loop.run_in_executor(
-            _get_shared_usm_process_pool(config),
-            cridecoder.extract_usm,
-            usm_path.as_posix(),
-            staging_dir.as_posix(),
-            None,
-            False,
-        )
-        selected_output = None
-        for output in outputs:
-            try:
-                candidate = validate_contained_file(
-                    staging_dir,
-                    StdPath(output).resolve().relative_to(staging_dir.resolve()).as_posix(),
-                )
-            except (ValueError, FileNotFoundError, SecurityError):
-                logger.warning("Ignoring unsafe decoder output %s", output)
-                continue
-            if str(output).lower().endswith(".m2v"):
-                selected_output = candidate
-                break
-            if selected_output is None:
-                selected_output = candidate
-
-        if selected_output is None:
-            logger.warning("cridecoder produced no usable video stream for %s", usm_path)
-            return None
-
-        final_output = _resolve_generated_child_path(output_root, selected_output.name)
-        validate_output_target(output_root, final_output)
-        os.replace(selected_output, final_output)
-        return Path(final_output.as_posix())
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    except Exception:
-        logger.exception("Failed to demux %s with cridecoder", usm_path)
-        return None
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    return await demux_usm_to_m2v(
+        usm_path,
+        process_pool=_get_shared_usm_process_pool(config),
+        canonical_root=_canonical_root,
+        resolve_generated_child_path=_resolve_generated_child_path,
+    )
 
 
 async def _run_ffmpeg_video_to_mp4(
@@ -779,37 +307,13 @@ async def _run_ffmpeg_video_to_mp4(
     output_path: Path,
     config,
 ) -> tuple[asyncio.subprocess.Process, str | None]:
-    encoder_name, encoder_args = await _get_ffmpeg_video_encoder(config)
-    output_path = Path(
-        resolve_secure_path(
-            output_path.parent,
-            output_path.name,
-        ).as_posix()
+    return await run_ffmpeg_video_to_mp4(
+        input_path,
+        output_path,
+        config,
+        get_encoder=_get_ffmpeg_video_encoder,
+        set_output_paths=_set_process_output_paths,
     )
-    command = [
-        "ffmpeg",
-        "-loglevel",
-        "panic",
-        "-y",
-        "-i",
-        input_path.as_posix(),
-    ]
-
-    if encoder_args:
-        command.extend(encoder_args)
-    else:
-        command.extend(["-tune", "animation"])
-
-    staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
-    staged_output = staging_dir / output_path.name
-    command.append(staged_output.as_posix())
-    try:
-        process = await asyncio.create_subprocess_exec(*command)
-    except BaseException:
-        shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    _set_process_output_paths(process, staged_output, staging_dir)
-    return process, encoder_name
 
 
 async def _run_hca_to_wav_with_cridecoder(
@@ -817,32 +321,14 @@ async def _run_hca_to_wav_with_cridecoder(
     output_path: Path,
     config,
 ) -> bool:
-    staging_dir: StdPath | None = None
-    try:
-        _report_hca_decoder(
-            "Using cridecoder for HCA decoding via process pool "
-            f"({_get_hca_decode_concurrency(config)} workers)"
-        )
-        output_root = StdPath(output_path.parent.as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
-        staged_output = staging_dir / output_path.name
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            _get_shared_audio_process_pool(config),
-            decode_hca_file,
-            input_path.as_posix(),
-            staged_output.as_posix(),
-        )
-        produced = secure_existing_output(staging_dir, staged_output)
-        validate_output_target(output_root, output_path)
-        os.replace(produced, output_path)
-        shutil.rmtree(staging_dir, ignore_errors=True)
-    except Exception:
-        logger.exception("Failed to decode %s with cridecoder", input_path)
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        return False
-    return True
+    return await run_hca_with_cridecoder(
+        input_path,
+        output_path,
+        process_pool=_get_shared_audio_process_pool(config),
+        concurrency=_get_hca_decode_concurrency(config),
+        report_decoder=_report_hca_decoder,
+        decoder=decode_hca_file,
+    )
 
 
 async def _run_hca_to_wav_with_vgmstream(
@@ -850,63 +336,15 @@ async def _run_hca_to_wav_with_vgmstream(
     output_path: Path,
     config,
 ) -> bool:
-    vgmstream_cli = _get_vgmstream_cli()
-    if vgmstream_cli is None:
-        return False
-
-    _report_hca_decoder(f"Using vgmstream-cli for HCA decoding: {vgmstream_cli}")
-
-    staging_dir: StdPath | None = None
-    try:
-        output_root = StdPath(output_path.parent.as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
-        staged_output = staging_dir / output_path.name
-        validate_output_target(output_root, output_path)
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                vgmstream_cli,
-                "-i",
-                "-o",
-                staged_output.as_posix(),
-                input_path.as_posix(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        _set_process_output_paths(process, staged_output, staging_dir)
-        stdout, stderr = await _communicate_with_process(
-            process, _get_external_process_timeout(config)
-        )
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        raise
-    except Exception:
-        logger.exception("Failed to decode %s with vgmstream-cli", input_path)
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-        return False
-
-    try:
-        if process.returncode != 0 or not staged_output.exists():
-            error_output = (
-                stderr.decode(errors="ignore").strip() or stdout.decode(errors="ignore").strip()
-            )
-            logger.warning(
-                "vgmstream-cli failed to decode %s: %s",
-                input_path,
-                error_output or f"exit code {process.returncode}",
-            )
-            return False
-
-        secure_existing_output(staging_dir, staged_output)
-        os.replace(staged_output, output_path)
-        return True
-    finally:
-        shutil.rmtree(staging_dir, ignore_errors=True)
+    return await run_hca_with_vgmstream(
+        input_path,
+        output_path,
+        executable=_get_vgmstream_cli(),
+        report_decoder=_report_hca_decoder,
+        communicate=_communicate_with_process,
+        timeout=_get_external_process_timeout(config),
+        set_output_paths=_set_process_output_paths,
+    )
 
 
 async def _run_hca_to_wav(
@@ -953,36 +391,15 @@ async def _run_ffmpeg_audio_encode(
     output_path: Path,
     config,
 ) -> bool:
-    async with _get_shared_audio_encoder_semaphore(config):
-        output_path = Path(resolve_secure_path(output_path.parent, output_path.name).as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".ffmpeg-", dir=output_path.parent))
-        staged_output = staging_dir / output_path.name
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-loglevel",
-                "panic",
-                "-y",
-                "-i",
-                input_path.as_posix(),
-                staged_output.as_posix(),
-            )
-        except BaseException:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise
-        _set_process_output_paths(process, staged_output, staging_dir)
-        try:
-            returncode = await _wait_for_process(process, _get_external_process_timeout(config))
-            if returncode != 0:
-                return False
-            secure_existing_output(staging_dir, staged_output)
-            validate_output_target(output_path.parent, output_path)
-            os.replace(staged_output, output_path)
-        except (FileNotFoundError, ValueError, SecurityError):
-            return False
-        finally:
-            _cleanup_process_output(process)
-        return True
+    return await run_ffmpeg_audio_encode(
+        input_path,
+        output_path,
+        semaphore=_get_shared_audio_encoder_semaphore(config),
+        wait=_wait_for_process,
+        timeout=_get_external_process_timeout(config),
+        set_output_paths=_set_process_output_paths,
+        cleanup_output=_cleanup_process_output,
+    )
 
 
 async def _process_extracted_audio_file(
@@ -1175,405 +592,6 @@ async def _process_video_jobs(
     return await asyncio.gather(*video_tasks)
 
 
-def _should_fallback_sprite_render(exc: Exception) -> bool:
-    if isinstance(exc, ValueError):
-        return "Coordinate 'lower' is less than 'upper'" in str(exc)
-    if isinstance(exc, StopIteration):
-        return True
-    return isinstance(exc, RuntimeError) and isinstance(exc.__cause__, StopIteration)
-
-
-def _get_sprite_atlas_data(data: UnityPy.classes.Sprite):
-    atlas = None
-    if data.m_SpriteAtlas:
-        atlas = data.m_SpriteAtlas.read()
-    elif data.m_AtlasTags:
-        for obj in data.assets_file.objects.values():
-            if obj.type != ClassIDType.SpriteAtlas:
-                continue
-            atlas = obj.read()
-            if atlas.m_Name == data.m_AtlasTags[0]:
-                break
-            atlas = None
-
-    if not atlas:
-        return data.m_RD
-
-    sprite_atlas_data = next(
-        (value for key, value in atlas.m_RenderDataMap if key == data.m_RenderDataKey),
-        None,
-    )
-    if sprite_atlas_data is None:
-        logger.warning(
-            "Sprite atlas render data missing for %s, falling back to embedded render data",
-            data.m_Name or data.path_id,
-        )
-        return data.m_RD
-    return sprite_atlas_data
-
-
-def _render_sprite_with_fallback(data: UnityPy.classes.Sprite) -> Image.Image:
-    """Render a sprite, falling back to its texture rect when tight mesh export fails."""
-    try:
-        return data.image
-    except (ValueError, RuntimeError, StopIteration) as exc:
-        if not _should_fallback_sprite_render(exc):
-            raise
-
-    sprite_atlas_data = _get_sprite_atlas_data(data)
-
-    texture_rect = sprite_atlas_data.textureRect
-    if texture_rect.width <= 0 or texture_rect.height <= 0:
-        raise ValueError(
-            f"Invalid sprite texture rect {texture_rect} for {data.m_Name or data.path_id}"
-        )
-
-    image = get_image(
-        data,
-        sprite_atlas_data.texture,
-        sprite_atlas_data.alphaTexture,
-    ).crop(
-        (
-            texture_rect.x,
-            texture_rect.y,
-            texture_rect.x + texture_rect.width,
-            texture_rect.y + texture_rect.height,
-        )
-    )
-
-    settings = SpriteSettings(sprite_atlas_data.settingsRaw)
-    if settings.packed == 1:
-        rotation = settings.packingRotation
-        if rotation == SpritePackingRotation.kSPRFlipHorizontal:
-            image = image.transpose(Image.FLIP_LEFT_RIGHT)
-        elif rotation == SpritePackingRotation.kSPRFlipVertical:
-            image = image.transpose(Image.FLIP_TOP_BOTTOM)
-        elif rotation == SpritePackingRotation.kSPRRotate180:
-            image = image.transpose(Image.ROTATE_180)
-        elif rotation == SpritePackingRotation.kSPRRotate90:
-            image = image.transpose(Image.ROTATE_270)
-
-    logger.warning(
-        "Falling back to texture rect export for sprite %s",
-        data.m_Name or data.path_id,
-    )
-    return image.transpose(Image.FLIP_TOP_BOTTOM)
-
-
-def _render_image_asset(
-    data: UnityPy.classes.Texture2D | UnityPy.classes.Sprite,
-) -> Image.Image:
-    if isinstance(data, UnityPy.classes.Sprite):
-        return _render_sprite_with_fallback(data)
-    return data.image
-
-
-def _build_unityfs_save_path(unityfs_path: str, extracted_save_path: StdPath) -> StdPath:
-    if not isinstance(unityfs_path, str) or not unityfs_path:
-        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-    if "\\" in unityfs_path or "\x00" in unityfs_path:
-        raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-
-    source_path = PurePosixPath(unityfs_path)
-    base_paths = (
-        PurePosixPath(UNITY_FS_CONTAINER_BASE.as_posix()),
-        PurePosixPath(UNITY_FS_BUILT_IN_CONTAINER_BASE.as_posix()),
-        PurePosixPath(UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE.as_posix()),
-    )
-
-    for index, base_path in enumerate(base_paths):
-        base_text = base_path.as_posix()
-        prefix = f"{base_text}/"
-        if not unityfs_path.startswith(prefix):
-            continue
-
-        raw_relative_path = unityfs_path[len(prefix) :]
-        if not raw_relative_path or any(
-            component in ("", ".", "..") for component in raw_relative_path.split("/")
-        ):
-            raise ValueError(f"Invalid UnityFS path: {unityfs_path!r}")
-
-        try:
-            relpath = source_path.relative_to(base_path)
-        except ValueError:
-            continue
-
-        if index == 0:
-            relpath = PurePosixPath(*relpath.parts[1:])
-        return StdPath(resolve_secure_path(extracted_save_path, relpath.as_posix()).as_posix())
-
-    raise ValueError(f"Failed to get relative path for {unityfs_path}")
-
-
-def _resolve_generated_child_path(root: StdPath, name: str, suffix: str = "") -> StdPath:
-    """Resolve an untrusted generated filename below a local extraction root."""
-
-    relative_name = f"{name}{suffix}"
-    return StdPath(resolve_secure_path(root, relative_name).as_posix())
-
-
-def _canonical_root(path: StdPath) -> StdPath:
-    return path.resolve(strict=False)
-
-
-def _replace_suffix_secure(root: StdPath, name: str, suffix: str) -> StdPath:
-    if not isinstance(name, str) or not name or "\x00" in name:
-        raise SecurityError("generated name must be a non-empty filename")
-    if "/" in name or "\\" in name or name in (".", ".."):
-        raise SecurityError("generated name must be a single relative filename")
-    return _resolve_generated_child_path(root, StdPath(name).with_suffix(suffix).name)
-
-
-def _stream_files(paths: list[StdPath], chunk_size: int = 1024 * 1024):
-    with ExitStack() as stack:
-        files = [stack.enter_context(path.open("rb")) for path in paths]
-        for file in files:
-            while chunk := file.read(chunk_size):
-                yield chunk
-
-
-def _discard_exported_file_sync(exported_files: list[StdPath], file_path: StdPath) -> None:
-    try:
-        exported_files.remove(file_path)
-        return
-    except ValueError:
-        pass
-
-    file_path_lower = file_path.with_name(file_path.name.lower())
-    try:
-        exported_files.remove(file_path_lower)
-    except ValueError:
-        logger.debug("%s not tracked in exported_files, skip removal", file_path)
-
-
-def _resolve_existing_path_sync(
-    expected_path: StdPath,
-    save_dir: StdPath,
-    expected_suffix: str | None = None,
-) -> StdPath:
-    try:
-        relative_path = expected_path.relative_to(save_dir).as_posix()
-    except ValueError as exc:
-        raise ValueError(f"Expected path is outside save directory: {expected_path}") from exc
-    expected_path = StdPath(resolve_secure_path(save_dir, relative_path).as_posix())
-
-    if expected_path.exists():
-        return validate_contained_file(save_dir, relative_path)
-
-    expected_name_lower = expected_path.name.lower()
-    expected_path_lower = expected_path.with_name(expected_name_lower)
-    if expected_path_lower.exists():
-        logger.debug("Found %s instead of %s", expected_path_lower, expected_path.name)
-        return validate_contained_file(
-            save_dir,
-            expected_path_lower.relative_to(save_dir).as_posix(),
-        )
-
-    candidate_paths = [
-        path
-        for path in save_dir.iterdir()
-        if path.name.lower() == expected_name_lower
-        and (expected_suffix is None or path.suffix.lower() == expected_suffix.lower())
-        and path.is_file()
-        and not path.is_symlink()
-    ]
-    if len(candidate_paths) == 1:
-        logger.debug(
-            "Found %s instead of %s via case-insensitive lookup",
-            candidate_paths[0],
-            expected_path.name,
-        )
-        return validate_contained_file(
-            save_dir,
-            candidate_paths[0].relative_to(save_dir).as_posix(),
-        )
-
-    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
-
-
-def _resolve_shared_audio_outputs_sync(
-    output_root: StdPath,
-    save_dir: StdPath,
-    cue_sheet_name: str,
-) -> list[StdPath]:
-    expected_names = {
-        f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
-    }
-    return [
-        validate_contained_file(
-            output_root,
-            path.relative_to(output_root).as_posix(),
-        )
-        for path in output_root.rglob("*")
-        if (
-            path.is_file()
-            and not path.is_symlink()
-            and path.parent != save_dir
-            and path.name.lower() in expected_names
-        )
-    ]
-
-
-def _resolve_local_audio_outputs_sync(
-    save_dir: StdPath,
-    cue_sheet_name: str,
-) -> list[StdPath]:
-    """Find audio files matching the cue sheet name directly in save_dir.
-
-    This covers the case where an AudioClip in the same bundle has already
-    been extracted directly (e.g. via UnityPy's AudioClip handler) and the
-    referenced ACB TextAsset lives in a different bundle that may not be
-    available in the bundle cache.
-    """
-    expected_names = {
-        f"{cue_sheet_name}{suffix}".lower() for suffix in (".wav", ".mp3", ".flac", ".hca")
-    }
-    return [
-        path
-        for path in save_dir.iterdir()
-        if path.is_file() and not path.is_symlink() and path.name.lower() in expected_names
-    ]
-
-
-def _extract_acb_from_cached_bundles_sync(
-    bundle_save_path: StdPath,
-    acb_textasset_filename: str,
-    acb_output_path: StdPath,
-    unity_version: str | None,
-    bundle_cache_root: StdPath | None = None,
-) -> bool:
-    if bundle_cache_root is None:
-        return False
-
-    bundle_cache_root = _canonical_root(bundle_cache_root)
-    if not bundle_cache_root.is_dir():
-        return False
-    bundle_path = _canonical_root(bundle_save_path)
-    output_root = _canonical_root(acb_output_path.parent)
-    validate_output_target(output_root, acb_output_path)
-
-    expected_textasset_name = acb_textasset_filename.lower()
-    for cached_bundle_path in bundle_cache_root.rglob("*"):
-        if cached_bundle_path.is_dir():
-            continue
-        try:
-            cached_bundle_path.resolve().relative_to(output_root)
-        except ValueError:
-            pass
-        else:
-            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
-            continue
-        try:
-            cached_bundle_path = validate_contained_file(
-                bundle_cache_root,
-                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
-            )
-        except (OSError, ValueError, SecurityError):
-            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
-            continue
-        if cached_bundle_path.resolve() == bundle_path:
-            continue
-
-        try:
-            UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-            cached_unity_file = UnityPy.load(cached_bundle_path.as_posix())
-            if not cached_unity_file:
-                continue
-        except Exception:
-            continue
-
-        for unityfs_path, unityfs_obj in cached_unity_file.container.items():
-            if unityfs_obj.type.name != "TextAsset":
-                continue
-            if PurePosixPath(unityfs_path).name.lower() != expected_textasset_name:
-                continue
-
-            data = unityfs_obj.read()
-            if not isinstance(data, UnityPy.classes.TextAsset):
-                continue
-
-            atomic_write_bytes(
-                acb_output_path,
-                data.m_Script.encode("utf-8", "surrogateescape"),
-            )
-            logger.debug(
-                "Extracted %s from cached bundle %s to %s",
-                acb_textasset_filename,
-                cached_bundle_path.relative_to(bundle_cache_root),
-                acb_output_path,
-            )
-            return True
-
-    return False
-
-
-def _resolve_existing_usm_path_sync(expected_path: StdPath, save_dir: StdPath) -> StdPath:
-    try:
-        return _resolve_existing_path_sync(expected_path, save_dir, ".usm")
-    except FileNotFoundError:
-        pass
-
-    candidate_paths = [
-        path
-        for path in save_dir.iterdir()
-        if path.suffix.lower() == ".usm" and path.is_file() and not path.is_symlink()
-    ]
-    if len(candidate_paths) == 1:
-        logger.warning(
-            "Expected %s in %s, falling back to discovered usm %s",
-            expected_path.name,
-            save_dir,
-            candidate_paths[0].name,
-        )
-        return validate_contained_file(
-            save_dir,
-            candidate_paths[0].relative_to(save_dir).as_posix(),
-        )
-
-    raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
-
-
-def _save_image_formats(
-    image: Image.Image,
-    save_path: StdPath,
-    texture_output_formats: tuple[str, ...],
-) -> list[StdPath]:
-    saved_paths: list[StdPath] = []
-    for image_format in texture_output_formats:
-        output_path = StdPath(
-            resolve_secure_path(
-                save_path.parent,
-                f"{save_path.stem}.{image_format}",
-            ).as_posix()
-        )
-        logger.debug("Saving texture to %s", output_path)
-        if output_path.exists() and output_path.is_symlink():
-            raise SecurityError(f"image output must not be a symlink: {output_path}")
-        temporary_path: StdPath | None = None
-        descriptor: int | None = None
-        try:
-            descriptor, temporary_name = tempfile.mkstemp(
-                prefix=f".{output_path.name}.",
-                suffix=".tmp",
-                dir=output_path.parent,
-            )
-            temporary_path = StdPath(temporary_name)
-            with os.fdopen(descriptor, "w+b") as temporary_file:
-                descriptor = None
-                image.save(temporary_file, format=image_format)
-                temporary_file.flush()
-                os.fsync(temporary_file.fileno())
-            os.replace(temporary_path, output_path)
-            temporary_path = None
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-        saved_paths.append(output_path)
-    return saved_paths
-
-
 def _extract_bundle_files_sync(
     bundle_save_path: str,
     bundle: Dict[str, str],
@@ -1594,158 +612,14 @@ def _extract_bundle_files_sync(
 
     logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
 
-    exported_files: list[StdPath] = []
-    post_process_acb_files: list[tuple[StdPath, list[Dict]]] = []
-    post_process_movie_bundles: list[tuple[StdPath, list[Dict]]] = []
+    exported_files, post_process_acb_files, post_process_movie_bundles = extract_unity_objects(
+        unity_file,
+        output_root,
+        texture_output_formats,
+        live2d_bundle=live2d_bundle,
+    )
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
-    additional_motion_jobs = []
-    param_id_map: dict[str, str] = {}
-
-    for unityfs_path, unityfs_obj in unity_file.container.items():
-        try:
-            save_path = _build_unityfs_save_path(unityfs_path, output_root)
-        except Exception as e:
-            logger.exception("Failed to get relative path for %s", unityfs_path)
-            raise e
-
-        save_path = save_path.with_name(save_path.name.strip())
-        if live2d_bundle and "motion" in save_path.parts:
-            logger.debug("Skipping live2d motion asset %s for post-processing", unityfs_path)
-            continue
-        save_dir = save_path.parent
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            match unityfs_obj.type.name:
-                case "MonoBehaviour":
-                    tree = None
-                    try:
-                        if unityfs_obj.serialized_type.node:
-                            tree = unityfs_obj.read_typetree()
-                    except AttributeError:
-                        tree = unityfs_obj.read_typetree()
-                    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
-
-                    if unityfs_path.endswith(".playable"):
-                        tree = extract_playable(unity_file, unityfs_path)
-
-                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-
-                    if (
-                        live2d_bundle
-                        and isinstance(tree, dict)
-                        and tree.get("AdditionalMotionData")
-                    ):
-                        additional_motion_jobs.append((unityfs_obj.read(), save_dir))
-
-                    if "acbFiles" in tree:
-                        post_process_acb_files.append((save_dir, tree["acbFiles"]))
-                        logger.debug("Found acbFiles in %s: %s", unityfs_path, tree["acbFiles"])
-                    elif "movieBundleDatas" in tree:
-                        post_process_movie_bundles.append((save_dir, tree["movieBundleDatas"]))
-                        logger.debug(
-                            "Found movieBundleDatas in %s: %s",
-                            unityfs_path,
-                            tree["movieBundleDatas"],
-                        )
-                case "TextAsset":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.TextAsset):
-                        if save_path.suffix == ".bytes":
-                            save_path = save_path.with_suffix("")
-                        data_bytes = data.m_Script.encode("utf-8", "surrogateescape")
-                        atomic_write_bytes(save_path, data_bytes)
-                        if live2d_bundle and save_path.suffix == ".moc3":
-                            param_id_map.update(extract_params_ids_from_moc3(data_bytes))
-                        exported_files.append(save_path)
-                    else:
-                        raise TypeError(f"Expected TextAsset, got {type(data)} for {unityfs_path}")
-                case "Texture2D" | "Sprite":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2D) or isinstance(
-                        data, UnityPy.classes.Sprite
-                    ):
-                        image = _render_image_asset(data)
-                        exported_files.extend(
-                            _save_image_formats(image, save_path, texture_output_formats)
-                        )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
-                        )
-                case "Texture2DArray":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.Texture2DArray):
-                        for i, image in enumerate(data.images):
-                            texture_path = save_path.with_name(f"{save_path.stem}_{i}")
-                            exported_files.extend(
-                                _save_image_formats(
-                                    image,
-                                    texture_path,
-                                    texture_output_formats,
-                                )
-                            )
-                    else:
-                        raise TypeError(
-                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
-                        )
-                case "AudioClip":
-                    data = unityfs_obj.read()
-                    if isinstance(data, UnityPy.classes.AudioClip):
-                        for filename, sample_data in data.samples.items():
-                            sample_path = _resolve_generated_child_path(save_dir, filename)
-                            logger.debug("Saving audio clip %s to %s", filename, sample_path)
-                            atomic_write_bytes(sample_path, sample_data)
-                            exported_files.append(sample_path)
-                    else:
-                        raise TypeError(f"Expected AudioClip, got {type(data)} for {unityfs_path}")
-                case "Mesh":
-                    logger.warning("Mesh data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case "Cubemap":
-                    logger.warning("Cubemap data is not supported yet, skipping %s", unityfs_path)
-                    continue
-                case _:
-                    logger.warning(
-                        "Unknowen type %s of %s, extracting typetree",
-                        unityfs_obj.type.name,
-                        unityfs_path,
-                    )
-                    tree = unityfs_obj.read_typetree()
-                    try:
-                        json.dumps(tree)
-                    except (ValueError, TypeError):
-                        logger.warning("Failed to serialize %s, skipping", tree)
-                    atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
-                    exported_files.append(save_path)
-        except (ValueError, TypeError, AttributeError, OSError) as e:
-            logger.exception("Failed to extract %s: %s", unityfs_path, e)
-            raise e
-
-    if live2d_bundle:
-        for mono_behaviour, save_dir in additional_motion_jobs:
-            motions = [
-                restore_unity_object_to_motion3(motion)
-                for motion in mono_behaviour.AdditionalMotionData
-            ]
-            motions = [motion for motion in motions if motion is not None]
-            correct_param_ids(motions, param_id_map)
-            motion_dir = save_dir / "motions"
-            motion_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_bytes(
-                motion_dir / "BuildMotionData.json",
-                json.dumps(
-                    {"motions": [name for name, _ in motions]},
-                    option=json.OPT_INDENT_2,
-                ),
-            )
-            exported_files.append(motion_dir / "BuildMotionData.json")
-            for name, motion in motions:
-                motion_path = _resolve_generated_child_path(motion_dir, name, ".motion3.json")
-                atomic_write_bytes(motion_path, json.dumps(motion, option=json.OPT_INDENT_2))
-                exported_files.append(motion_path)
 
     logger.debug(
         "Extracted %d files from %s, list: %s",

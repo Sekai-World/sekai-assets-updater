@@ -603,25 +603,25 @@ def test_shutdown_process_pools_shuts_down_all_cached_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executors = {name: _RecordingExecutor() for name in ("extract", "audio", "usm")}
-    monkeypatch.setattr(bundle, "_extract_process_pool_cache", (4, executors["extract"]))
-    monkeypatch.setattr(bundle, "_audio_process_pool_cache", (2, executors["audio"]))
-    monkeypatch.setattr(bundle, "_usm_process_pool_cache", (2, executors["usm"]))
+    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", (4, executors["extract"]))
+    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", (2, executors["audio"]))
+    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", (2, executors["usm"]))
 
     bundle.shutdown_process_pools()
 
     for executor in executors.values():
         assert executor.shutdown_calls == [(True, True)]
-    assert bundle._extract_process_pool_cache is None
-    assert bundle._audio_process_pool_cache is None
-    assert bundle._usm_process_pool_cache is None
+    assert bundle._bundle_runtime._extract_process_pool is None
+    assert bundle._bundle_runtime._audio_process_pool is None
+    assert bundle._bundle_runtime._usm_process_pool is None
 
 
 def test_shutdown_process_pools_is_idempotent_without_cached_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(bundle, "_extract_process_pool_cache", None)
-    monkeypatch.setattr(bundle, "_audio_process_pool_cache", None)
-    monkeypatch.setattr(bundle, "_usm_process_pool_cache", None)
+    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", None)
+    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", None)
+    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", None)
 
     bundle.shutdown_process_pools()
 
