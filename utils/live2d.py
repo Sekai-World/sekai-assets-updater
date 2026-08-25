@@ -672,12 +672,27 @@ def _restore_motion_base_bundle_sync(
     return save_dir.as_posix()
 
 
+async def collect_param_id_map(
+    local_live2d_model_extracted_dir: Path,
+) -> Dict[str, str]:
+    """Gather the parameter ID map from every ``*.moc3`` under *model_extracted_dir*."""
+    param_id_map: Dict[str, str] = {}
+    async for moc3_path in local_live2d_model_extracted_dir.glob("**/*.moc3"):
+        async with await open_file(moc3_path, "rb") as f:
+            moc3 = await f.read()
+            param_id_map.update(extract_params_ids_from_moc3(moc3))
+    return param_id_map
+
+
 async def restore_live2d_motions(
     local_live2d_motion_bundle_cache_dir: Path,
     local_live2d_motion_extracted_dir: Path,
     local_live2d_model_extracted_dir: Path,
     unity_version: str,
     config=None,
+    *,
+    param_id_map: Dict[str, str] | None = None,
+    bundle_paths: list[StdPath] | None = None,
 ):
     UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
 
@@ -690,17 +705,19 @@ async def restore_live2d_motions(
             f"Model extracted dir {local_live2d_model_extracted_dir} does not exist"
         )
 
-    # Gather param ID map
-    param_id_map: Dict[str, str] = {}
-    async for moc3_path in local_live2d_model_extracted_dir.glob("**/*.moc3"):
-        async with await open_file(moc3_path, "rb") as f:
-            moc3 = await f.read()
-            param_id_map.update(extract_params_ids_from_moc3(moc3))
+    # Gather param ID map (skip when caller pre-supplied one)
+    if param_id_map is None:
+        param_id_map = await collect_param_id_map(local_live2d_model_extracted_dir)
     logger.debug("Param ID map: %s", param_id_map)
 
-    motion_base_bundle_paths = []
-    async for motion_base_bundle_path in local_live2d_motion_bundle_cache_dir.glob("*"):
-        motion_base_bundle_paths.append(motion_base_bundle_path)
+    # Resolve the set of motion bundles to restore
+    if bundle_paths is not None:
+        motion_base_bundle_paths = list(bundle_paths)
+    else:
+        motion_base_bundle_paths = []
+        async for motion_base_bundle_path in local_live2d_motion_bundle_cache_dir.glob("*"):
+            if motion_base_bundle_path.is_file():
+                motion_base_bundle_paths.append(motion_base_bundle_path)
 
     max_concurrency = get_max_concurrent_motion_base_files(config)
     logger.info(

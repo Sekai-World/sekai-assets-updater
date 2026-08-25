@@ -90,6 +90,8 @@ Storage:
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
 - Charts never download or cache asset bundles. They use existing `music/music_score/*.txt` files first; when absent, they copy `music/music_score/` from the first successful `type == "normal"` target in `ASSET_REMOTE_STORAGE`, using that target's program and args. If `ASSET_LOCAL_EXTRACTED_DIR` is persistent, the fallback uses a separate temporary workspace and cannot pollute it. If it is unset, the existing run-scoped extracted workspace is reused and cleaned after processing. Ordinary assets retain their existing temporary-file semantics.
+- Chart incremental state is persisted at `chart_state.json` beside `DL_LIST_CACHE_PATH`. Only new or content-changed scores are re-rendered; runs with no changes skip rendering and upload entirely. State is updated atomically only after a successful render and upload.
+- Live2D motion incremental state is persisted at `live2d_motion_state.json` beside `DL_LIST_CACHE_PATH`. On subsequent runs, only new or content-changed motion bundles are restored; unchanged bundles and their uploads are skipped. The state includes a model fingerprint derived from `*.moc3` files and the Unity version, so moc3 changes trigger a full rebuild. State is updated atomically only after all restore, upload, and publish operations succeed.
 
 Startup validates all configured concurrency values, AES key/IV lengths, the external process
 timeout, and executables required by the selected decoder and upload backends.
@@ -99,6 +101,7 @@ Cache files:
 - `DL_LIST_CACHE_PATH`
 - `ASSET_BUNDLE_INFO_CACHE_PATH`
 - `GAME_VERSION_JSON_CACHE_PATH`
+- `live2d_motion_state.json` (Live2D incremental state, sibling of `DL_LIST_CACHE_PATH`)
 
 ## Main Usage
 
