@@ -1,31 +1,45 @@
+import json
 import unittest
 from pathlib import Path
+from pathlib import Path as StdPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import specialized
-import main
 from anyio import Path as AsyncPath
-from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes
-from helpers import select_bundles_for_download
-from utils.chart import get_json_url
+
+import main
+import specialized
+from bundle import is_live2d_bundle
+from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes, select_bundles_for_download
 from specialized import (
+    chart_fingerprint,
+    chart_state_path,
     collect_score_files,
-    get_enabled_specialized_modes,
+    compute_motion_bundle_hashes,
+    compute_score_hashes,
     get_chart_data_server,
+    get_enabled_specialized_modes,
+    get_normal_storage_candidates,
     get_required_bundle_prefixes,
     get_specialized_storage,
-    get_normal_storage_candidates,
     has_local_chart_sources,
-    needs_temporary_chart_source,
-    music_id_from_score_path,
+    hash_score_file,
+    live2d_state_path,
+    load_chart_state,
+    load_live2d_state,
     mode_uses_bundle_pipeline,
+    music_id_from_score_path,
     needs_live2d_bundle_cache,
     needs_shared_workspace,
+    needs_temporary_chart_source,
+    pending_motion_bundles,
+    pending_score_paths,
     retains_live2d_extracted_outputs,
     run_specialized_postprocess,
+    validate_chart_state,
+    validate_live2d_state,
 )
-from bundle import is_live2d_bundle
+from utils.chart import get_json_url
 from worker import get_bundle_cache_path, get_bundle_cache_root, recover_live2d_model_outputs
 
 
@@ -558,6 +572,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             (bundle_cache / "live2d" / "motion").mkdir(parents=True)
             config = SimpleNamespace(
                 ASSET_LOCAL_EXTRACTED_DIR=extracted_dir,
+                DL_LIST_CACHE_PATH=root / "cache" / "dl_list.json",
                 LIVE2D_BUNDLE_CACHE_DIR=bundle_cache,
                 UNITY_VERSION="2022.3",
                 REGION=SimpleNamespace(name="JP"),
@@ -595,6 +610,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 specialized.Path(str(extracted_dir / "live2d" / "model")),
                 "2022.3",
                 config=config,
+                param_id_map={},
+                bundle_paths=[],
             )
             self.assertEqual(upload.await_count, 2)
             self.assertEqual(
@@ -744,6 +761,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             score.write_text("# SUS", encoding="utf-8")
             config = SimpleNamespace(
                 ASSET_LOCAL_EXTRACTED_DIR=extracted_dir,
+                DL_LIST_CACHE_PATH=Path(temp_dir) / "cache" / "dl_list.json",
                 REGION=SimpleNamespace(name="JP"),
                 ASSET_REMOTE_STORAGE=[
                     {"type": "live2d", "base": "live-target", "program": "rclone", "args": []},
@@ -753,9 +771,10 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
 
             rendered_dirs = []
 
-            async def render_charts(_config, source_dir, _include_list=None):
+            async def render_charts(_config, source_dir, _include_list=None, score_files=None):
                 rendered_dirs.append(source_dir)
                 (source_dir / "charts" / "jp").mkdir(parents=True)
+                return set()
 
             with patch.object(
                 specialized, "fetch_chart_sources_from_storage", new=AsyncMock()
@@ -773,3 +792,719 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 [],
                 config=config,
             )
+
+
+class ChartIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
+    """Tests for incremental chart rendering with persisted state."""
+
+    def _make_score(self, workspace: Path, directory: str, content: str = "# SUS"):
+        """Create a fake score file and return its path."""
+        score = workspace / "music" / "music_score" / directory / "master.txt"
+        score.parent.mkdir(parents=True, exist_ok=True)
+        score.write_text(content, encoding="utf-8")
+        return score
+
+    def _make_config(self, temp_dir: str, **overrides) -> SimpleNamespace:
+        defaults = dict(
+            ASSET_LOCAL_EXTRACTED_DIR=Path(temp_dir),
+            DL_LIST_CACHE_PATH=Path(temp_dir) / "cache" / "dl_list.json",
+            REGION=SimpleNamespace(name="JP"),
+            CHART_DATA_SERVER=None,
+            CHART_JACKET_BASE_URL=None,
+            ASSET_REMOTE_STORAGE=[
+                {
+                    "type": "charts",
+                    "base": "chart-target",
+                    "program": "rclone",
+                    "args": ["copy", "src", "dst"],
+                },
+            ],
+        )
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _state_file(self, config) -> Path:
+        return Path(config.DL_LIST_CACHE_PATH).parent / "chart_state.json"
+
+    async def _run_charts(self, config, workspace, include_list=None):
+        """Run _process_charts with mocked render and upload."""
+        rendered_files: list[str] = []
+
+        async def render(
+            _config, _extracted_dir, _include_list=None, score_files=None
+        ):
+            rendered_files.extend(score_files or [])
+            (workspace / "charts" / "jp").mkdir(parents=True, exist_ok=True)
+            return set(score_files or [])
+
+        upload_calls: list = []
+
+        async def upload_dir(mode, source_dir, config):
+            upload_calls.append((mode, str(source_dir)))
+
+        with patch.object(specialized, "_render_charts", new=render):
+            with patch.object(
+                specialized, "_upload_specialized_directory", new=upload_dir
+            ):
+                await specialized._process_charts(config, workspace, include_list)
+        return rendered_files, upload_calls
+
+    async def test_initial_build_no_state_renders_all_and_persists(self):
+        """No state file → all scores rendered, upload invoked, state written after upload."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            self._make_score(workspace, "002_song", "score-b")
+            config = self._make_config(temp_dir)
+            state_file = self._state_file(config)
+            self.assertFalse(state_file.exists())
+
+            rendered, uploads = await self._run_charts(config, workspace)
+
+            self.assertEqual(sorted(rendered), ["001_song/master.txt", "002_song/master.txt"])
+            self.assertEqual(len(uploads), 1)
+            self.assertTrue(state_file.exists())
+            state = load_chart_state(state_file)
+            self.assertIsNotNone(state)
+            self.assertIn("001_song/master.txt", state["scores"])
+            self.assertIn("002_song/master.txt", state["scores"])
+
+    async def test_incremental_addition_renders_only_new(self):
+        """Run twice with one new file → only the new file rendered."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            config = self._make_config(temp_dir)
+
+            # First run: full build
+            rendered1, uploads1 = await self._run_charts(config, workspace)
+            self.assertEqual(len(rendered1), 1)
+            self.assertEqual(len(uploads1), 1)
+
+            # Add a new score
+            self._make_score(workspace, "002_song", "score-b")
+            rendered2, uploads2 = await self._run_charts(config, workspace)
+            self.assertEqual(rendered2, ["002_song/master.txt"])
+            self.assertEqual(len(uploads2), 1)
+
+            state = load_chart_state(self._state_file(config))
+            self.assertEqual(len(state["scores"]), 2)
+
+    async def test_content_change_renders_only_changed(self):
+        """Rewrite one score's bytes → only it re-renders."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            self._make_score(workspace, "002_song", "score-b")
+            config = self._make_config(temp_dir)
+
+            # First run
+            rendered1, _ = await self._run_charts(config, workspace)
+            self.assertEqual(len(rendered1), 2)
+
+            # Change content of one score
+            self._make_score(workspace, "002_song", "score-b-changed")
+            rendered2, _ = await self._run_charts(config, workspace)
+            self.assertEqual(rendered2, ["002_song/master.txt"])
+
+    async def test_noop_skips_render_and_upload(self):
+        """Third identical run → render and upload not called."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            config = self._make_config(temp_dir)
+
+            # Run twice to establish state
+            await self._run_charts(config, workspace)
+            await self._run_charts(config, workspace)
+
+            # Third run: should be a no-op
+            render_called = False
+
+            async def render(
+                _config, _extracted_dir, _include_list=None, score_files=None
+            ):
+                nonlocal render_called
+                render_called = True
+                return set()
+
+            upload_called = False
+
+            async def upload_dir(mode, source_dir, config):
+                nonlocal upload_called
+                upload_called = True
+
+            with patch.object(specialized, "_render_charts", new=render):
+                with patch.object(
+                    specialized, "_upload_specialized_directory", new=upload_dir
+                ):
+                    await specialized._process_charts(config, workspace)
+
+            self.assertFalse(render_called)
+            self.assertFalse(upload_called)
+
+    async def test_upload_failure_preserves_old_state(self):
+        """Upload raises → state file still holds old hashes; rerun retries."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            config = self._make_config(temp_dir)
+
+            # First successful run
+            await self._run_charts(config, workspace)
+            state_after_first = load_chart_state(self._state_file(config))
+            self.assertIn("001_song/master.txt", state_after_first["scores"])
+
+            # Add a new score and fail the upload
+            self._make_score(workspace, "002_song", "score-b")
+
+            async def render(
+                _config, _extracted_dir, _include_list=None, score_files=None
+            ):
+                (workspace / "charts" / "jp").mkdir(parents=True, exist_ok=True)
+                return set(score_files or [])
+
+            async def failing_upload(mode, source_dir, config):
+                raise RuntimeError("upload failed")
+
+            with patch.object(specialized, "_render_charts", new=render):
+                with patch.object(
+                    specialized, "_upload_specialized_directory", new=failing_upload
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "upload failed"):
+                        await specialized._process_charts(config, workspace)
+
+            # State should still be the old state (no 002)
+            state_after_fail = load_chart_state(self._state_file(config))
+            self.assertIn("001_song/master.txt", state_after_fail["scores"])
+            self.assertNotIn("002_song/master.txt", state_after_fail["scores"])
+
+            # Rerun succeeds
+            rendered, _ = await self._run_charts(config, workspace)
+            self.assertEqual(rendered, ["002_song/master.txt"])
+
+    async def test_corrupt_state_triggers_full_rebuild(self):
+        """Corrupt state file → treated as full rebuild, no crash."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            config = self._make_config(temp_dir)
+            state_file = self._state_file(config)
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text("NOT VALID JSON {{{", encoding="utf-8")
+
+            rendered, _ = await self._run_charts(config, workspace)
+            # Full rebuild: all scores rendered
+            self.assertEqual(sorted(rendered), ["001_song/master.txt"])
+            state = load_chart_state(state_file)
+            self.assertIsNotNone(state)
+            self.assertIn("001_song/master.txt", state["scores"])
+
+    async def test_fingerprint_change_triggers_full_rebuild(self):
+        """Mutate CHART_DATA_SERVER → full rebuild even with existing state."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            config = self._make_config(temp_dir)
+
+            # First run
+            await self._run_charts(config, workspace)
+
+            # Mutate fingerprint by changing CHART_DATA_SERVER
+            config.CHART_DATA_SERVER = "tc"
+            rendered, _ = await self._run_charts(config, workspace)
+            # Full rebuild means all scores rendered again
+            self.assertEqual(sorted(rendered), ["001_song/master.txt"])
+
+            state = load_chart_state(self._state_file(config))
+            self.assertEqual(state["fingerprint"]["data_server"], "tc")
+
+    async def test_merge_preserves_previously_published_scores(self):
+        """Narrowing include list does not drop already-published scores from state."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            self._make_score(workspace, "001_song", "score-a")
+            self._make_score(workspace, "002_song", "score-b")
+            config = self._make_config(temp_dir)
+
+            # Full build
+            await self._run_charts(config, workspace)
+            state = load_chart_state(self._state_file(config))
+            self.assertEqual(len(state["scores"]), 2)
+
+            # Narrow include list to only 001 — 002 is not rendered but
+            # its hash should remain in state (rclone never deletes remotely).
+            # Since 001's hash hasn't changed, nothing is re-rendered.
+            rendered, _ = await self._run_charts(
+                config, workspace, include_list=[r"^music/music_score/001_song$"]
+            )
+            self.assertEqual(rendered, [])
+            state2 = load_chart_state(self._state_file(config))
+            self.assertEqual(len(state2["scores"]), 2)
+            self.assertIn("002_song/master.txt", state2["scores"])
+
+    async def test_validate_chart_state_rejects_unknown_fields(self):
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
+            validate_chart_state(
+                {
+                    "schema_version": 1,
+                    "fingerprint": {
+                        "region": "jp",
+                        "data_server": "jp",
+                        "jacket_base_url": "...",
+                    },
+                    "scores": {},
+                    "extra": True,
+                }
+            )
+
+    async def test_validate_chart_state_rejects_bad_hash(self):
+        with self.assertRaisesRegex(ValueError, "64-char lowercase hex"):
+            validate_chart_state(
+                {
+                    "schema_version": 1,
+                    "fingerprint": {
+                        "region": "jp",
+                        "data_server": "jp",
+                        "jacket_base_url": "...",
+                    },
+                    "scores": {"a.txt": "NOT-A-HASH"},
+                }
+            )
+
+    async def test_pending_score_paths_detects_new_and_changed(self):
+        current = {"a.txt": "aaa", "b.txt": "bbb", "c.txt": "ccc"}
+        stored = {"a.txt": "aaa", "b.txt": "OLD"}
+        self.assertEqual(pending_score_paths(current, stored), ["b.txt", "c.txt"])
+
+    async def test_pending_score_paths_empty_when_identical(self):
+        data = {"a.txt": "aaa", "b.txt": "bbb"}
+        self.assertEqual(pending_score_paths(data, data), [])
+
+    async def test_hash_score_file_deterministic(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "test.txt"
+            path.write_bytes(b"hello world")
+            h1 = hash_score_file(path)
+            h2 = hash_score_file(path)
+            self.assertEqual(h1, h2)
+            self.assertEqual(len(h1), 64)
+
+    async def test_compute_score_hashes_uses_posix_relpaths(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._make_score(root, "001_song")
+            hashes = compute_score_hashes(root)
+            self.assertIn("001_song/master.txt", hashes)
+            self.assertEqual(len(hashes), 1)
+
+    async def test_chart_state_path_siblings_dl_list(self):
+        config = SimpleNamespace(
+            DL_LIST_CACHE_PATH=Path("cache", "jp", "json", "dl_list.json")
+        )
+        self.assertEqual(
+            chart_state_path(config), Path("cache", "jp", "json", "chart_state.json")
+        )
+
+    async def test_chart_fingerprint_includes_all_fields(self):
+        config = SimpleNamespace(
+            REGION=SimpleNamespace(name="JP"),
+            CHART_DATA_SERVER="tc",
+            CHART_JACKET_BASE_URL=None,
+        )
+        fp = chart_fingerprint(config)
+        self.assertEqual(fp["region"], "jp")
+        self.assertEqual(fp["data_server"], "tc")
+        self.assertIn("jacket_base_url", fp)
+        # Default jacket base URL uses the region name, not data_server
+        self.assertIn("jp", fp["jacket_base_url"])
+
+
+class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
+    """Tests for the Live2D incremental motion state helpers."""
+
+    def _make_motion(self, root: Path, name: str, data: bytes = b"motion-data") -> Path:
+        path = root / name
+        path.write_bytes(data)
+        return path
+
+    def _make_model_dir(self, root: Path, moc3_names: list[str] | None = None) -> Path:
+        """Create a minimal live2d model directory tree.
+
+        Moc3 files are filled with 128 zero bytes so the header addresses
+        are both zero and ``extract_params_ids_from_moc3`` returns an empty
+        map without crashing.
+        """
+        model_dir = root / "live2d" / "model" / "unit"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "unit.model3.json").write_text("{}", encoding="utf-8")
+        for name in (moc3_names or ["unit.moc3"]):
+            (model_dir / name).write_bytes(b"\x00" * 272)
+        return root / "live2d" / "model"
+
+    def _make_config(self, root: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            DL_LIST_CACHE_PATH=root / "cache" / "dl_list.json",
+            UNITY_VERSION="2022.3",
+        )
+
+    def _live2d_state_file(self, root: Path) -> Path:
+        return root / "cache" / "live2d_motion_state.json"
+
+    # --- Initial build ---
+
+    async def test_initial_build_restores_all_bundles_and_persists_state(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            self._make_motion(motion_source, "a.bundle")
+            self._make_motion(motion_source, "b.bundle")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            restore.assert_awaited_once()
+            _, kwargs = restore.call_args
+            restored_names = sorted(p.name for p in kwargs["bundle_paths"])
+            self.assertEqual(restored_names, ["a.bundle", "b.bundle"])
+
+            state_file = self._live2d_state_file(root)
+            state = validate_live2d_state(json.loads(state_file.read_bytes()))
+            self.assertEqual(state["schema_version"], 1)
+            self.assertIn("unity_version", state["fingerprint"])
+            self.assertIn("model_hash", state["fingerprint"])
+            self.assertIn("a.bundle", state["motions"])
+            self.assertIn("b.bundle", state["motions"])
+            self.assertEqual(len(state["motions"]), 2)
+
+    # --- Incremental add ---
+
+    async def test_incremental_add_skips_unchanged_and_restores_new(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            self._make_motion(motion_source, "a.bundle", b"v1")
+            self._make_motion(motion_source, "b.bundle", b"v1")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            # First build to populate state
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            # Add c.bundle
+            self._make_motion(motion_source, "c.bundle", b"v1")
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            restore.assert_awaited_once()
+            _, kwargs = restore.call_args
+            restored_names = sorted(p.name for p in kwargs["bundle_paths"])
+            self.assertEqual(restored_names, ["c.bundle"])
+
+            state = validate_live2d_state(json.loads(self._live2d_state_file(root).read_bytes()))
+            self.assertIn("a.bundle", state["motions"])
+            self.assertIn("b.bundle", state["motions"])
+            self.assertIn("c.bundle", state["motions"])
+            self.assertEqual(len(state["motions"]), 3)
+
+    # --- Content change ---
+
+    async def test_content_change_restores_only_changed_bundles(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            a = self._make_motion(motion_source, "a.bundle", b"v1")
+            b = self._make_motion(motion_source, "b.bundle", b"v1")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            # First build
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            # Change a.bundle
+            a.write_bytes(b"v2")
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            _, kwargs = restore.call_args
+            restored_names = [p.name for p in kwargs["bundle_paths"]]
+            self.assertEqual(restored_names, ["a.bundle"])
+
+            state = validate_live2d_state(json.loads(self._live2d_state_file(root).read_bytes()))
+            self.assertEqual(state["motions"]["a.bundle"], hash_score_file(a))
+            self.assertEqual(state["motions"]["b.bundle"], hash_score_file(b))
+
+    # --- No-op ---
+
+    async def test_no_op_skips_restore_and_upload(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            self._make_motion(motion_source, "a.bundle", b"v1")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            # First build
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            # Nothing changed — second run should be a no-op
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()) as upload:
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            restore.assert_not_awaited()
+            upload.assert_not_awaited()
+
+    # --- Fingerprint change ---
+
+    async def test_moc3_change_invalidates_fingerprint_and_restores_all(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            self._make_motion(motion_source, "a.bundle", b"v1")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            # First build
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            # Change moc3 file → fingerprint invalidation → full restore
+            (root / "live2d" / "model" / "unit" / "unit.moc3").write_bytes(b"\x01" * 272)
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            _, kwargs = restore.call_args
+            restored_names = [p.name for p in kwargs["bundle_paths"]]
+            self.assertEqual(restored_names, ["a.bundle"])
+
+            state = validate_live2d_state(json.loads(self._live2d_state_file(root).read_bytes()))
+            # New fingerprint should differ from the initial one
+            self.assertIn("unity_version", state["fingerprint"])
+            self.assertIn("model_hash", state["fingerprint"])
+
+    # --- State persistence merge ---
+
+    async def test_merge_preserves_previous_motions(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            motion_source = root / "bundle-cache" / "live2d" / "motion"
+            motion_source.mkdir(parents=True)
+            a = self._make_motion(motion_source, "a.bundle", b"v1")
+            b = self._make_motion(motion_source, "b.bundle", b"v1")
+            self._make_model_dir(root)
+            config = self._make_config(root)
+
+            # First build: restore a only (mock to only claim we restored a)
+            async def restore_first(config_arg, motion_extracted, model_extracted, unity_version, **kwargs):
+                pass
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock(side_effect=restore_first)):
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            state1 = validate_live2d_state(json.loads(self._live2d_state_file(root).read_bytes()))
+            self.assertIn("a.bundle", state1["motions"])
+            self.assertIn("b.bundle", state1["motions"])
+
+            # Add c.bundle, change a.bundle
+            c = self._make_motion(motion_source, "c.bundle", b"v1")
+            a.write_bytes(b"v2")
+
+            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
+                            await specialized._process_live2d(
+                                config, StdPath(str(motion_source)), StdPath(str(root))
+                            )
+
+            _, kwargs = restore.call_args
+            restored_names = sorted(p.name for p in kwargs["bundle_paths"])
+            self.assertEqual(restored_names, ["a.bundle", "c.bundle"])
+
+            state2 = validate_live2d_state(json.loads(self._live2d_state_file(root).read_bytes()))
+            self.assertEqual(len(state2["motions"]), 3)
+            self.assertEqual(state2["motions"]["a.bundle"], hash_score_file(a))
+            self.assertEqual(state2["motions"]["b.bundle"], hash_score_file(b))
+            self.assertEqual(state2["motions"]["c.bundle"], hash_score_file(c))
+
+    # --- Validation helpers ---
+
+    async def test_validate_live2d_state_rejects_missing_schema_version(self):
+        with self.assertRaises(ValueError):
+            validate_live2d_state({"fingerprint": {}, "motions": {}})
+
+    async def test_validate_live2d_state_rejects_bad_fingerprint(self):
+        value = {
+            "schema_version": 1,
+            "fingerprint": {"unity_version": 123, "model_hash": "abc"},
+            "motions": {},
+        }
+        with self.assertRaises(ValueError):
+            validate_live2d_state(value)
+
+    async def test_validate_live2d_state_rejects_bad_motion_hash(self):
+        value = {
+            "schema_version": 1,
+            "fingerprint": {"unity_version": "2022.3", "model_hash": "abc"},
+            "motions": {"a.bundle": "short"},
+        }
+        with self.assertRaises(ValueError):
+            validate_live2d_state(value)
+
+    async def test_validate_live2d_state_rejects_unknown_fields(self):
+        value = {
+            "schema_version": 1,
+            "fingerprint": {"unity_version": "2022.3", "model_hash": "abc"},
+            "motions": {},
+            "unknown_field": True,
+        }
+        with self.assertRaises(ValueError):
+            validate_live2d_state(value)
+
+    async def test_load_live2d_state_returns_none_for_missing_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = load_live2d_state(StdPath(str(Path(temp_dir) / "nonexistent.json")))
+            self.assertIsNone(result)
+
+    async def test_load_live2d_state_returns_none_for_corrupt_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "corrupt.json"
+            path.write_bytes(b"not json!!!")
+            result = load_live2d_state(StdPath(str(path)))
+            self.assertIsNone(result)
+
+    # --- Hash helpers ---
+
+    async def test_compute_motion_bundle_hashes_deterministic(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._make_motion(root, "a.bundle", b"data")
+            h1 = compute_motion_bundle_hashes(StdPath(str(root)))
+            h2 = compute_motion_bundle_hashes(StdPath(str(root)))
+            self.assertEqual(h1, h2)
+            self.assertEqual(h1["a.bundle"], hash_score_file(root / "a.bundle"))
+
+    async def test_pending_motion_bundles_detects_addition(self):
+        current = {"a": "h1", "b": "h2"}
+        stored = {"a": "h1"}
+        self.assertEqual(pending_motion_bundles(current, stored), ["b"])
+
+    async def test_pending_motion_bundles_detects_content_change(self):
+        current = {"a": "h_new"}
+        stored = {"a": "h_old"}
+        self.assertEqual(pending_motion_bundles(current, stored), ["a"])
+
+    async def test_pending_motion_bundles_returns_empty_when_unchanged(self):
+        current = {"a": "h1", "b": "h2"}
+        stored = {"a": "h1", "b": "h2"}
+        self.assertEqual(pending_motion_bundles(current, stored), [])
+
+    # --- Path helpers ---
+
+    async def test_live2d_state_path_siblings_dl_list(self):
+        config = SimpleNamespace(
+            DL_LIST_CACHE_PATH=Path("cache", "jp", "json", "dl_list.json")
+        )
+        self.assertEqual(
+            live2d_state_path(config), Path("cache", "jp", "json", "live2d_motion_state.json")
+        )

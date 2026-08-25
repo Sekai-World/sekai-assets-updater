@@ -201,6 +201,7 @@ def test_live2d_postprocess_uses_model_tree_from_pathlib_workspace(
     config.ASSET_LOCAL_EXTRACTED_DIR = root
     config.UPDATER_MODE = "live2d"
     config.LIVE2D_BUNDLE_CACHE_DIR = tmp_path / "live2d-bundles"
+    config.DL_LIST_CACHE_PATH = root / "cache" / "dl_list.json"
     (config.LIVE2D_BUNDLE_CACHE_DIR / "live2d" / "motion").mkdir(parents=True)
     restored: list[tuple[AnyioPath, AnyioPath, AnyioPath]] = []
 
