@@ -5,6 +5,15 @@
   ],
   "packageRules": [
     {
+      "description": "Automatically merge patch updates",
+      "matchUpdateTypes": [
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
       "description": "Keep Python on the supported 3.12 release line",
       "matchPackageNames": [
         "python"
