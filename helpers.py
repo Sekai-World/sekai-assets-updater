@@ -1034,6 +1034,103 @@ async def deobfuscate(data: bytes) -> bytes:
     return data
 
 
+def _validate_upload_sources(
+    exported_list: List[Path],
+    extracted_save_path: Path,
+) -> tuple[str, list[tuple[object, str]]]:
+    """Validate every source file is contained below the extraction root.
+
+    Returns the absolute root and ``(validated_path, relative_key)`` pairs,
+    where ``relative_key`` is the normalized POSIX path below the root.
+    """
+    root_path = os.path.abspath(os.fspath(extracted_save_path))
+    validated_sources: list[tuple[object, str]] = []
+    for file_path in exported_list:
+        source_path = os.path.abspath(os.fspath(file_path))
+        relative_path = os.path.relpath(source_path, root_path)
+        relative_key = relative_path.replace(os.sep, "/")
+        validated_path = validate_contained_file(root_path, relative_key)
+        validated_sources.append((validated_path, relative_key))
+    return root_path, validated_sources
+
+
+def _is_batchable_rclone_upload(upload_program: str, upload_args: List[str]) -> bool:
+    """Whether this target can take one batched ``rclone copy`` per artifact.
+
+    Only the documented ``["copy", "src", "dst", ...]`` template is batched:
+    ``copy`` with ``--files-from-raw`` reproduces exactly the per-file
+    destination keys (relative paths are preserved under the destination), so
+    spawning one process replaces one process per exported file.  Any other
+    verb (``copyto``, ``sync``, custom programs) keeps the per-file path.
+    """
+    program_name = os.path.basename(upload_program)
+    return (
+        program_name in ("rclone", "rclone.exe")
+        and len(upload_args) >= 3
+        and upload_args[0] == "copy"
+        and "src" in upload_args
+        and "dst" in upload_args
+    )
+
+
+async def _upload_batch_with_rclone(
+    validated_uploads: list[tuple[object, str]],
+    root_path: str,
+    remote_base: str,
+    upload_program: str,
+    upload_args: List[str],
+    max_concurrent_uploads: int,
+    config,
+) -> None:
+    relative_keys = [relative_key for _, relative_key in validated_uploads]
+    args = upload_args[:]
+    args[args.index("src")] = root_path
+    args[args.index("dst")] = remote_base
+
+    list_descriptor, list_path = tempfile.mkstemp(prefix=".upload-batch-", suffix=".txt")
+    try:
+        with os.fdopen(list_descriptor, "w", encoding="utf-8") as list_file:
+            list_file.write("\n".join(relative_keys) + "\n")
+        args.extend(
+            [
+                "--files-from-raw",
+                list_path,
+                "--transfers",
+                str(max(1, int(max_concurrent_uploads))),
+            ]
+        )
+        # One process moves the whole artifact; scale the hang timeout with the
+        # batch so large artifacts are not killed mid-transfer.
+        batch_timeout = _get_external_process_timeout(config) * max(
+            1, -(-len(relative_keys) // max(1, int(max_concurrent_uploads)))
+        )
+        logger.debug(
+            "Uploading %d files from %s to %s in one batch",
+            len(relative_keys),
+            root_path,
+            sanitize_url(remote_base),
+        )
+        upload_process = await asyncio.create_subprocess_exec(upload_program, *args)
+        await _wait_for_process(upload_process, batch_timeout)
+        if upload_process.returncode != 0:
+            safe_remote_base = sanitize_url(remote_base)
+            logger.error("Failed to batch-upload %s to %s", root_path, safe_remote_base)
+            raise RuntimeError(
+                f"1 upload(s) failed: batch upload of {len(relative_keys)} files "
+                f"to {safe_remote_base} exited with {upload_process.returncode}"
+            )
+        logger.info(
+            "Successfully uploaded %d files to %s",
+            len(relative_keys),
+            sanitize_url(remote_base),
+        )
+    finally:
+        try:
+            os.unlink(list_path)
+        except OSError:
+            pass
+
+
 async def upload_to_storage(
     exported_list: List[Path],
     extracted_save_path: Path,
@@ -1045,16 +1142,27 @@ async def upload_to_storage(
 ):
     """Upload the extracted assets to remote storage with concurrency"""
 
-    root_path = os.path.abspath(os.fspath(extracted_save_path))
-    validated_uploads: list[tuple[object, str]] = []
-    for file_path in exported_list:
-        source_path = os.path.abspath(os.fspath(file_path))
-        relative_path = os.path.relpath(source_path, root_path)
-        relative_key = relative_path.replace(os.sep, "/")
-        validated_path = validate_contained_file(root_path, relative_key)
-        validated_uploads.append(
-            (validated_path, _derive_storage_remote_path(remote_base, relative_key))
+    root_path, validated_sources = _validate_upload_sources(exported_list, extracted_save_path)
+    validated_uploads: list[tuple[object, str]] = [
+        (validated_path, _derive_storage_remote_path(remote_base, relative_key))
+        for validated_path, relative_key in validated_sources
+    ]
+    validated_batch_keys: list[tuple[object, str]] = [
+        (validated_path, derive_remote_key(relative_key))
+        for validated_path, relative_key in validated_sources
+    ]
+
+    if validated_uploads and _is_batchable_rclone_upload(upload_program, upload_args):
+        await _upload_batch_with_rclone(
+            validated_batch_keys,
+            root_path,
+            remote_base,
+            upload_program,
+            upload_args,
+            max_concurrent_uploads,
+            config,
         )
+        return
 
     semaphore = asyncio.Semaphore(max_concurrent_uploads)
 
