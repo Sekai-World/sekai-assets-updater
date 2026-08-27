@@ -121,6 +121,11 @@ def test_load_bundle_requires_explicit_unity_version(monkeypatch: pytest.MonkeyP
             assert unity_version == "2022.3.52f1"
             return _Studio([])
 
+        @staticmethod
+        def from_bytes(_data, *, unity_version):
+            assert unity_version == "2022.3.52f1"
+            return _Studio([])
+
     monkeypatch.setattr(unity_rs_adapter.unity_rs, "UnityRs", _FakeUnityRs)
     environment = unity_rs_adapter.load_bundle(b"fixture", "2022.3.52f1")
     assert environment.objects == []

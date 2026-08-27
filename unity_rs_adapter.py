@@ -8,12 +8,12 @@ second UnityPy implementation.
 
 from __future__ import annotations
 
-import json as std_json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator
 
+import orjson
 import unity_rs
 from PIL import Image
 
@@ -157,6 +157,47 @@ def _rgba_image(value: Any) -> Image.Image:
     return Image.frombytes("RGBA", (width, height), pixels)
 
 
+@dataclass(slots=True)
+class RenderedImage:
+    """One decoded RGBA texture that keeps its native handle for Rust encoding.
+
+    The native ``unity_rs.RgbaImage`` encoders (notably PNG with the ``fast``
+    compression profile) are far faster than round-tripping through PIL, so the
+    extraction pipeline keeps this wrapper until the moment a specific output
+    format is written.  ``to_pil`` converts lazily for formats that stay on the
+    PIL side (lossy WebP).
+    """
+
+    native: Any
+    width: int
+    height: int
+    _pil: Image.Image | None = field(default=None, repr=False)
+
+    def encode_png(self, compression: str = "fast") -> bytes | None:
+        """Encode to PNG in Rust; ``None`` when the native encoder is missing."""
+        encode = getattr(self.native, "encode", None)
+        if encode is None:
+            return None
+        return encode("png", compression=compression)
+
+    def to_pil(self) -> Image.Image:
+        if self._pil is None:
+            self._pil = _rgba_image(self.native)
+        return self._pil
+
+
+def _rendered_image(value: Any) -> RenderedImage:
+    width = getattr(value, "width", None)
+    height = getattr(value, "height", None)
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise UnsupportedUnityObjectError("unity-rs image reader did not return width and height")
+    # Pixel-buffer validation is deferred: pulling ``value.rgba`` here would
+    # copy the whole frame across the FFI boundary even when the image is
+    # encoded natively and the bytes are never needed on the Python side.
+    # ``to_pil`` still validates through ``_rgba_image``.
+    return RenderedImage(native=value, width=width, height=height)
+
+
 class UnityRsEnvironment:
     """Loaded bundle collection with the narrow interface used by extraction."""
 
@@ -277,7 +318,7 @@ class UnityRsObject:
 
     def read_typetree(self) -> dict[str, Any]:
         raw = self._environment.studio.read_type_tree_json(self.file_index, self.path_id)
-        tree = std_json.loads(raw)
+        tree = orjson.loads(raw)
         if not isinstance(tree, dict):
             raise UnsupportedUnityObjectError(f"TypeTree for {self.path_id} is not an object")
         return tree
@@ -294,12 +335,14 @@ class UnityRsObject:
                 path_id=self.path_id,
             )
         elif self.class_id == 28:
-            value = _TextureAsset(_rgba_image(studio.read_texture(self.file_index, self.path_id)))
+            value = _TextureAsset(
+                _rendered_image(studio.read_texture(self.file_index, self.path_id))
+            )
         elif self.class_id == 213:
-            value = _SpriteAsset(_rgba_image(studio.read_sprite(self.file_index, self.path_id)))
+            value = _SpriteAsset(_rendered_image(studio.read_sprite(self.file_index, self.path_id)))
         elif self.class_id == 187:
             native_images = studio.read_texture_array(self.file_index, self.path_id)
-            value = _TextureArrayAsset([_rgba_image(image) for image in native_images])
+            value = _TextureArrayAsset([_rendered_image(image) for image in native_images])
         elif self.class_id == 83:
             native = studio.read_audio_clip(self.file_index, self.path_id)
             value = _AudioClipAsset(
@@ -318,22 +361,26 @@ class UnityRsObject:
         self._read_cache = value
         return value
 
-    def read_image(self) -> Image.Image:
+    def read_image(self) -> RenderedImage:
         if self.class_id == 28:
-            return _rgba_image(self._environment.studio.read_texture(self.file_index, self.path_id))
+            return _rendered_image(
+                self._environment.studio.read_texture(self.file_index, self.path_id)
+            )
         if self.class_id == 213:
-            return _rgba_image(self._environment.studio.read_sprite(self.file_index, self.path_id))
+            return _rendered_image(
+                self._environment.studio.read_sprite(self.file_index, self.path_id)
+            )
         raise UnsupportedUnityObjectError(
             f"object class {self.type.name} does not provide a single image"
         )
 
-    def read_texture_array_images(self) -> list[Image.Image]:
+    def read_texture_array_images(self) -> list[RenderedImage]:
         if self.class_id != 187:
             raise UnsupportedUnityObjectError(
                 f"object class {self.type.name} is not a Texture2DArray"
             )
         return [
-            _rgba_image(image)
+            _rendered_image(image)
             for image in self._environment.studio.read_texture_array(self.file_index, self.path_id)
         ]
 
@@ -368,17 +415,17 @@ class _TextAsset:
 
 @dataclass(slots=True)
 class _TextureAsset:
-    image: Image.Image
+    image: RenderedImage
 
 
 @dataclass(slots=True)
 class _SpriteAsset:
-    image: Image.Image
+    image: RenderedImage
 
 
 @dataclass(slots=True)
 class _TextureArrayAsset:
-    images: list[Image.Image]
+    images: list[RenderedImage]
 
 
 @dataclass(slots=True)
@@ -408,23 +455,8 @@ def load_bundle(
     if not isinstance(unity_version, str) or not unity_version.strip():
         raise UnityRsLoadError("unity-rs bundle loading requires UNITY_VERSION")
     try:
-        # The unity-rs binding expects a filesystem path (str | PathLike[str]);
-        # for an in-memory bytes payload we persist it to a temporary file so the
-        # call stays aligned with the binding's typed signature.
         if isinstance(path_or_bytes, bytes):
-            import os
-            import tempfile
-
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".bundle")
-            try:
-                tmp.write(path_or_bytes)
-                tmp_path = tmp.name
-            finally:
-                tmp.close()
-            try:
-                studio = unity_rs.UnityRs(tmp_path, unity_version=unity_version)
-            finally:
-                os.unlink(tmp_path)
+            studio = unity_rs.UnityRs.from_bytes(path_or_bytes, unity_version=unity_version)
         else:
             studio = unity_rs.UnityRs(path_or_bytes, unity_version=unity_version)
         return UnityRsEnvironment(studio)
@@ -450,11 +482,11 @@ def read_text_bytes(entry: UnityRsObject) -> bytes:
     return entry._environment.studio.read_text(entry.file_index, entry.path_id)
 
 
-def read_image(entry: UnityRsObject) -> Image.Image:
+def read_image(entry: UnityRsObject) -> RenderedImage:
     return entry.read_image()
 
 
-def read_texture_array_images(entry: UnityRsObject) -> list[Image.Image]:
+def read_texture_array_images(entry: UnityRsObject) -> list[RenderedImage]:
     return entry.read_texture_array_images()
 
 
@@ -466,6 +498,7 @@ __all__ = [
     "AudioPayload",
     "CLASS_ID_NAMES",
     "MissingContainerError",
+    "RenderedImage",
     "UnsupportedReferenceError",
     "UnsupportedUnityObjectError",
     "UnityObjectEntry",

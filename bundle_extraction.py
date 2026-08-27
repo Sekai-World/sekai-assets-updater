@@ -6,7 +6,12 @@ from typing import Any, cast
 
 import orjson as json
 
-from bundle_images import render_image_asset, save_image_formats
+from bundle_images import (
+    DEFAULT_PNG_COMPRESSION,
+    DEFAULT_WEBP_METHOD,
+    render_image_asset,
+    save_image_formats,
+)
 from bundle_paths import build_unityfs_save_path, resolve_generated_child_path
 from security import atomic_write_bytes
 from unity_rs_adapter import read_text_bytes
@@ -26,6 +31,8 @@ def extract_unity_objects(
     texture_output_formats: tuple[str, ...],
     *,
     live2d_bundle: bool,
+    webp_method: int = DEFAULT_WEBP_METHOD,
+    png_compression: str = DEFAULT_PNG_COMPRESSION,
 ) -> tuple[list[Path], list[tuple[Path, list[dict]]], list[tuple[Path, list[dict]]]]:
     exported_files: list[Path] = []
     post_process_acb_files: list[tuple[Path, list[dict]]] = []
@@ -102,7 +109,11 @@ def extract_unity_objects(
                 case "Texture2D" | "Sprite":
                     exported_files.extend(
                         save_image_formats(
-                            render_image_asset(unityfs_obj), save_path, texture_output_formats
+                            render_image_asset(unityfs_obj),
+                            save_path,
+                            texture_output_formats,
+                            webp_method=webp_method,
+                            png_compression=png_compression,
                         )
                     )
                 case "Texture2DArray":
@@ -110,7 +121,13 @@ def extract_unity_objects(
                     for index, image in enumerate(data.images):
                         texture_path = save_path.with_name(f"{save_path.stem}_{index}")
                         exported_files.extend(
-                            save_image_formats(image, texture_path, texture_output_formats)
+                            save_image_formats(
+                                image,
+                                texture_path,
+                                texture_output_formats,
+                                webp_method=webp_method,
+                                png_compression=png_compression,
+                            )
                         )
                 case "AudioClip":
                     data = unityfs_obj.read()
