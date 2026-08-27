@@ -14,9 +14,6 @@ from typing import Dict, List, assert_never
 
 import aiohttp
 import cridecoder as cridecoder
-import UnityPy
-import UnityPy.classes
-import UnityPy.config
 from anyio import Path, open_file
 
 from bundle_acb_cache import (
@@ -109,6 +106,7 @@ from security import (
     validate_contained_file,
     validate_output_target,
 )
+from unity_rs_adapter import load_bundle as _load_unity_bundle
 from utils.acb import extract_acb
 from utils.hca import decode_hca_file as decode_hca_file
 
@@ -602,13 +600,9 @@ def _extract_bundle_files_sync(
     *,
     live2d_bundle: bool = False,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
-    UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-
     bundle_path = StdPath(bundle_save_path)
     output_root = StdPath(extracted_save_path)
-    unity_file = UnityPy.load(bundle_path.as_posix())
-    if not unity_file:
-        raise ValueError(f"Failed to load {bundle_save_path}")
+    unity_file = _load_unity_bundle(bundle_path, unity_version)
 
     logger.debug("Loaded bundle %s from %s", bundle.get("bundleName"), bundle_save_path)
 

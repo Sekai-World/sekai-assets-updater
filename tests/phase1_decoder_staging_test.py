@@ -58,8 +58,14 @@ def test_acb_extractor_uses_private_staging_and_promotes_result(
     class FakeUnityObject:
         def __init__(self, type_name: str, tree=None) -> None:
             self.type = SimpleNamespace(name=type_name)
+            self.class_id = {"MonoBehaviour": 114, "TextAsset": 49}[type_name]
+            self.file_index = 0
+            self.path_id = id(self)
             self.serialized_type = SimpleNamespace(node=tree is not None)
             self._tree = tree
+            self._environment = SimpleNamespace(
+                studio=SimpleNamespace(read_text=lambda *_args: b"acb data")
+            )
 
         def read(self):
             return FakeTextAsset()
@@ -94,15 +100,14 @@ def test_acb_extractor_uses_private_staging_and_promotes_result(
         output_path.write_bytes(b"wav")
         return [output_path.as_posix()]
 
-    monkeypatch.setattr(bundle.UnityPy, "load", lambda _path: fake_unity_file)
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", FakeTextAsset)
+    monkeypatch.setattr(bundle, "_load_unity_bundle", lambda _path, _version: fake_unity_file)
     monkeypatch.setattr(bundle, "extract_acb", fake_extract_acb)
 
     exported, audio_jobs, video_jobs = bundle._extract_bundle_files_sync(
         bundle_path.as_posix(),
         {"bundleName": "test"},
         output_root.as_posix(),
-        None,
+        "2022.3.52f1",
         ("png",),
     )
 

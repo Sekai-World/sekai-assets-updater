@@ -2,9 +2,9 @@
 # playable.py: Parses timeline AssetBundles and exports .playable entries into time-ordered JSON.
 
 import logging
+from typing import Any
 
-import UnityPy
-import UnityPy.config
+from unity_rs_adapter import load_bundle
 
 # Track class names (tracks that contain m_Clips)
 TRACK_CLASSES = {
@@ -71,7 +71,7 @@ def build_character_map(all_objects: dict, script_map: dict) -> dict:
     """
     # Collect GroupTrack names (not currently used but available)
     group_names = {}
-    for _pid, obj in all_objects.items():
+    for pid, obj in all_objects.items():
         if obj["type"] == "MonoBehaviour":
             d = obj["data"]
             cls = get_class_name(d, script_map)
@@ -311,7 +311,7 @@ TRACK_EXTRACTORS = {
 logger = logging.getLogger("utils.playable")
 
 
-def extract_playable(env: UnityPy.load, container_path: str) -> dict:
+def extract_playable(env: Any, container_path: str) -> dict:
     """
     Parse an AssetBundle and extract the full timeline data.
     container_path: optional path of the playable container for metadata.
@@ -474,8 +474,7 @@ if __name__ == "__main__":
 
     # Step 1: scan container for .playable entries
     print(f"[*] Scanning container: {input_file}")
-    UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.21f1"
-    env = UnityPy.load(Path(input_file).read_bytes())
+    env = load_bundle(Path(input_file), "2022.3.21f1")
 
     playables = {path: obj for path, obj in env.container.items() if path.endswith(".playable")}
 

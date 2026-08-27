@@ -3,16 +3,13 @@
 import logging
 from pathlib import Path, PurePosixPath
 
-import UnityPy
-import UnityPy.classes
-import UnityPy.config
-
 from security import (
     SecurityError,
     atomic_write_bytes,
     validate_contained_file,
     validate_output_target,
 )
+from unity_rs_adapter import load_bundle, read_text_bytes
 
 logger = logging.getLogger("live2d")
 
@@ -57,10 +54,7 @@ def extract_acb_from_cached_bundles(
             continue
 
         try:
-            UnityPy.config.FALLBACK_UNITY_VERSION = unity_version
-            cached_unity_file = UnityPy.load(cached_bundle_path.as_posix())
-            if not cached_unity_file:
-                continue
+            cached_unity_file = load_bundle(cached_bundle_path, unity_version)
         except Exception:
             continue
 
@@ -70,14 +64,7 @@ def extract_acb_from_cached_bundles(
             if PurePosixPath(unityfs_path).name.lower() != expected_textasset_name:
                 continue
 
-            data = unityfs_obj.read()
-            if not isinstance(data, UnityPy.classes.TextAsset):
-                continue
-
-            atomic_write_bytes(
-                acb_output_path,
-                data.m_Script.encode("utf-8", "surrogateescape"),
-            )
+            atomic_write_bytes(acb_output_path, read_text_bytes(unityfs_obj))
             logger.debug(
                 "Extracted %s from cached bundle %s to %s",
                 acb_textasset_filename,

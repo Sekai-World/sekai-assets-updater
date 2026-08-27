@@ -779,7 +779,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(
                 specialized, "fetch_chart_sources_from_storage", new=AsyncMock()
             ) as fetch:
-                with patch.object(specialized, "_render_charts", new=render_charts) as render:
+                with patch.object(specialized, "_render_charts", new=render_charts):
                     with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
                         await run_specialized_postprocess("charts", config)
 

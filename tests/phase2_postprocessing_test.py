@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import bundle
+import bundle_acb_cache
 
 
 class _FakeTextAsset:
@@ -17,9 +18,17 @@ class _FakeTextAsset:
 class _FakeUnityObject:
     def __init__(self, type_name: str, tree=None, script: str = "") -> None:
         self.type = SimpleNamespace(name=type_name)
+        self.class_id = {"MonoBehaviour": 114, "TextAsset": 49}[type_name]
+        self.file_index = 0
+        self.path_id = id(self)
         self.serialized_type = SimpleNamespace(node=tree is not None)
         self._tree = tree
         self._script = script
+        self._environment = SimpleNamespace(
+            studio=SimpleNamespace(
+                read_text=lambda *_args: self._script.encode("utf-8", "surrogateescape")
+            )
+        )
 
     def read(self):
         return _FakeTextAsset(self._script)
@@ -110,8 +119,11 @@ def test_acb_audio_outputs_are_isolated_between_sibling_artifacts(
         first_bundle.as_posix(): _acb_unity_file("first acb"),
         second_bundle.as_posix(): _acb_unity_file("second acb"),
     }
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
-    monkeypatch.setattr(bundle.UnityPy, "load", lambda path: acb_by_bundle[path])
+    monkeypatch.setattr(
+        bundle,
+        "_load_unity_bundle",
+        lambda path, _version: acb_by_bundle[path.as_posix()],
+    )
 
     def fake_extract_acb(_data, target_dir: str, _acb_path: str, _cue_name):
         output = Path(target_dir) / "voice.wav"
@@ -179,8 +191,11 @@ def test_movie_video_outputs_and_cleanup_are_isolated_between_siblings(
     second_bundle.write_bytes(b"second")
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
-    monkeypatch.setattr(bundle.UnityPy, "load", lambda _path: _movie_unity_file())
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
+    monkeypatch.setattr(
+        bundle,
+        "_load_unity_bundle",
+        lambda _path, _version: _movie_unity_file(),
+    )
 
     first_exported, _, first_video_jobs = _extract_sync(first_bundle, first_root)
     second_exported, _, second_video_jobs = _extract_sync(second_bundle, second_root)
@@ -306,15 +321,13 @@ def test_cached_acb_lookup_uses_explicit_non_bundle_root(
             return _FakeTextAsset("cached acb")
 
     monkeypatch.setattr(
-        bundle.UnityPy,
-        "load",
-        lambda path: (
-            SimpleNamespace(container={"audio/voice.acb.bytes": _CachedUnityObject()})
-            if path == cache_bundle.as_posix()
-            else None
+        bundle_acb_cache,
+        "load_bundle",
+        lambda _path, _version: SimpleNamespace(
+            container={"audio/voice.acb.bytes": _CachedUnityObject()}
         ),
     )
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
+    monkeypatch.setattr(bundle_acb_cache, "read_text_bytes", lambda _obj: b"cached acb")
 
     assert bundle._extract_acb_from_cached_bundles_sync(
         bundle_path,
@@ -347,15 +360,13 @@ def test_cached_acb_lookup_skips_directories_before_file_validation(
             return _FakeTextAsset("cached acb")
 
     monkeypatch.setattr(
-        bundle.UnityPy,
-        "load",
-        lambda path: (
-            SimpleNamespace(container={"audio/voice.acb.bytes": _CachedUnityObject()})
-            if path == cache_bundle.as_posix()
-            else None
+        bundle_acb_cache,
+        "load_bundle",
+        lambda _path, _version: SimpleNamespace(
+            container={"audio/voice.acb.bytes": _CachedUnityObject()}
         ),
     )
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
+    monkeypatch.setattr(bundle_acb_cache, "read_text_bytes", lambda _obj: b"cached acb")
 
     with caplog.at_level("WARNING", logger="live2d"):
         assert bundle._extract_acb_from_cached_bundles_sync(
@@ -390,8 +401,17 @@ def test_extraction_uses_configured_cache_root_with_custom_name(
             container={"audio/voice.acb.bytes": _CachedUnityObject()}
         ),
     }
-    monkeypatch.setattr(bundle.UnityPy, "load", lambda path: loaded_files.get(path))
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
+    monkeypatch.setattr(
+        bundle,
+        "_load_unity_bundle",
+        lambda path, _version: loaded_files.get(path.as_posix()),
+    )
+    monkeypatch.setattr(
+        bundle_acb_cache,
+        "load_bundle",
+        lambda path, _version: loaded_files.get(Path(path).as_posix()),
+    )
+    monkeypatch.setattr(bundle_acb_cache, "read_text_bytes", lambda _obj: b"cached acb")
 
     def fake_extract_acb(_data, target_dir: str, acb_path: str, _cue_name):
         output = Path(target_dir) / "voice.wav"
@@ -421,8 +441,11 @@ def test_acb_decoder_rejects_unsafe_output_and_cleans_private_stage(
     output_root = tmp_path / "artifact"
     outside = tmp_path / "outside.wav"
 
-    monkeypatch.setattr(bundle.UnityPy, "load", lambda _path: _acb_unity_file("acb"))
-    monkeypatch.setattr(bundle.UnityPy.classes, "TextAsset", _FakeTextAsset)
+    monkeypatch.setattr(
+        bundle,
+        "_load_unity_bundle",
+        lambda _path, _version: _acb_unity_file("acb"),
+    )
 
     def unsafe_extract(_data, _target_dir, _acb_path, _cue_name):
         outside.write_bytes(b"unsafe")

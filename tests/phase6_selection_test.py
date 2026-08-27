@@ -197,6 +197,60 @@ def test_missing_nuverse_template_value_is_descriptive(monkeypatch) -> None:
     assert "https://cdn.test/{assetVer}/{required}" in str(caught.value)
 
 
+def test_colorful_same_checksum_live2d_selected_only_when_cache_path_absent(
+    tmp_path: Path,
+) -> None:
+    """For colorful (non-assetver) servers, an unchanged Live2D bundle whose
+    configured cache file is missing must still be selected, mirroring the
+    assetver path's ``select_changed_bundles`` behaviour.
+
+    When the cache file exists the bundle must NOT be selected.
+    """
+    config = _config(tmp_path)
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        _metadata({"bundleName": "live2d/motion/foo", "hash": "same"}),
+        state.validate_asset_metadata,
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH,
+        _version("asset-1"),
+        state.validate_game_version,
+    )
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+
+    def resolver(bundle: dict) -> Path:
+        # Flat, filesystem-safe mapping of a bundle name to its cache path.
+        return cache_dir / bundle["bundleName"].replace("/", "_")
+
+    # Cache file absent -> unchanged bundle with identical checksum is selected.
+    plan = asyncio.run(
+        helpers.get_download_list(
+            _metadata({"bundleName": "live2d/motion/foo", "hash": "same"}),
+            _version(),
+            config=config,
+            assetbundle_host_hash="host-1",
+            bundle_cache_path_resolver=resolver,
+        )
+    )
+    assert [b["bundleName"] for _, b in plan.candidates] == ["live2d/motion/foo"]
+
+    # Cache file present -> unchanged bundle is no longer selected.
+    (cache_dir / "live2d_motion_foo").write_bytes(b"cached")
+    plan = asyncio.run(
+        helpers.get_download_list(
+            _metadata({"bundleName": "live2d/motion/foo", "hash": "same"}),
+            _version(),
+            config=config,
+            assetbundle_host_hash="host-1",
+            bundle_cache_path_resolver=resolver,
+        )
+    )
+    assert plan.candidates == []
+
+
 def test_url_template_rejects_missing_and_none_values() -> None:
     with pytest.raises(ValueError, match=r"Missing format values for assetVer"):
         helpers.format_url_template(

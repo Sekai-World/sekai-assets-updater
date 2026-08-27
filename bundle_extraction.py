@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import orjson as json
-import UnityPy
-import UnityPy.classes
 
 from bundle_images import render_image_asset, save_image_formats
 from bundle_paths import build_unityfs_save_path, resolve_generated_child_path
 from security import atomic_write_bytes
+from unity_rs_adapter import read_text_bytes
 from utils.live2d import (
     correct_param_ids,
     extract_params_ids_from_moc3,
@@ -42,7 +41,12 @@ def extract_unity_objects(
             raise
 
         save_path = save_path.with_name(save_path.name.strip())
-        if live2d_bundle and "motion" in save_path.parts:
+        if (
+            live2d_bundle
+            and len(save_path.parts) >= 2
+            and save_path.parts[0] == "live2d"
+            and save_path.parts[1] == "motion"
+        ):
             logger.debug("Skipping live2d motion asset %s for post-processing", unityfs_path)
             continue
         save_dir = save_path.parent
@@ -88,36 +92,21 @@ def extract_unity_objects(
                             tree_mapping["movieBundleDatas"],
                         )
                 case "TextAsset":
-                    data = unityfs_obj.read()
-                    if not isinstance(data, UnityPy.classes.TextAsset):
-                        raise TypeError(f"Expected TextAsset, got {type(data)} for {unityfs_path}")
                     if save_path.suffix == ".bytes":
                         save_path = save_path.with_suffix("")
-                    data_bytes = data.m_Script.encode("utf-8", "surrogateescape")
+                    data_bytes = read_text_bytes(unityfs_obj)
                     atomic_write_bytes(save_path, data_bytes)
                     if live2d_bundle and save_path.suffix == ".moc3":
                         param_id_map.update(extract_params_ids_from_moc3(data_bytes))
                     exported_files.append(save_path)
                 case "Texture2D" | "Sprite":
-                    data = unityfs_obj.read()
-                    if not (
-                        isinstance(data, UnityPy.classes.Texture2D)
-                        or isinstance(data, UnityPy.classes.Sprite)
-                    ):
-                        raise TypeError(
-                            f"Expected Texture2D or Sprite, got {type(data)} for {unityfs_path}"
-                        )
                     exported_files.extend(
                         save_image_formats(
-                            render_image_asset(data), save_path, texture_output_formats
+                            render_image_asset(unityfs_obj), save_path, texture_output_formats
                         )
                     )
                 case "Texture2DArray":
                     data = unityfs_obj.read()
-                    if not isinstance(data, UnityPy.classes.Texture2DArray):
-                        raise TypeError(
-                            f"Expected Texture2DArray, got {type(data)} for {unityfs_path}"
-                        )
                     for index, image in enumerate(data.images):
                         texture_path = save_path.with_name(f"{save_path.stem}_{index}")
                         exported_files.extend(
@@ -125,8 +114,6 @@ def extract_unity_objects(
                         )
                 case "AudioClip":
                     data = unityfs_obj.read()
-                    if not isinstance(data, UnityPy.classes.AudioClip):
-                        raise TypeError(f"Expected AudioClip, got {type(data)} for {unityfs_path}")
                     for filename, sample_data in data.samples.items():
                         sample_path = resolve_generated_child_path(save_dir, filename)
                         logger.debug("Saving audio clip %s to %s", filename, sample_path)
