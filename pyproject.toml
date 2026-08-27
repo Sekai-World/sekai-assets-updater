@@ -10,6 +10,7 @@ dependencies = [
     "cridecoder>=0.3.5",
     "idna==3.15",
     "olefile==0.47",
+    "opendal==0.47.6",
     "orjson==3.11.6",
     "pillow==12.3.0",
     "pjsekai-scores-rs-skia-image==0.5.0",

@@ -111,6 +111,28 @@ LIVE2D_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "live2d-bundle")
 
 # Asset remote storage settings. Each target's type controls which pipeline
 # uploads to it: normal assets, Live2D post-processing, or charts.
+#
+# Two backends are supported for "normal" targets:
+# - subprocess (default): spawns `program` with `args`, replacing "src"/"dst".
+#   The rclone `["copy", "src", "dst"]` template is automatically batched into
+#   one process per artifact via --files-from-raw.
+# - opendal: uploads in-process through Apache OpenDAL (no subprocess, no
+#   external binary). `scheme` names the service ("s3", "fs", "azblob", ...),
+#   `options` carries its string-valued configuration, and the optional
+#   `prefix` is prepended to every object key. Example:
+#   {
+#       "type": "normal",
+#       "backend": "opendal",
+#       "scheme": "s3",
+#       "prefix": "",
+#       "options": {
+#           "bucket": "example-assets",
+#           "endpoint": "https://s3.example.com",
+#           "region": "auto",
+#           "access_key_id": os.environ.get("STORAGE_ACCESS_KEY_ID", ""),
+#           "secret_access_key": os.environ.get("STORAGE_SECRET_ACCESS_KEY", ""),
+#       },
+#   },
 ASSET_REMOTE_STORAGE = [
     {
         "type": "normal",

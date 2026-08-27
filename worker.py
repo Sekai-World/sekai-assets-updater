@@ -23,6 +23,7 @@ from helpers import (
     get_download_http_session_options,
     sanitize_log_label,
     upload_to_storage,
+    upload_to_storage_opendal,
 )
 from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 from specialized import get_enabled_specialized_modes
@@ -604,7 +605,17 @@ async def _upload_stage(
                         raise ValueError(f"Extracted path is not set for {label}")
                     exported_list = artifact.exported_list or []
                     for storage in config.ASSET_REMOTE_STORAGE:
-                        if storage["type"] == "normal":
+                        if storage["type"] != "normal":
+                            continue
+                        if storage.get("backend") == "opendal":
+                            await upload_to_storage_opendal(
+                                exported_list,
+                                artifact.extracted_save_path,
+                                storage,
+                                max_concurrent_uploads=config.MAX_CONCURRENCY_UPLOADS,
+                                config=config,
+                            )
+                        else:
                             await upload_to_storage(
                                 exported_list,
                                 artifact.extracted_save_path,
