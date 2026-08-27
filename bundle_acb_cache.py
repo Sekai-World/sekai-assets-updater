@@ -1,6 +1,7 @@
 """Recover referenced ACB text assets from cached Unity bundles."""
 
 import logging
+import threading
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 
@@ -16,16 +17,19 @@ logger = logging.getLogger("live2d")
 
 # Process-local memory of which cached bundle produced a given ACB text asset.
 # Positive results only: the cache grows while a pipeline downloads new
-# bundles, so a "not found" answer can become stale within one run.
+# bundles, so a "not found" answer can become stale within one run. Guarded by
+# a lock because extraction may run on a shared thread pool.
 _FOUND_BUNDLE_CACHE: OrderedDict[tuple[str, str], str] = OrderedDict()
 _FOUND_BUNDLE_CACHE_LIMIT = 256
+_FOUND_BUNDLE_CACHE_LOCK = threading.Lock()
 
 
 def _remember_found_bundle(cache_key: tuple[str, str], bundle_path: Path) -> None:
-    _FOUND_BUNDLE_CACHE[cache_key] = str(bundle_path)
-    _FOUND_BUNDLE_CACHE.move_to_end(cache_key)
-    while len(_FOUND_BUNDLE_CACHE) > _FOUND_BUNDLE_CACHE_LIMIT:
-        _FOUND_BUNDLE_CACHE.popitem(last=False)
+    with _FOUND_BUNDLE_CACHE_LOCK:
+        _FOUND_BUNDLE_CACHE[cache_key] = str(bundle_path)
+        _FOUND_BUNDLE_CACHE.move_to_end(cache_key)
+        while len(_FOUND_BUNDLE_CACHE) > _FOUND_BUNDLE_CACHE_LIMIT:
+            _FOUND_BUNDLE_CACHE.popitem(last=False)
 
 
 def _extract_from_one_bundle(
@@ -89,7 +93,8 @@ def extract_acb_from_cached_bundles(
     expected_stem = expected_textasset_name.removesuffix(".bytes").removesuffix(".acb")
     cache_key = (str(bundle_cache_root), expected_textasset_name)
 
-    remembered = _FOUND_BUNDLE_CACHE.get(cache_key)
+    with _FOUND_BUNDLE_CACHE_LOCK:
+        remembered = _FOUND_BUNDLE_CACHE.get(cache_key)
     if remembered is not None:
         remembered_path = Path(remembered)
         if remembered_path.is_file() and _extract_from_one_bundle(
@@ -101,7 +106,8 @@ def extract_acb_from_cached_bundles(
                 remembered_path,
             )
             return True
-        _FOUND_BUNDLE_CACHE.pop(cache_key, None)
+        with _FOUND_BUNDLE_CACHE_LOCK:
+            _FOUND_BUNDLE_CACHE.pop(cache_key, None)
 
     candidates = []
     for cached_bundle_path in bundle_cache_root.rglob("*"):

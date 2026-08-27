@@ -2,7 +2,7 @@
 
 import asyncio
 import atexit
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 
 
 def sanitize_concurrency(value) -> int:
@@ -85,6 +85,20 @@ def get_extract_process_concurrency(config) -> int:
     )
 
 
+def get_extract_executor_kind(config) -> str:
+    """Which executor runs bundle extraction: "process" or "thread".
+
+    unity-rs (0.5+), cridecoder (0.3.5+) and PIL all release the GIL during
+    their heavy work, so threads match process throughput on the extract
+    workload while sharing one interpreter. Processes remain the default
+    because they isolate a native decoder crash to one worker.
+    """
+    kind = str(getattr(config, "EXTRACT_EXECUTOR", "process")).strip().lower()
+    if kind in {"process", "thread"}:
+        return kind
+    raise ValueError(f'EXTRACT_EXECUTOR must be "process" or "thread", got {kind!r}')
+
+
 class BundleRuntime:
     """Own shared semaphores and process pools used by bundle pipelines."""
 
@@ -93,7 +107,7 @@ class BundleRuntime:
         self._hca_decode_semaphore: tuple[int, asyncio.Semaphore] | None = None
         self._audio_encoder_semaphore: tuple[int, asyncio.Semaphore] | None = None
         self._video_transcode_semaphore: tuple[int, asyncio.Semaphore] | None = None
-        self._extract_process_pool: tuple[int, ProcessPoolExecutor] | None = None
+        self._extract_process_pool: tuple[tuple[str, int], Executor] | None = None
         self._audio_process_pool: tuple[int, ProcessPoolExecutor] | None = None
         self._usm_process_pool: tuple[int, ProcessPoolExecutor] | None = None
 
@@ -139,10 +153,20 @@ class BundleRuntime:
             cache[1].shutdown(wait=False, cancel_futures=False)
         return concurrency, ProcessPoolExecutor(max_workers=concurrency)
 
-    def extract_process_pool(self, config) -> ProcessPoolExecutor:
-        self._extract_process_pool = self._process_pool(
-            self._extract_process_pool, get_extract_process_concurrency(config)
-        )
+    def extract_process_pool(self, config) -> Executor:
+        kind = get_extract_executor_kind(config)
+        concurrency = get_extract_process_concurrency(config)
+        cache_key = (kind, concurrency)
+        if self._extract_process_pool is None or self._extract_process_pool[0] != cache_key:
+            if self._extract_process_pool is not None:
+                self._extract_process_pool[1].shutdown(wait=False, cancel_futures=False)
+            if kind == "thread":
+                executor: Executor = ThreadPoolExecutor(
+                    max_workers=concurrency, thread_name_prefix="extract"
+                )
+            else:
+                executor = ProcessPoolExecutor(max_workers=concurrency)
+            self._extract_process_pool = (cache_key, executor)
         return self._extract_process_pool[1]
 
     def audio_process_pool(self, config) -> ProcessPoolExecutor:
@@ -159,7 +183,7 @@ class BundleRuntime:
 
     @staticmethod
     def _shutdown_pool(
-        cache: tuple[int, ProcessPoolExecutor] | None,
+        cache: tuple[object, Executor] | None,
         *,
         wait: bool,
         cancel_futures: bool,

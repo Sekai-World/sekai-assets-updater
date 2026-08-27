@@ -40,6 +40,12 @@ MAX_CONCURRENCY = os.cpu_count() or 1
 # for download/extract while upload uses one bundle-level worker.
 MAX_CONCURRENCY_DOWNLOADS = MAX_CONCURRENCY
 MAX_CONCURRENCY_EXTRACTS = MAX_CONCURRENCY
+# Executor for bundle extraction: "process" (default) or "thread".
+# unity-rs 0.5+, cridecoder 0.3.5+ and PIL release the GIL during their heavy
+# work, so "thread" matches process throughput while sharing one interpreter
+# (saving one Python process per extract worker). "process" additionally
+# isolates a native decoder crash to a single worker.
+EXTRACT_EXECUTOR = "process"
 MAX_CONCURRENCY_UPLOAD_STAGE = 1
 # Maximum queued artifacts between stages.
 PIPELINE_STAGE_QUEUE_SIZE = MAX_CONCURRENCY
