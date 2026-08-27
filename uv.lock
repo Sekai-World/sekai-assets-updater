@@ -94,15 +94,15 @@ wheels = [
 
 [[package]]
 name = "cridecoder"
-version = "0.3.3"
+version = "0.3.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/52/7d/262d2c98598dfdb26457f8ad91335a771504def0cdc7f2a56896c0329e18/cridecoder-0.3.3.tar.gz", hash = "sha256:3f24781c5e713223a3a0fa8ecdb5a609aefe26d93fd538630c8dfca114b23e08", size = 110286, upload-time = "2026-06-27T15:52:59.006Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/92/7cd866994c5cb00fd9494ebdcd5fa6fafd0ee37c99397aed53d6b1ff1bb4/cridecoder-0.3.5.tar.gz", hash = "sha256:5dac66296ca25deb6d9e3e42befc82d1cd3be2a4dcf43abee9b192b2d1da3b09", size = 122212, upload-time = "2026-08-27T20:37:23.098Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/cb/061c91f2007b8d1a52327cf47277cf98126a755f347454d61c1d8e79884a/cridecoder-0.3.3-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:ca2b6a4d29f9346df312b89d55cb5f1b2c03f5e93006237f07c5a837bbb6bf9d", size = 641953, upload-time = "2026-06-27T15:52:19.706Z" },
-    { url = "https://files.pythonhosted.org/packages/e7/ce/6aee770919d7dc10180b1ecc7fabe5f7d5af71626d17fb1fe7d14aec4c0f/cridecoder-0.3.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:006422dce6b15d28ee88cbe1b2e6c55cbb59c7998741e09e500dbaf2741546f4", size = 621103, upload-time = "2026-06-27T15:52:21.278Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/19/35be4b244a1cb3e734b379b621e69c8b38750f65daca10953b960ad34b6d/cridecoder-0.3.3-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:1476644d1872c2852d48267dda435d9a9159c411ab310dcf84b0bbb67e713c2e", size = 658767, upload-time = "2026-06-27T15:52:22.639Z" },
-    { url = "https://files.pythonhosted.org/packages/20/a6/7f405ba536b5ce10fcb5f4484bd3f9abbf1c8dafbc734f4b3fd1ce6f86cd/cridecoder-0.3.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f069f0ac6512b2ba41f73b94168be918c999c5f3fec380bae3d6da9d48cbb158", size = 674563, upload-time = "2026-06-27T15:52:23.947Z" },
-    { url = "https://files.pythonhosted.org/packages/2f/13/4801383bde457e4408640e641807a31d276cdedf9bf37515c12059c42b6f/cridecoder-0.3.3-cp312-cp312-win_amd64.whl", hash = "sha256:021a2eb49d34ba6045f3635e8d00569501fc1dd82838e29e38409095a9d02991", size = 533491, upload-time = "2026-06-27T15:52:25.409Z" },
+    { url = "https://files.pythonhosted.org/packages/64/c6/fa34dd785d6946cea1c909efddba289a34d2ff3d770631d4966303817f4c/cridecoder-0.3.5-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:c221c29055563042162d34ca606eb052b713eaa4d72d6df89c9f3e974ab387e8", size = 707089, upload-time = "2026-08-27T20:36:51.171Z" },
+    { url = "https://files.pythonhosted.org/packages/75/3b/3b59b062ec3ad79dab22df4315a27ece7417fa582c8f687eee3ad621d05b/cridecoder-0.3.5-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:ec6facbc0562a67c4942fc9ede932b43e71612f5f0b0826f825cb22a8878cc98", size = 678690, upload-time = "2026-08-27T20:36:52.462Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/d0/8e802bbb08e1bb1356a13a8b8423b18cd72b8275d139597cae610aedbead/cridecoder-0.3.5-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2f5ef69b22f89de760fcaf4d8b37ae60bd72079f5590f89711f077ba25aa28b1", size = 733953, upload-time = "2026-08-27T20:36:53.507Z" },
+    { url = "https://files.pythonhosted.org/packages/af/66/35e8c4c0ce31de9f090789f877a0fa6e70c718afb2d72c01a11337551901/cridecoder-0.3.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:75431c634359e267442c671da4c6f900e99a3bee59e70fdff0285428438dc3a6", size = 747744, upload-time = "2026-08-27T20:36:54.689Z" },
+    { url = "https://files.pythonhosted.org/packages/3e/5f/33775306b2a94e417cfd023794a653a6614e327c360ccdea556b27ed5e91/cridecoder-0.3.5-cp312-cp312-win_amd64.whl", hash = "sha256:23f03f8de92735aad6f1531b23d9e9bd77c732318bb9d80ac8a54c63c7cd751a", size = 607363, upload-time = "2026-08-27T20:36:55.851Z" },
 ]
 
 [[package]]
@@ -400,7 +400,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = "==3.14.3" },
     { name = "anyio", specifier = "==4.9.0" },
-    { name = "cridecoder", specifier = ">=0.3.0" },
+    { name = "cridecoder", specifier = ">=0.3.5" },
     { name = "idna", specifier = "==3.15" },
     { name = "olefile", specifier = "==0.47" },
     { name = "orjson", specifier = "==3.11.6" },

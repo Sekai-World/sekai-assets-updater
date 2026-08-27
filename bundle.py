@@ -8,7 +8,6 @@ import re
 import shutil
 import tempfile
 from functools import partial
-from io import BytesIO
 from pathlib import Path as StdPath
 from typing import Dict, List, assert_never
 
@@ -70,9 +69,6 @@ from bundle_paths import (
     stream_files as _stream_files,
 )
 from bundle_runtime import (
-    get_hca_decode_concurrency as _get_hca_decode_concurrency,
-)
-from bundle_runtime import (
     runtime as _bundle_runtime,
 )
 from bundle_video import (
@@ -100,6 +96,7 @@ from helpers import (
 )
 from security import (
     SecurityError,
+    atomic_write_bytes,
     atomic_write_stream,
     resolve_secure_path,
     secure_existing_output,
@@ -107,8 +104,8 @@ from security import (
     validate_output_target,
 )
 from unity_rs_adapter import load_bundle as _load_unity_bundle
-from utils.acb import extract_acb
-from utils.hca import decode_hca_file as decode_hca_file
+from utils.acb import decode_acb_bytes, extract_acb
+from utils.hca import decode_hca_to_wav_bytes
 
 logger = logging.getLogger("live2d")
 
@@ -183,12 +180,36 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
     return tuple(valid_formats)
 
 
+def _get_texture_webp_method(config) -> int:
+    from bundle_images import DEFAULT_WEBP_METHOD
+
+    value = getattr(config, "TEXTURE_WEBP_METHOD", DEFAULT_WEBP_METHOD)
+    try:
+        method = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid TEXTURE_WEBP_METHOD=%r, using default", value)
+        return DEFAULT_WEBP_METHOD
+    if not 0 <= method <= 6:
+        logger.warning("TEXTURE_WEBP_METHOD must be within 0-6, got %r; using default", value)
+        return DEFAULT_WEBP_METHOD
+    return method
+
+
+def _get_texture_png_compression(config) -> str:
+    from bundle_images import DEFAULT_PNG_COMPRESSION
+
+    value = str(getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)).lower()
+    if value in {"fast", "default", "best"}:
+        return value
+    logger.warning("Invalid TEXTURE_PNG_COMPRESSION=%r, using default", value)
+    return DEFAULT_PNG_COMPRESSION
+
+
 _get_shared_audio_file_semaphore = _bundle_runtime.audio_file_semaphore
 _get_shared_hca_decode_semaphore = _bundle_runtime.hca_decode_semaphore
 _get_shared_audio_encoder_semaphore = _bundle_runtime.audio_encoder_semaphore
 _get_shared_video_transcode_semaphore = _bundle_runtime.video_transcode_semaphore
 _get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
-_get_shared_audio_process_pool = _bundle_runtime.audio_process_pool
 _get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
 
 
@@ -322,10 +343,8 @@ async def _run_hca_to_wav_with_cridecoder(
     return await run_hca_with_cridecoder(
         input_path,
         output_path,
-        process_pool=_get_shared_audio_process_pool(config),
-        concurrency=_get_hca_decode_concurrency(config),
         report_decoder=_report_hca_decoder,
-        decoder=decode_hca_file,
+        decode_bytes=decode_hca_to_wav_bytes,
     )
 
 
@@ -508,8 +527,15 @@ async def _process_video_job(
     m2v_path: Path | None = None
     ffmpeg_process = None
 
+    usm_source: Path | None = None
     try:
-        m2v_path = await _demux_usm_to_m2v(usm_output_path, config)
+        if usm_output_path.suffix.lower() == ".m2v":
+            # The extract stage already demuxed the USM in memory; the job
+            # carries the elementary video stream directly.
+            m2v_path = usm_output_path
+        else:
+            usm_source = usm_output_path
+            m2v_path = await _demux_usm_to_m2v(usm_source, config)
         if m2v_path is None:
             logger.warning("Failed to demux %s", usm_output_path)
         else:
@@ -555,7 +581,7 @@ async def _process_video_job(
             _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
     finally:
-        for discarded_file in (m2v_path, usm_output_path):
+        for discarded_file in (m2v_path, usm_source):
             if discarded_file is None:
                 continue
             try:
@@ -590,6 +616,67 @@ async def _process_video_jobs(
     return await asyncio.gather(*video_tasks)
 
 
+# Above this size, USM demuxing falls back to the disk-streaming path so that
+# concurrent extract workers do not hold whole movies in memory.
+DEFAULT_USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _get_usm_in_memory_limit(config) -> int:
+    value = getattr(config, "USM_IN_MEMORY_MAX_BYTES", DEFAULT_USM_IN_MEMORY_MAX_BYTES)
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid USM_IN_MEMORY_MAX_BYTES=%r, using default", value)
+        return DEFAULT_USM_IN_MEMORY_MAX_BYTES
+    return max(0, limit)
+
+
+def _demux_usm_sources_in_memory(
+    source_paths: list[StdPath],
+    usm_output_path: StdPath,
+    save_dir: StdPath,
+    limit_bytes: int,
+) -> StdPath | None:
+    """Demux USM parts fully in memory to one ``.m2v`` next to the sources.
+
+    Returns the written video-stream path, or ``None`` when the sources exceed
+    the in-memory budget or the demux fails — callers then use the existing
+    disk-streaming merge + file demux path.
+    """
+    try:
+        total_bytes = sum(path.stat().st_size for path in source_paths)
+    except OSError:
+        return None
+    if total_bytes > limit_bytes:
+        return None
+
+    try:
+        usm_data = b"".join(path.read_bytes() for path in source_paths)
+        streams = cridecoder.extract_usm_bytes(usm_data, None, False)
+        selected = None
+        for stream in streams:
+            extension = str(stream.get("extension") or "").lower().lstrip(".")
+            if extension == "m2v":
+                selected = stream
+                break
+            if selected is None:
+                selected = stream
+        if selected is None:
+            logger.warning("cridecoder produced no usable video stream for %s", usm_output_path)
+            return None
+        m2v_path = _resolve_generated_child_path(save_dir, f"{usm_output_path.stem}.m2v")
+        validate_output_target(save_dir, m2v_path)
+        atomic_write_bytes(m2v_path, selected["data"])
+        return m2v_path
+    except Exception:
+        logger.warning(
+            "In-memory USM demux failed for %s, falling back to file demux",
+            usm_output_path,
+            exc_info=True,
+        )
+        return None
+
+
 def _extract_bundle_files_sync(
     bundle_save_path: str,
     bundle: Dict[str, str],
@@ -599,7 +686,14 @@ def _extract_bundle_files_sync(
     bundle_cache_root: str | None = None,
     *,
     live2d_bundle: bool = False,
+    webp_method: int | None = None,
+    png_compression: str | None = None,
+    usm_in_memory_limit: int | None = None,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
+    from bundle_images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
+
+    if usm_in_memory_limit is None:
+        usm_in_memory_limit = DEFAULT_USM_IN_MEMORY_MAX_BYTES
     bundle_path = StdPath(bundle_save_path)
     output_root = StdPath(extracted_save_path)
     unity_file = _load_unity_bundle(bundle_path, unity_version)
@@ -611,6 +705,8 @@ def _extract_bundle_files_sync(
         output_root,
         texture_output_formats,
         live2d_bundle=live2d_bundle,
+        webp_method=DEFAULT_WEBP_METHOD if webp_method is None else webp_method,
+        png_compression=DEFAULT_PNG_COMPRESSION if png_compression is None else png_compression,
     )
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
@@ -775,23 +871,47 @@ def _extract_bundle_files_sync(
                 logger.debug("Merged %s to %s.acb", acb_textasset_filenames, acb_cue_sheet_name)
 
             if acb_output_path.exists():
-                with acb_output_path.open("rb") as f:
-                    acb_data = f.read()
-                    acb_asset_name = (
-                        acb_file["assetBundleFileName"].removesuffix(".bytes").removesuffix(".acb")
+                acb_asset_name = (
+                    acb_file["assetBundleFileName"].removesuffix(".bytes").removesuffix(".acb")
+                )
+                cue_name = acb_cue_sheet_name if acb_cue_sheet_name != acb_asset_name else None
+                promoted_audio = []
+
+                decoded_tracks: list[tuple[str, bytes]] | None
+                try:
+                    # Fully in-memory decode: the whole ACB (embedded AWB
+                    # included) becomes WAV payloads without staging
+                    # directories or intermediate files.
+                    decoded_tracks = decode_acb_bytes(
+                        acb_output_path.read_bytes(),
+                        cue_name,
                     )
-                    cue_name = acb_cue_sheet_name if acb_cue_sheet_name != acb_asset_name else None
+                except Exception:
+                    logger.warning(
+                        "In-memory ACB decode failed for %s, falling back to file decoder",
+                        acb_output_path,
+                        exc_info=True,
+                    )
+                    decoded_tracks = None
+
+                if decoded_tracks is not None:
+                    for track_filename, track_data in decoded_tracks:
+                        final_audio = _resolve_generated_child_path(save_dir, track_filename)
+                        validate_output_target(save_dir, final_audio)
+                        atomic_write_bytes(final_audio, track_data)
+                        promoted_audio.append(final_audio.as_posix())
+                else:
+                    # Path-based fallback keeps external ``.awb`` resolution:
+                    # decode next to the ACB, stage only decoder outputs.
                     acb_stage_dir = StdPath(tempfile.mkdtemp(prefix=".acb-", dir=save_dir))
-                    promoted_audio = []
                     try:
-                        staged_acb = acb_stage_dir / acb_output_path.name
-                        staged_acb.write_bytes(acb_data)
-                        extracted_audio_files = extract_acb(
-                            BytesIO(acb_data),
-                            acb_stage_dir.as_posix(),
-                            staged_acb.as_posix(),
-                            cue_name,
-                        )
+                        with acb_output_path.open("rb") as acb_stream:
+                            extracted_audio_files = extract_acb(
+                                acb_stream,
+                                acb_stage_dir.as_posix(),
+                                acb_output_path.as_posix(),
+                                cue_name,
+                            )
 
                         for extracted_audio_file in extracted_audio_files:
                             produced = secure_existing_output(acb_stage_dir, extracted_audio_file)
@@ -815,6 +935,18 @@ def _extract_bundle_files_sync(
             usm_output_name = movie_bundle["usmFileName"].removesuffix(".bytes")
             usm_output_path = _replace_suffix_secure(save_dir, usm_output_name, ".usm")
             usm_output_path = _resolve_existing_usm_path_sync(usm_output_path, save_dir)
+
+            m2v_path = _demux_usm_sources_in_memory(
+                [usm_output_path],
+                usm_output_path,
+                save_dir,
+                usm_in_memory_limit,
+            )
+            if m2v_path is not None:
+                _discard_exported_file_sync(exported_files, usm_output_path)
+                usm_output_path.unlink(missing_ok=True)
+                video_jobs.append(m2v_path.as_posix())
+                continue
         elif len(movie_bundles) > 1:
             pattern = re.compile(r"-\d{3}.usm.bytes")
             usm_output_name = pattern.sub(".usm", movie_bundles[0]["usmFileName"])
@@ -843,6 +975,20 @@ def _extract_bundle_files_sync(
                         usm_split_path.relative_to(save_dir).as_posix(),
                     )
                 resolved_usm_split_paths.append(usm_split_path)
+
+            m2v_path = _demux_usm_sources_in_memory(
+                resolved_usm_split_paths,
+                usm_output_path,
+                save_dir,
+                usm_in_memory_limit,
+            )
+            if m2v_path is not None:
+                for usm_split_path in resolved_usm_split_paths:
+                    _discard_exported_file_sync(exported_files, usm_split_path)
+                    usm_split_path.unlink()
+                logger.debug("Demuxed %s in memory to %s", usm_split_filenames, m2v_path.name)
+                video_jobs.append(m2v_path.as_posix())
+                continue
 
             atomic_write_stream(
                 usm_output_path,
@@ -1156,6 +1302,9 @@ async def extract_asset_bundle(
             _get_texture_output_formats(config),
             bundle_cache_root.as_posix() if bundle_cache_root is not None else None,
             live2d_bundle=live2d_bundle,
+            webp_method=_get_texture_webp_method(config),
+            png_compression=_get_texture_png_compression(config),
+            usm_in_memory_limit=_get_usm_in_memory_limit(config),
         ),
     )
 

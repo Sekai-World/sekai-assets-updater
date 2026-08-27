@@ -11,36 +11,48 @@ import bundle
 import security
 
 
-def test_hca_decoder_uses_private_staging_and_promotes_output(
+def test_hca_decoder_decodes_in_memory_and_writes_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     input_path = tmp_path / "voice.hca"
     output_path = tmp_path / "voice.wav"
     input_path.write_bytes(b"hca")
-    decoder_calls: list[tuple[str, str]] = []
-    executor = ThreadPoolExecutor(max_workers=1)
+    decoder_calls: list[bytes] = []
 
-    def fake_decode_hca(input_name: str, staged_output: str) -> None:
-        decoder_calls.append((input_name, staged_output))
-        Path(staged_output).write_bytes(b"decoded")
-        Path(staged_output).with_name("decoder.log").write_text("diagnostic")
+    def fake_decode_bytes(hca_data: bytes) -> bytes:
+        decoder_calls.append(hca_data)
+        return b"decoded"
 
-    monkeypatch.setattr(bundle, "_get_shared_audio_process_pool", lambda _config: executor)
-    monkeypatch.setattr(bundle, "decode_hca_file", fake_decode_hca)
-    try:
-        decoded = asyncio.run(
-            bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
-        )
-    finally:
-        executor.shutdown(wait=True)
+    monkeypatch.setattr(bundle, "decode_hca_to_wav_bytes", fake_decode_bytes)
+    decoded = asyncio.run(
+        bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
+    )
 
     assert decoded is True
-    assert decoder_calls[0][0] == input_path.as_posix()
-    staged_output = Path(decoder_calls[0][1])
-    assert staged_output.parent != output_path.parent
-    assert staged_output.parent.parent == output_path.parent
+    assert decoder_calls == [b"hca"]
     assert output_path.read_bytes() == b"decoded"
-    assert not staged_output.parent.exists()
+    # No staging directories or temporary files remain next to the output.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["voice.hca", "voice.wav"]
+
+
+def test_hca_decoder_reports_failure_without_partial_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_path = tmp_path / "voice.hca"
+    output_path = tmp_path / "voice.wav"
+    input_path.write_bytes(b"hca")
+
+    def failing_decode_bytes(_hca_data: bytes) -> bytes:
+        raise ValueError("corrupt hca")
+
+    monkeypatch.setattr(bundle, "decode_hca_to_wav_bytes", failing_decode_bytes)
+    decoded = asyncio.run(
+        bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
+    )
+
+    assert decoded is False
+    assert not output_path.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["voice.hca"]
 
 
 def test_acb_extractor_uses_private_staging_and_promotes_result(
@@ -115,7 +127,9 @@ def test_acb_extractor_uses_private_staging_and_promotes_result(
     staged_dir = Path(extract_calls[0][0])
     assert staged_dir != output_root
     assert staged_dir.parent == output_root
-    assert Path(extract_calls[0][1]).parent == staged_dir
+    # The ACB is decoded in place (its parent is where sibling .awb archives
+    # live); only decoded outputs are staged before promotion.
+    assert Path(extract_calls[0][1]) == output_root / "voice.acb"
     promoted_output = output_root / "voice.wav"
     assert promoted_output.read_bytes() == b"wav"
     assert audio_jobs == [(output_root.as_posix(), [promoted_output.as_posix()])]

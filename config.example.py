@@ -58,10 +58,19 @@ HCA_DECODE_BACKEND = "auto"
 MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 # Maximum number of concurrent cridecoder USM demux tasks
 MAX_CONCURRENCY_USM_DEMUXES = MAX_CONCURRENCY_VIDEO_TRANSCODES
+# USMs up to this size are demuxed fully in memory during extraction (skipping
+# the merged .usm intermediate on disk); larger movies stream through disk.
+USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
+# libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than
+# the old default (4) at nearly identical size; 0 is ~3x faster but ~35% larger.
+TEXTURE_WEBP_METHOD = 2
+# PNG encoder profile used by the native unity-rs encoder: "fast" (default,
+# ~7x faster than PIL at ~10% larger output), "default", or "best".
+TEXTURE_PNG_COMPRESSION = "fast"
 
 # Crypto settings
 # Replace these with the game's AES material. AES keys must be 16, 24, or 32

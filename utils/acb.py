@@ -15,7 +15,31 @@ from typing import Optional, Union
 
 import cridecoder
 
-__all__ = ["extract_acb"]
+__all__ = ["decode_acb_bytes", "extract_acb"]
+
+
+def decode_acb_bytes(
+    acb_data: bytes,
+    cue_name: Optional[str] = None,
+) -> list[tuple[str, bytes]]:
+    """Decode ACB bytes fully in memory to ``(filename, wav_bytes)`` pairs.
+
+    Only the embedded AWB can be resolved from bytes; external streaming
+    ``.awb`` archives require the path-based :func:`extract_acb`. Raises on
+    invalid input and returns an empty list only when the ACB has no tracks,
+    so callers can fall back to the path-based decoder on failure.
+    """
+    tracks = cridecoder.decode_acb_to_wav_bytes(acb_data, None)
+    outputs: list[tuple[str, bytes]] = []
+    for track in tracks:
+        name = track["name"]
+        if cue_name is not None and name != cue_name:
+            continue
+        extension = (track["extension"] or "wav").lstrip(".")
+        outputs.append((f"{name}.{extension}", track["data"]))
+    if not tracks:
+        raise ValueError("in-memory ACB decode produced no tracks")
+    return outputs
 
 
 def extract_acb(

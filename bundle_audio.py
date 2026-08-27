@@ -6,7 +6,6 @@ import os
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
-from concurrent.futures import Executor
 from pathlib import Path as StdPath
 from typing import Literal
 
@@ -14,6 +13,7 @@ from anyio import Path
 
 from security import (
     SecurityError,
+    atomic_write_bytes,
     resolve_secure_path,
     secure_existing_output,
     validate_output_target,
@@ -73,34 +73,23 @@ async def run_hca_with_cridecoder(
     input_path: Path,
     output_path: Path,
     *,
-    process_pool: Executor,
-    concurrency: int,
     report_decoder: Callable[[str], None],
-    decoder: Callable[[str, str], None],
+    decode_bytes: Callable[[bytes], bytes],
 ) -> bool:
-    staging_dir: StdPath | None = None
+    """Decode one HCA fully in memory on a worker thread.
+
+    cridecoder releases the GIL during decoding (0.3.5+), so a thread is
+    enough for parallelism and the payload never crosses a process boundary
+    or touches a staging directory.
+    """
     try:
-        report_decoder(
-            f"Using cridecoder for HCA decoding via process pool ({concurrency} workers)"
-        )
-        output_root = StdPath(output_path.parent.as_posix())
-        staging_dir = StdPath(tempfile.mkdtemp(prefix=".hca-", dir=output_root))
-        staged_output = staging_dir / output_path.name
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            process_pool,
-            decoder,
-            input_path.as_posix(),
-            staged_output.as_posix(),
-        )
-        produced = secure_existing_output(staging_dir, staged_output)
-        validate_output_target(output_root, output_path)
-        os.replace(produced, output_path)
-        shutil.rmtree(staging_dir, ignore_errors=True)
+        report_decoder("Using cridecoder for in-memory HCA decoding")
+        secure_output = Path(resolve_secure_path(output_path.parent, output_path.name).as_posix())
+        hca_data = await Path(str(input_path)).read_bytes()
+        wav_data = await asyncio.to_thread(decode_bytes, hca_data)
+        atomic_write_bytes(StdPath(secure_output.as_posix()), wav_data)
     except Exception:
         logger.exception("Failed to decode %s with cridecoder", input_path)
-        if staging_dir is not None:
-            shutil.rmtree(staging_dir, ignore_errors=True)
         return False
     return True
 
