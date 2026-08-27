@@ -75,7 +75,8 @@ TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 # the old default (4) at nearly identical size; 0 is ~3x faster but ~35% larger.
 TEXTURE_WEBP_METHOD = 2
 # PNG encoder profile used by the native unity-rs encoder: "fast" (default,
-# ~7x faster than PIL at ~10% larger output), "default", or "best".
+# ~9x faster than PIL at ~9% larger output), "default", "best", or an explicit
+# zlib level 0-9 (unity-rs 0.5+).
 TEXTURE_PNG_COMPRESSION = "fast"
 
 # Crypto settings

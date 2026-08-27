@@ -32,7 +32,7 @@ def extract_unity_objects(
     *,
     live2d_bundle: bool,
     webp_method: int = DEFAULT_WEBP_METHOD,
-    png_compression: str = DEFAULT_PNG_COMPRESSION,
+    png_compression: str | int = DEFAULT_PNG_COMPRESSION,
 ) -> tuple[list[Path], list[tuple[Path, list[dict]]], list[tuple[Path, list[dict]]]]:
     exported_files: list[Path] = []
     post_process_acb_files: list[tuple[Path, list[dict]]] = []

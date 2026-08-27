@@ -47,7 +47,7 @@ def render_image_asset(
 def _encode_image(
     image: RenderedImage | Image.Image,
     image_format: str,
-    png_compression: str,
+    png_compression: str | int,
 ) -> tuple[bytes | None, Image.Image | None]:
     """Return either a pre-encoded payload or a PIL image to save directly."""
     format_key = image_format.lower()
@@ -66,7 +66,7 @@ def save_image_formats(
     texture_output_formats: tuple[str, ...],
     *,
     webp_method: int = DEFAULT_WEBP_METHOD,
-    png_compression: str = DEFAULT_PNG_COMPRESSION,
+    png_compression: str | int = DEFAULT_PNG_COMPRESSION,
 ) -> list[Path]:
     saved_paths: list[Path] = []
     for image_format in texture_output_formats:

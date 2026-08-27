@@ -195,12 +195,16 @@ def _get_texture_webp_method(config) -> int:
     return method
 
 
-def _get_texture_png_compression(config) -> str:
+def _get_texture_png_compression(config) -> str | int:
     from bundle_images import DEFAULT_PNG_COMPRESSION
 
-    value = str(getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)).lower()
-    if value in {"fast", "default", "best"}:
+    value = getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)
+    # unity-rs 0.5+ also accepts an explicit zlib level (0-9).
+    if type(value) is int and 0 <= value <= 9:
         return value
+    text = str(value).lower()
+    if text in {"fast", "default", "best"}:
+        return text
     logger.warning("Invalid TEXTURE_PNG_COMPRESSION=%r, using default", value)
     return DEFAULT_PNG_COMPRESSION
 
@@ -687,7 +691,7 @@ def _extract_bundle_files_sync(
     *,
     live2d_bundle: bool = False,
     webp_method: int | None = None,
-    png_compression: str | None = None,
+    png_compression: str | int | None = None,
     usm_in_memory_limit: int | None = None,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
     from bundle_images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD

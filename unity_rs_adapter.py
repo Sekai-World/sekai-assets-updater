@@ -173,7 +173,7 @@ class RenderedImage:
     height: int
     _pil: Image.Image | None = field(default=None, repr=False)
 
-    def encode_png(self, compression: str = "fast") -> bytes | None:
+    def encode_png(self, compression: str | int = "fast") -> bytes | None:
         """Encode to PNG in Rust; ``None`` when the native encoder is missing."""
         encode = getattr(self.native, "encode", None)
         if encode is None:

@@ -199,3 +199,21 @@ def test_cached_acb_lookup_remembers_source_bundle(
     # The remembered source bundle short-circuits the cache scan entirely.
     assert loads == ["voice"]
     assert output.read_bytes() == b"cached acb"
+
+
+def test_png_compression_config_accepts_profiles_and_levels() -> None:
+    import bundle
+
+    assert bundle._get_texture_png_compression(SimpleNamespace()) == "fast"
+    assert (
+        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="best"))
+        == "best"
+    )
+    assert bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=3)) == 3
+    assert (
+        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=17)) == "fast"
+    )
+    assert (
+        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="zopfli"))
+        == "fast"
+    )
