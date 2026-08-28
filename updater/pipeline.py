@@ -16,6 +16,7 @@ binding here would silently activate similarly-shaped patches.
 
 import asyncio
 import logging
+import os
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -51,6 +52,13 @@ DownloadItem = Tuple[str, Dict[str, Any]]
 
 
 _QUEUE_SENTINEL = object()
+
+
+def _reserve_temporary_bundle_path() -> str:
+    """Create and close an empty temp file, reserving a unique download path."""
+    descriptor, name = tempfile.mkstemp()
+    os.close(descriptor)
+    return name
 
 
 @dataclass
@@ -284,10 +292,7 @@ async def _download_stage(
                         bundle_cache_root
                     ).as_posix()
                 else:
-                    tmp_bundle_save_file = tempfile.NamedTemporaryFile(delete=False)
-                    bundle_save_path = Path(tmp_bundle_save_file.name)
-                    tmp_bundle_save_file.close()
-                    tmp_bundle_save_file = None
+                    bundle_save_path = Path(await asyncio.to_thread(_reserve_temporary_bundle_path))
                     remove_bundle_after_extract = True
                     download_root = bundle_save_path.parent
                     download_relative_path = bundle_save_path.name
