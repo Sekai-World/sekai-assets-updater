@@ -6,7 +6,7 @@ import os
 import tempfile
 from typing import List
 
-from anyio import Path
+from anyio import Path, open_file
 
 from updater.external_process import (
     EXTERNAL_PROCESS_TERMINATE_GRACE,
@@ -73,8 +73,9 @@ async def _upload_batch_with_rclone(
 
     list_descriptor, list_path = tempfile.mkstemp(prefix=".upload-batch-", suffix=".txt")
     try:
-        with os.fdopen(list_descriptor, "w", encoding="utf-8") as list_file:
-            list_file.write("\n".join(relative_keys) + "\n")
+        os.close(list_descriptor)
+        async with await open_file(list_path, "w", encoding="utf-8") as list_file:
+            await list_file.write("\n".join(relative_keys) + "\n")
         args.extend(
             [
                 "--files-from-raw",
