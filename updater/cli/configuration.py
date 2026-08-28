@@ -1,63 +1,23 @@
 """The loaded-config cell, config validation, and state-path resolution."""
 
-import asyncio
 import logging
 import os
 import shutil
-import tempfile
-import time
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Optional
 
-import orjson as json
-from anyio import open_file
-
-from updater.cli.logging_setup import setup_logging_queue
 from updater.model import ConfigLike
 from updater.modes import (
-    filter_bundles_for_mode,
-    filter_download_items_for_mode,
     get_enabled_specialized_modes,
-    get_mode_bundle_prefixes,
-    get_required_bundle_prefixes,
-    mode_uses_bundle_pipeline,
-    needs_live2d_bundle_cache,
-    needs_shared_workspace,
 )
-from updater.net.disk_space import build_download_disk_space_gate
-from updater.net.metadata import build_request_headers, fetch_asset_bundle_info
-from updater.net.plan import (
-    DownloadPlan,
-    dedupe_download_items,
-    get_download_list,
-    select_bundles_for_download,
-)
-from updater.postprocess.dispatch import run_specialized_postprocess
-from updater.postprocess.live2d_models import recover_live2d_model_outputs
-from updater.runtime import shutdown_process_pools
-from updater.sanitize import sanitize_http_log_value
 from updater.state import (
-    StateLock,
-    StateNotFoundError,
     StatePaths,
-    atomic_write_json,
-    commit_empty_transaction,
-    create_journal,
-    derive_active_state_paths,
-    derive_state_paths,
-    durable_unlink,
-    load_pending_queue,
-    prepare_state_directory,
-    replay_journal,
-    validate_asset_metadata,
-    validate_game_version,
-    validate_pending_queue,
 )
-from updater.workspace import ensure_dir_exists, get_bundle_cache_path
 
 logger = logging.getLogger("asset_updater")
 
 
 config: Optional[ConfigLike] = None
+
 
 class _StatePathConfig:
     """Read-through config view with the active mode's durable state paths."""
@@ -72,12 +32,14 @@ class _StatePathConfig:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._base, name)
 
+
 def require_config() -> ConfigLike:
     if config is None:
         raise ImportError(
             "Config module not loaded. Please run the script with the config argument."
         )
     return config
+
 
 def validate_config(cfg: ConfigLike, mode: str = "assets") -> None:
     """Reject unsafe or unusable runtime settings before starting the pipeline."""
