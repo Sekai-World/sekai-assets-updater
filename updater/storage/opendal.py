@@ -7,7 +7,8 @@ from typing import List, Mapping
 
 from anyio import Path, open_file
 
-from updater.storage.remote import derive_remote_key, validate_upload_sources
+from updater.security import derive_remote_key
+from updater.storage.remote import validate_upload_sources
 
 logger = logging.getLogger("asset_updater")
 

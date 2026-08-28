@@ -14,7 +14,6 @@ from anyio import Path
 from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
 )
-from updater.extract.paths import canonical_root as _canonical_root
 from updater.media.hca import decode_hca_to_wav_bytes
 from updater.media.process import (
     _cleanup_process_output as _cleanup_process_output,
@@ -33,6 +32,7 @@ from updater.security import (
     validate_contained_file,
     validate_output_target,
 )
+from updater.security import canonical_root as _canonical_root
 
 logger = logging.getLogger("live2d")
 
@@ -317,7 +317,7 @@ async def _run_ffmpeg_audio_encode(
     )
 
 
-async def _process_extracted_audio_file(
+async def process_extracted_audio_file(
     extracted_audio_file: str,
     save_dir: Path,
     config,

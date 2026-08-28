@@ -1,6 +1,6 @@
 """Narrow regression tests for the unity-rs backed Live2D motion restore.
 
-These tests pin the public behaviour of :mod:`utils.live2d` after the
+These tests pin the public behaviour of :mod:`updater.live2d` after the
 UnityPy -> unity-rs migration: the same ``motion3.json`` / ``BuildMotionData.json``
 output contract must hold when objects are read through
 :func:`unity_rs_adapter.load_bundle` instead of ``UnityPy.load``.

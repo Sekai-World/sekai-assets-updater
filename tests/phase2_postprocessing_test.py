@@ -158,7 +158,7 @@ def test_acb_audio_outputs_are_isolated_between_sibling_artifacts(
     monkeypatch.setattr(media_audio, "_run_ffmpeg_audio_encode", fake_encode)
     config = SimpleNamespace()
     first_audio = asyncio.run(
-        media_audio._process_extracted_audio_file(
+        media_audio.process_extracted_audio_file(
             (first_root / "voice.wav").as_posix(),
             AnyioPath(first_root.as_posix()),
             config,
@@ -166,7 +166,7 @@ def test_acb_audio_outputs_are_isolated_between_sibling_artifacts(
         )
     )
     second_audio = asyncio.run(
-        media_audio._process_extracted_audio_file(
+        media_audio.process_extracted_audio_file(
             (second_root / "voice.wav").as_posix(),
             AnyioPath(second_root.as_posix()),
             config,
@@ -223,7 +223,7 @@ def test_movie_video_outputs_and_cleanup_are_isolated_between_siblings(
     monkeypatch.setattr(media_video, "_demux_usm_to_m2v", fake_demux)
     monkeypatch.setattr(media_video, "_run_ffmpeg_video_to_mp4", fake_video_encode)
     results = asyncio.run(
-        media_video._process_video_jobs(first_video_jobs + second_video_jobs, SimpleNamespace())
+        media_video.process_video_jobs(first_video_jobs + second_video_jobs, SimpleNamespace())
     )
 
     first_video, first_discarded = results[0]
@@ -289,7 +289,7 @@ def test_video_promotion_failure_is_contained_to_one_job(
     monkeypatch.setattr(media_video, "validate_output_target", reject_first_promotion)
 
     results = asyncio.run(
-        media_video._process_video_jobs(
+        media_video.process_video_jobs(
             [first_usm.as_posix(), second_usm.as_posix()], SimpleNamespace()
         )
     )

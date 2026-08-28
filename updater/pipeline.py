@@ -20,7 +20,7 @@ import os
 import tempfile
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Union
 
 import aiohttp
 from anyio import Path
@@ -29,6 +29,7 @@ from updater.extract.bundle import extract_asset_bundle
 from updater.net.disk_space import DownloadDiskSpaceGate
 from updater.net.download import download_deobfuscate_bundle
 from updater.net.http import build_cdn_headers, get_download_http_session_options
+from updater.net.plan import DownloadItem
 from updater.sanitize import sanitize_log_label
 from updater.security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 from updater.storage.opendal import upload_to_storage_opendal
@@ -47,8 +48,6 @@ from updater.workspace import (
 )
 
 logger = logging.getLogger("asset_updater")
-
-DownloadItem = Tuple[str, Dict[str, Any]]
 
 
 _QUEUE_SENTINEL = object()

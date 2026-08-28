@@ -71,7 +71,7 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
                 media_audio, "_run_hca_to_wav", new=AsyncMock(return_value=False)
             ) as hca_mock:
                 with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await media_audio._process_extracted_audio_file(
+                    outputs = await media_audio.process_extracted_audio_file(
                         wav_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),
@@ -96,7 +96,7 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(media_audio, "_run_hca_to_wav", new=AsyncMock(return_value=False)):
                 with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await media_audio._process_extracted_audio_file(
+                    outputs = await media_audio.process_extracted_audio_file(
                         wav_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),
@@ -122,7 +122,7 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
 
             with patch.object(media_audio, "_run_hca_to_wav", new=fake_decode) as decode_mock:
                 with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await media_audio._process_extracted_audio_file(
+                    outputs = await media_audio.process_extracted_audio_file(
                         hca_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),

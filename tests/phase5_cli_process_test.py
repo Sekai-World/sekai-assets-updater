@@ -108,7 +108,7 @@ def test_wait_cancellation_terminates_before_reraising() -> None:
     assert process.returncode is not None
 
 
-def test_helpers_wait_cancellation_terminates_before_reraising() -> None:
+def test_rclone_wait_cancellation_terminates_before_reraising() -> None:
     process = _HangingProcess(terminate_exits=True)
 
     async def scenario() -> None:
@@ -439,7 +439,7 @@ def test_repeated_cancel_during_terminate_runs_single_reap(
     assert process.returncode is not None
 
 
-def test_helpers_repeated_cancel_during_terminate_runs_single_reap(
+def test_rclone_repeated_cancel_during_terminate_runs_single_reap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     process = _HangingProcess(terminate_exits=True)

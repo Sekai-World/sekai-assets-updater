@@ -16,10 +16,6 @@ from anyio import Path
 from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
 )
-from updater.extract.paths import canonical_root as _canonical_root
-from updater.extract.paths import (
-    resolve_generated_child_path as _resolve_generated_child_path,
-)
 from updater.media.process import (
     _cleanup_process_output,
     _communicate_with_process,
@@ -34,6 +30,10 @@ from updater.security import (
     secure_existing_output,
     validate_contained_file,
     validate_output_target,
+)
+from updater.security import canonical_root as _canonical_root
+from updater.security import (
+    resolve_generated_child_path as _resolve_generated_child_path,
 )
 
 logger = logging.getLogger("live2d")
@@ -338,7 +338,7 @@ async def _process_video_job(
     return exported_video_files, discarded_video_files
 
 
-async def _process_video_jobs(
+async def process_video_jobs(
     video_jobs: list[str],
     config,
 ) -> list[tuple[list[Path], list[Path]]]:
@@ -361,7 +361,7 @@ async def _process_video_jobs(
 DEFAULT_USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 
 
-def _get_usm_in_memory_limit(config) -> int:
+def get_usm_in_memory_limit(config) -> int:
     value = getattr(config, "USM_IN_MEMORY_MAX_BYTES", DEFAULT_USM_IN_MEMORY_MAX_BYTES)
     try:
         limit = int(value)
@@ -371,7 +371,7 @@ def _get_usm_in_memory_limit(config) -> int:
     return max(0, limit)
 
 
-def _demux_usm_sources_in_memory(
+def demux_usm_sources_in_memory(
     source_paths: list[StdPath],
     usm_output_path: StdPath,
     save_dir: StdPath,

@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import orjson as json
 from anyio import open_file
 
-from updater.cli.pending import DownloadItem, _read_json_cache, _write_json_cache
+from updater.cli.pending import _read_json_cache, _write_json_cache
 from updater.model import ConfigLike
 from updater.modes import (
     filter_bundles_for_mode,
@@ -17,6 +17,7 @@ from updater.modes import (
 )
 from updater.net.disk_space import build_download_disk_space_gate
 from updater.net.plan import (
+    DownloadItem,
     dedupe_download_items,
     select_bundles_for_download,
 )

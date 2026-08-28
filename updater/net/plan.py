@@ -17,6 +17,9 @@ from updater.state import (
 logger = logging.getLogger("asset_updater")
 
 
+DownloadItem = Tuple[str, Dict]
+
+
 @dataclass(frozen=True)
 class DownloadPlan:
     """In-memory selection result; construction performs no persistence."""

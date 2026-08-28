@@ -9,7 +9,12 @@ from updater.constants import (
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
     UNITY_FS_CONTAINER_BASE,
 )
-from updater.security import SecurityError, resolve_secure_path, validate_contained_file
+from updater.security import (
+    SecurityError,
+    resolve_generated_child_path,
+    resolve_secure_path,
+    validate_contained_file,
+)
 
 logger = logging.getLogger("live2d")
 
@@ -48,15 +53,6 @@ def build_unityfs_save_path(unityfs_path: str, extracted_save_path: Path) -> Pat
         return Path(resolve_secure_path(extracted_save_path, relpath.as_posix()).as_posix())
 
     raise ValueError(f"Failed to get relative path for {unityfs_path}")
-
-
-def resolve_generated_child_path(root: Path, name: str, suffix: str = "") -> Path:
-    """Resolve an untrusted generated filename below a local extraction root."""
-    return Path(resolve_secure_path(root, f"{name}{suffix}").as_posix())
-
-
-def canonical_root(path: Path) -> Path:
-    return path.resolve(strict=False)
 
 
 def replace_suffix_secure(root: Path, name: str, suffix: str) -> Path:

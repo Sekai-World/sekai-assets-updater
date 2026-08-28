@@ -14,11 +14,11 @@ from updater.modes import (
     get_mode_bundle_prefixes,
 )
 from updater.net.plan import (
+    DownloadItem,
     DownloadPlan,
     dedupe_download_items,
     get_download_list,
 )
-from updater.pipeline import DownloadItem
 from updater.state import (
     StateNotFoundError,
     load_pending_queue,

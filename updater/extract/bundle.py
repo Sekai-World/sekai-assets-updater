@@ -9,13 +9,13 @@ from typing import Dict, List
 from anyio import Path
 
 from updater.extract.sync_worker import _extract_bundle_files_sync
-from updater.media.audio import _process_extracted_audio_file
+from updater.media.audio import process_extracted_audio_file
 from updater.media.images import (
-    _get_texture_output_formats,
-    _get_texture_png_compression,
-    _get_texture_webp_method,
+    get_texture_output_formats,
+    get_texture_png_compression,
+    get_texture_webp_method,
 )
-from updater.media.video import _get_usm_in_memory_limit, _process_video_jobs
+from updater.media.video import get_usm_in_memory_limit, process_video_jobs
 from updater.modes import is_live2d_bundle
 from updater.runtime import runtime as _bundle_runtime
 from updater.security import validate_contained_file
@@ -52,7 +52,7 @@ async def _append_audio_outputs(
         save_dir = Path(save_dir_path)
         audio_tasks = [
             asyncio.create_task(
-                _process_extracted_audio_file(
+                process_extracted_audio_file(
                     extracted_audio_file,
                     save_dir,
                     config,
@@ -81,7 +81,7 @@ async def _append_video_outputs(
     config,
 ) -> None:
     extracted_root = StdPath(extracted_save_path.as_posix())
-    for video_files, discarded_files in await _process_video_jobs(video_jobs, config):
+    for video_files, discarded_files in await process_video_jobs(video_jobs, config):
         for video_file in video_files:
             exported_files.append(
                 Path(
@@ -134,12 +134,12 @@ async def extract_asset_bundle(
             bundle,
             extracted_save_path.as_posix(),
             unity_version,
-            _get_texture_output_formats(config),
+            get_texture_output_formats(config),
             bundle_cache_root.as_posix() if bundle_cache_root is not None else None,
             live2d_bundle=live2d_bundle,
-            webp_method=_get_texture_webp_method(config),
-            png_compression=_get_texture_png_compression(config),
-            usm_in_memory_limit=_get_usm_in_memory_limit(config),
+            webp_method=get_texture_webp_method(config),
+            png_compression=get_texture_png_compression(config),
+            usm_in_memory_limit=get_usm_in_memory_limit(config),
         ),
     )
 

@@ -206,19 +206,17 @@ def test_cached_acb_lookup_remembers_source_bundle(
 
 def test_png_compression_config_accepts_profiles_and_levels() -> None:
 
-    assert media_images._get_texture_png_compression(SimpleNamespace()) == "fast"
+    assert media_images.get_texture_png_compression(SimpleNamespace()) == "fast"
     assert (
-        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="best"))
+        media_images.get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="best"))
         == "best"
     )
+    assert media_images.get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=3)) == 3
     assert (
-        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=3)) == 3
-    )
-    assert (
-        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=17))
+        media_images.get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=17))
         == "fast"
     )
     assert (
-        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="zopfli"))
+        media_images.get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="zopfli"))
         == "fast"
     )

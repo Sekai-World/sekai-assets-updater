@@ -107,7 +107,7 @@ def save_image_formats(
     return saved_paths
 
 
-def _get_texture_output_formats(config) -> tuple[str, ...]:
+def get_texture_output_formats(config) -> tuple[str, ...]:
     value = getattr(config, "TEXTURE_OUTPUT_FORMATS", ("png", "webp"))
     if isinstance(value, str):
         formats = [part.strip().lower().removeprefix(".") for part in value.split(",")]
@@ -125,7 +125,7 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
     return tuple(valid_formats)
 
 
-def _get_texture_webp_method(config) -> int:
+def get_texture_webp_method(config) -> int:
     value = getattr(config, "TEXTURE_WEBP_METHOD", DEFAULT_WEBP_METHOD)
     try:
         method = int(value)
@@ -138,7 +138,7 @@ def _get_texture_webp_method(config) -> int:
     return method
 
 
-def _get_texture_png_compression(config) -> str | int:
+def get_texture_png_compression(config) -> str | int:
     value = getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)
     # unity-rs 0.5+ also accepts an explicit zlib level (0-9).
     if type(value) is int and 0 <= value <= 9:

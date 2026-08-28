@@ -308,7 +308,7 @@ TRACK_EXTRACTORS = {
 }
 
 
-logger = logging.getLogger("utils.playable")
+logger = logging.getLogger("live2d")
 
 
 def extract_playable(env: Any, container_path: str) -> dict:

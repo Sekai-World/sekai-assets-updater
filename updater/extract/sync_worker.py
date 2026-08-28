@@ -39,7 +39,7 @@ from updater.extract.unity_objects import extract_unity_objects
 from updater.media.acb import decode_acb_bytes, extract_acb
 from updater.media.video import (
     DEFAULT_USM_IN_MEMORY_MAX_BYTES,
-    _demux_usm_sources_in_memory,
+    demux_usm_sources_in_memory,
 )
 from updater.security import (
     atomic_write_bytes,
@@ -312,7 +312,7 @@ def _extract_bundle_files_sync(
             usm_output_path = _replace_suffix_secure(save_dir, usm_output_name, ".usm")
             usm_output_path = _resolve_existing_usm_path_sync(usm_output_path, save_dir)
 
-            m2v_path = _demux_usm_sources_in_memory(
+            m2v_path = demux_usm_sources_in_memory(
                 [usm_output_path],
                 usm_output_path,
                 save_dir,
@@ -352,7 +352,7 @@ def _extract_bundle_files_sync(
                     )
                 resolved_usm_split_paths.append(usm_split_path)
 
-            m2v_path = _demux_usm_sources_in_memory(
+            m2v_path = demux_usm_sources_in_memory(
                 resolved_usm_split_paths,
                 usm_output_path,
                 save_dir,

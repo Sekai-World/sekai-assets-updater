@@ -151,8 +151,8 @@ def validate_output_target(root: PathLike, output: PathLike) -> Path:
     root_path = Path(_path_text(root, label="root")).absolute()
     output_path = Path(_path_text(output, label="output")).absolute()
     relative_path = output_path.relative_to(root_path).as_posix()
-    canonical_root = root_path.resolve(strict=False)
-    resolve_secure_path(canonical_root, relative_path)
+    resolved_root = root_path.resolve(strict=False)
+    resolve_secure_path(resolved_root, relative_path)
     try:
         if stat.S_ISLNK(os.lstat(output_path).st_mode):
             raise SecurityError(f"output must not be a symlink: {output_path}")
@@ -264,3 +264,13 @@ def atomic_write_stream(target_path: PathLike, chunks) -> Path:
     finally:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
+
+
+def canonical_root(path: Path) -> Path:
+    """Resolve a local root to its canonical form without requiring existence."""
+    return path.resolve(strict=False)
+
+
+def resolve_generated_child_path(root: Path, name: str, suffix: str = "") -> Path:
+    """Resolve an untrusted generated filename below a local extraction root."""
+    return Path(resolve_secure_path(root, f"{name}{suffix}").as_posix())
