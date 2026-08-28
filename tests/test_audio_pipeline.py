@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 from anyio import Path as AnyioPath
 
-from updater.bundle import pipeline as bundle
-from updater.utils.acb import extract_acb
+from updater.media import audio as media_audio
+from updater.media.acb import extract_acb
 
 
 class ExtractAcbTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class ExtractAcbTests(unittest.TestCase):
             output_path = tmp_path / "voice.wav"
 
             with patch(
-                "updater.utils.acb.cridecoder.decode_acb_to_wav",
+                "updater.media.acb.cridecoder.decode_acb_to_wav",
                 return_value=[output_path.as_posix()],
             ) as decode_mock:
                 outputs = extract_acb(BytesIO(b"ignored"), tmp_dir, acb_path.as_posix())
@@ -40,7 +40,7 @@ class ExtractAcbTests(unittest.TestCase):
             removed_path.write_bytes(b"wav")
 
             with patch(
-                "updater.utils.acb.cridecoder.decode_acb_to_wav",
+                "updater.media.acb.cridecoder.decode_acb_to_wav",
                 return_value=[kept_path.as_posix(), removed_path.as_posix()],
             ):
                 outputs = extract_acb(
@@ -68,10 +68,10 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
                 return True
 
             with patch.object(
-                bundle, "_run_hca_to_wav", new=AsyncMock(return_value=False)
+                media_audio, "_run_hca_to_wav", new=AsyncMock(return_value=False)
             ) as hca_mock:
-                with patch.object(bundle, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await bundle._process_extracted_audio_file(
+                with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
+                    outputs = await media_audio._process_extracted_audio_file(
                         wav_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),
@@ -94,9 +94,9 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
                 await output_path.write_bytes(output_path.suffix.encode())
                 return True
 
-            with patch.object(bundle, "_run_hca_to_wav", new=AsyncMock(return_value=False)):
-                with patch.object(bundle, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await bundle._process_extracted_audio_file(
+            with patch.object(media_audio, "_run_hca_to_wav", new=AsyncMock(return_value=False)):
+                with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
+                    outputs = await media_audio._process_extracted_audio_file(
                         wav_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),
@@ -120,9 +120,9 @@ class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
                 await output_path.write_bytes(b"mp3")
                 return True
 
-            with patch.object(bundle, "_run_hca_to_wav", new=fake_decode) as decode_mock:
-                with patch.object(bundle, "_run_ffmpeg_audio_encode", new=fake_encode):
-                    outputs = await bundle._process_extracted_audio_file(
+            with patch.object(media_audio, "_run_hca_to_wav", new=fake_decode) as decode_mock:
+                with patch.object(media_audio, "_run_ffmpeg_audio_encode", new=fake_encode):
+                    outputs = await media_audio._process_extracted_audio_file(
                         hca_path.as_posix(),
                         save_dir,
                         SimpleNamespace(),

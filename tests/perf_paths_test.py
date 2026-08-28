@@ -8,7 +8,8 @@ import pytest
 from PIL import Image
 
 from updater.bundle import acb_cache as bundle_acb_cache
-from updater.bundle.images import save_image_formats
+from updater.media import images as media_images
+from updater.media.images import save_image_formats
 from updater.security import SecurityError
 from updater.storage import rclone as storage_rclone
 from updater.storage.rclone import upload_to_storage
@@ -204,18 +205,20 @@ def test_cached_acb_lookup_remembers_source_bundle(
 
 
 def test_png_compression_config_accepts_profiles_and_levels() -> None:
-    from updater.bundle import pipeline as bundle
 
-    assert bundle._get_texture_png_compression(SimpleNamespace()) == "fast"
+    assert media_images._get_texture_png_compression(SimpleNamespace()) == "fast"
     assert (
-        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="best"))
+        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="best"))
         == "best"
     )
-    assert bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=3)) == 3
     assert (
-        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=17)) == "fast"
+        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=3)) == 3
     )
     assert (
-        bundle._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="zopfli"))
+        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION=17))
+        == "fast"
+    )
+    assert (
+        media_images._get_texture_png_compression(SimpleNamespace(TEXTURE_PNG_COMPRESSION="zopfli"))
         == "fast"
     )

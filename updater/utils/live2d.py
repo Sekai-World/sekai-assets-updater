@@ -13,9 +13,8 @@ import orjson as json
 from anyio import Path, open_file
 
 from updater.constants import UNITY_FS_CONTAINER_BASE
+from updater.media.binary import BinaryStream
 from updater.unity_rs_adapter import UnityRsObject, load_bundle
-
-from .binary import BinaryStream
 
 # Unity's stable class ID for Transform (previously UnityPy.enums.ClassIDType.Transform).
 TRANSFORM_CLASS_ID = 4

@@ -8,8 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from updater.bundle import pipeline as bundle
+from updater.bundle import pipeline as bundle  # noqa: F401
 from updater.external_process import TERMINATE_TASK_ATTRIBUTE
+from updater.media import audio as media_audio
+from updater.media import process as media_process
+from updater.media import video as media_video
 from updater.runtime import runtime as bundle_runtime
 from updater.runtime import shutdown_process_pools
 from updater.storage import rclone as storage_rclone
@@ -80,9 +83,9 @@ class _ArtifactProcess:
 @pytest.mark.parametrize("terminate_exits", [True, False])
 def test_wait_timeout_terminates_and_waits_for_process(monkeypatch, terminate_exits: bool) -> None:
     process = _HangingProcess(terminate_exits=terminate_exits)
-    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
+    monkeypatch.setattr(media_process, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
 
-    wait = bundle._wait_for_process(process, 0.001)
+    wait = media_process._wait_for_process(process, 0.001)
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(wait)
 
@@ -95,7 +98,7 @@ def test_wait_cancellation_terminates_before_reraising() -> None:
     process = _HangingProcess(terminate_exits=True)
 
     async def scenario() -> None:
-        task = asyncio.create_task(bundle._wait_for_process(process, 10))
+        task = asyncio.create_task(media_process._wait_for_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -125,7 +128,7 @@ def test_communicate_cancellation_terminates_before_reraising() -> None:
     process = _HangingProcess(terminate_exits=True)
 
     async def scenario() -> None:
-        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
+        task = asyncio.create_task(media_process._communicate_with_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -149,26 +152,28 @@ def test_ffmpeg_video_partial_output_is_cleaned_after_timeout_or_cancel(
         process_holder["process"] = process
         return process
 
-    monkeypatch.setattr(bundle, "_get_ffmpeg_video_encoder", _no_hardware_encoder)
-    monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(media_video, "_get_ffmpeg_video_encoder", _no_hardware_encoder)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
     config = SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=10)
 
     async def scenario() -> None:
-        process, _ = await bundle._run_ffmpeg_video_to_mp4(
-            bundle.Path((tmp_path / "movie.m2v").as_posix()), bundle.Path(output.as_posix()), config
+        process, _ = await media_video._run_ffmpeg_video_to_mp4(
+            media_audio.Path((tmp_path / "movie.m2v").as_posix()),
+            media_audio.Path(output.as_posix()),
+            config,
         )
         if cancel:
-            task = asyncio.create_task(bundle._wait_for_process(process, 10))
+            task = asyncio.create_task(media_process._wait_for_process(process, 10))
             await asyncio.sleep(0)
             expected = asyncio.CancelledError
             task.cancel()
         else:
-            task = asyncio.create_task(bundle._wait_for_process(process, 0.001))
+            task = asyncio.create_task(media_process._wait_for_process(process, 0.001))
             expected = asyncio.TimeoutError
         with pytest.raises(expected):
             await task
 
-    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(media_process, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
     asyncio.run(scenario())
     process = process_holder["process"]
     assert process.order == ["wait", "terminate", "wait", "kill", "wait"]
@@ -196,14 +201,14 @@ def test_ffmpeg_audio_partial_output_is_cleaned_after_timeout_or_cancel(
         process_holder["process"] = process
         return process
 
-    monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(media_process, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
 
     async def scenario() -> None:
         task = asyncio.create_task(
-            bundle._run_ffmpeg_audio_encode(
-                bundle.Path((tmp_path / "audio.wav").as_posix()),
-                bundle.Path(output.as_posix()),
+            media_audio._run_ffmpeg_audio_encode(
+                media_audio.Path((tmp_path / "audio.wav").as_posix()),
+                media_audio.Path(output.as_posix()),
                 SimpleNamespace(
                     MAX_CONCURRENCY_AUDIO_ENCODERS=1,
                     EXTERNAL_PROCESS_TIMEOUT=0.001 if not cancel else 10,
@@ -240,15 +245,15 @@ def test_vgmstream_partial_output_is_cleaned_after_timeout_or_cancel(
         process_holder["process"] = process
         return process
 
-    monkeypatch.setattr(bundle, "_get_vgmstream_cli", lambda: "vgmstream-cli")
-    monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(media_audio, "_get_vgmstream_cli", lambda: "vgmstream-cli")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(media_process, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
 
     async def scenario() -> None:
         task = asyncio.create_task(
-            bundle._run_hca_to_wav_with_vgmstream(
-                bundle.Path((tmp_path / "audio.hca").as_posix()),
-                bundle.Path(output.as_posix()),
+            media_audio._run_hca_to_wav_with_vgmstream(
+                media_audio.Path((tmp_path / "audio.hca").as_posix()),
+                media_audio.Path(output.as_posix()),
                 SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=0.001 if not cancel else 10),
             )
         )
@@ -285,13 +290,13 @@ def test_vgmstream_success_removes_nonempty_staging_directory(
         (staged_output.parent / "decoder.log").write_text("diagnostic")
         return _SuccessfulVgmstreamProcess()
 
-    monkeypatch.setattr(bundle, "_get_vgmstream_cli", lambda: "vgmstream-cli")
-    monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(media_audio, "_get_vgmstream_cli", lambda: "vgmstream-cli")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
 
     decoded = asyncio.run(
-        bundle._run_hca_to_wav_with_vgmstream(
-            bundle.Path((tmp_path / "audio.hca").as_posix()),
-            bundle.Path(output.as_posix()),
+        media_audio._run_hca_to_wav_with_vgmstream(
+            media_audio.Path((tmp_path / "audio.hca").as_posix()),
+            media_audio.Path(output.as_posix()),
             SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=1),
         )
     )
@@ -406,7 +411,7 @@ def test_repeated_cancel_during_terminate_runs_single_reap(
     calls = {"n": 0}
     started = asyncio.Event()
     release = asyncio.Event()
-    original_terminate = bundle._terminate_process
+    original_terminate = media_process._terminate_process
 
     async def slow_terminate(proc) -> None:
         calls["n"] += 1
@@ -414,10 +419,10 @@ def test_repeated_cancel_during_terminate_runs_single_reap(
         await release.wait()
         await original_terminate(proc)
 
-    monkeypatch.setattr(bundle, "_terminate_process", slow_terminate)
+    monkeypatch.setattr(media_process, "_terminate_process", slow_terminate)
 
     async def scenario() -> None:
-        task = asyncio.create_task(bundle._wait_for_process(process, 10))
+        task = asyncio.create_task(media_process._wait_for_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         await started.wait()
@@ -478,7 +483,7 @@ def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
     calls = {"n": 0}
     started = asyncio.Event()
     release = asyncio.Event()
-    original_terminate = bundle._terminate_process
+    original_terminate = media_process._terminate_process
 
     async def slow_terminate(proc) -> None:
         calls["n"] += 1
@@ -486,10 +491,10 @@ def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
         await release.wait()
         await original_terminate(proc)
 
-    monkeypatch.setattr(bundle, "_terminate_process", slow_terminate)
+    monkeypatch.setattr(media_process, "_terminate_process", slow_terminate)
 
     async def scenario() -> None:
-        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
+        task = asyncio.create_task(media_process._communicate_with_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         await started.wait()
@@ -510,7 +515,7 @@ def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
 @pytest.mark.parametrize(
     ("module", "waiter", "task_attribute"),
     [
-        (bundle, bundle._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
+        (media_process, media_process._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
         (storage_rclone, storage_rclone._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
     ],
 )
@@ -570,10 +575,10 @@ def test_cancelled_communicate_preserves_cancellation_when_termination_fails(
         await fail_termination.wait()
         raise RuntimeError("termination failed")
 
-    monkeypatch.setattr(bundle, "_terminate_process", failing_terminate)
+    monkeypatch.setattr(media_process, "_terminate_process", failing_terminate)
 
     async def scenario() -> asyncio.CancelledError:
-        task = asyncio.create_task(bundle._communicate_with_process(process, 10))
+        task = asyncio.create_task(media_process._communicate_with_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         await termination_started.wait()

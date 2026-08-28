@@ -8,6 +8,7 @@ from PIL import Image
 
 from updater import security
 from updater.bundle import pipeline as bundle
+from updater.media import images as media_images
 
 
 def test_resolve_secure_path_accepts_nested_relative_path(tmp_path: Path) -> None:
@@ -166,7 +167,7 @@ def test_save_image_formats_uses_closed_race_safe_tempfile(
     )
 
     with Image.new("RGBA", (1, 1), (255, 0, 0, 255)) as image:
-        saved_paths = bundle._save_image_formats(image, save_path, ("PNG",))
+        saved_paths = media_images.save_image_formats(image, save_path, ("PNG",))
 
     assert saved_paths == [tmp_path / "texture.PNG"]
     assert len(closed_descriptors) == 1

@@ -6,13 +6,13 @@ from typing import Any, cast
 
 import orjson as json
 
-from updater.bundle.images import (
+from updater.bundle.paths import build_unityfs_save_path, resolve_generated_child_path
+from updater.media.images import (
     DEFAULT_PNG_COMPRESSION,
     DEFAULT_WEBP_METHOD,
     render_image_asset,
     save_image_formats,
 )
-from updater.bundle.paths import build_unityfs_save_path, resolve_generated_child_path
 from updater.security import atomic_write_bytes
 from updater.unity_rs_adapter import read_text_bytes
 from updater.utils.live2d import (

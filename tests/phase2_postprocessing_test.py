@@ -8,6 +8,8 @@ import pytest
 
 from updater.bundle import acb_cache as bundle_acb_cache
 from updater.bundle import pipeline as bundle
+from updater.media import audio as media_audio
+from updater.media import video as media_video
 
 
 class _FakeTextAsset:
@@ -152,10 +154,10 @@ def test_acb_audio_outputs_are_isolated_between_sibling_artifacts(
         await output_path.write_bytes(await input_path.read_bytes() + output_path.suffix.encode())
         return True
 
-    monkeypatch.setattr(bundle, "_run_ffmpeg_audio_encode", fake_encode)
+    monkeypatch.setattr(media_audio, "_run_ffmpeg_audio_encode", fake_encode)
     config = SimpleNamespace()
     first_audio = asyncio.run(
-        bundle._process_extracted_audio_file(
+        media_audio._process_extracted_audio_file(
             (first_root / "voice.wav").as_posix(),
             bundle.Path(first_root.as_posix()),
             config,
@@ -163,7 +165,7 @@ def test_acb_audio_outputs_are_isolated_between_sibling_artifacts(
         )
     )
     second_audio = asyncio.run(
-        bundle._process_extracted_audio_file(
+        media_audio._process_extracted_audio_file(
             (second_root / "voice.wav").as_posix(),
             bundle.Path(second_root.as_posix()),
             config,
@@ -217,10 +219,10 @@ def test_movie_video_outputs_and_cleanup_are_isolated_between_siblings(
     async def fake_video_encode(_input_path, output_path, _config):
         return _FakeProcess(output_path, output_path.parent.name.encode()), None
 
-    monkeypatch.setattr(bundle, "_demux_usm_to_m2v", fake_demux)
-    monkeypatch.setattr(bundle, "_run_ffmpeg_video_to_mp4", fake_video_encode)
+    monkeypatch.setattr(media_video, "_demux_usm_to_m2v", fake_demux)
+    monkeypatch.setattr(media_video, "_run_ffmpeg_video_to_mp4", fake_video_encode)
     results = asyncio.run(
-        bundle._process_video_jobs(first_video_jobs + second_video_jobs, SimpleNamespace())
+        media_video._process_video_jobs(first_video_jobs + second_video_jobs, SimpleNamespace())
     )
 
     first_video, first_discarded = results[0]
@@ -274,19 +276,21 @@ def test_video_promotion_failure_is_contained_to_one_job(
         process = _SuccessfulProcess(staged_output, staging_dir, output_path.parent.name.encode())
         return process, None
 
-    original_validate_output_target = bundle.validate_output_target
+    original_validate_output_target = media_video.validate_output_target
 
     def reject_first_promotion(root, output):
         if output.as_posix() == (first_root / "movie.mp4").as_posix():
-            raise bundle.SecurityError("synthetic promotion failure")
+            raise media_video.SecurityError("synthetic promotion failure")
         return original_validate_output_target(root, output)
 
-    monkeypatch.setattr(bundle, "_demux_usm_to_m2v", fake_demux)
-    monkeypatch.setattr(bundle, "_run_ffmpeg_video_to_mp4", fake_video_encode)
-    monkeypatch.setattr(bundle, "validate_output_target", reject_first_promotion)
+    monkeypatch.setattr(media_video, "_demux_usm_to_m2v", fake_demux)
+    monkeypatch.setattr(media_video, "_run_ffmpeg_video_to_mp4", fake_video_encode)
+    monkeypatch.setattr(media_video, "validate_output_target", reject_first_promotion)
 
     results = asyncio.run(
-        bundle._process_video_jobs([first_usm.as_posix(), second_usm.as_posix()], SimpleNamespace())
+        media_video._process_video_jobs(
+            [first_usm.as_posix(), second_usm.as_posix()], SimpleNamespace()
+        )
     )
 
     first_video, first_discarded = results[0]
@@ -452,6 +456,6 @@ def test_acb_decoder_rejects_unsafe_output_and_cleans_private_stage(
         return [outside.as_posix()]
 
     monkeypatch.setattr(bundle, "extract_acb", unsafe_extract)
-    with pytest.raises((ValueError, bundle.SecurityError)):
+    with pytest.raises((ValueError, media_video.SecurityError)):
         _extract_sync(bundle_path, output_root)
     assert not list(output_root.rglob(".acb-*"))

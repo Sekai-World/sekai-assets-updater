@@ -105,3 +105,46 @@ def save_image_formats(
                 temporary_path.unlink(missing_ok=True)
         saved_paths.append(output_path)
     return saved_paths
+
+
+def _get_texture_output_formats(config) -> tuple[str, ...]:
+    value = getattr(config, "TEXTURE_OUTPUT_FORMATS", ("png", "webp"))
+    if isinstance(value, str):
+        formats = [part.strip().lower().removeprefix(".") for part in value.split(",")]
+    else:
+        formats = [str(part).strip().lower().removeprefix(".") for part in value]
+
+    valid_formats = []
+    for image_format in formats:
+        if image_format in {"png", "webp"} and image_format not in valid_formats:
+            valid_formats.append(image_format)
+
+    if not valid_formats and formats:
+        logger.warning("No valid TEXTURE_OUTPUT_FORMATS found, skipping texture export")
+
+    return tuple(valid_formats)
+
+
+def _get_texture_webp_method(config) -> int:
+    value = getattr(config, "TEXTURE_WEBP_METHOD", DEFAULT_WEBP_METHOD)
+    try:
+        method = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid TEXTURE_WEBP_METHOD=%r, using default", value)
+        return DEFAULT_WEBP_METHOD
+    if not 0 <= method <= 6:
+        logger.warning("TEXTURE_WEBP_METHOD must be within 0-6, got %r; using default", value)
+        return DEFAULT_WEBP_METHOD
+    return method
+
+
+def _get_texture_png_compression(config) -> str | int:
+    value = getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)
+    # unity-rs 0.5+ also accepts an explicit zlib level (0-9).
+    if type(value) is int and 0 <= value <= 9:
+        return value
+    text = str(value).lower()
+    if text in {"fast", "default", "best"}:
+        return text
+    logger.warning("Invalid TEXTURE_PNG_COMPRESSION=%r, using default", value)
+    return DEFAULT_PNG_COMPRESSION

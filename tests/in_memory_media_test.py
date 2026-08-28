@@ -14,6 +14,7 @@ import cridecoder
 import pytest
 
 from updater.bundle import pipeline as bundle
+from updater.media import video as media_video
 
 
 class _FakeUnityObject:
@@ -234,7 +235,7 @@ def test_process_video_job_transcodes_m2v_without_demux(
     m2v_path.write_bytes(b"video-stream")
 
     monkeypatch.setattr(
-        bundle,
+        media_video,
         "_demux_usm_to_m2v",
         lambda *_args, **_kwargs: pytest.fail("m2v jobs must not be demuxed again"),
     )
@@ -252,11 +253,11 @@ def test_process_video_job_transcodes_m2v_without_demux(
     async def fake_wait(process, _timeout):
         return process.returncode
 
-    monkeypatch.setattr(bundle, "_run_ffmpeg_video_to_mp4", fake_run_ffmpeg)
-    monkeypatch.setattr(bundle, "_wait_for_process", fake_wait)
+    monkeypatch.setattr(media_video, "_run_ffmpeg_video_to_mp4", fake_run_ffmpeg)
+    monkeypatch.setattr(media_video, "_wait_for_process", fake_wait)
 
     exported, discarded = asyncio.run(
-        bundle._process_video_job(m2v_path.as_posix(), SimpleNamespace(), asyncio.Semaphore(1))
+        media_video._process_video_job(m2v_path.as_posix(), SimpleNamespace(), asyncio.Semaphore(1))
     )
 
     mp4_path = tmp_path / "movie.mp4"

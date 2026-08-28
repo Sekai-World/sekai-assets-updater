@@ -9,6 +9,8 @@ import pytest
 
 from updater import security
 from updater.bundle import pipeline as bundle
+from updater.media import audio as media_audio
+from updater.media import video as media_video
 from updater.net import download as net_download
 
 
@@ -24,9 +26,9 @@ def test_hca_decoder_decodes_in_memory_and_writes_atomically(
         decoder_calls.append(hca_data)
         return b"decoded"
 
-    monkeypatch.setattr(bundle, "decode_hca_to_wav_bytes", fake_decode_bytes)
+    monkeypatch.setattr(media_audio, "decode_hca_to_wav_bytes", fake_decode_bytes)
     decoded = asyncio.run(
-        bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
+        media_audio._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
     )
 
     assert decoded is True
@@ -46,9 +48,9 @@ def test_hca_decoder_reports_failure_without_partial_output(
     def failing_decode_bytes(_hca_data: bytes) -> bytes:
         raise ValueError("corrupt hca")
 
-    monkeypatch.setattr(bundle, "decode_hca_to_wav_bytes", failing_decode_bytes)
+    monkeypatch.setattr(media_audio, "decode_hca_to_wav_bytes", failing_decode_bytes)
     decoded = asyncio.run(
-        bundle._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
+        media_audio._run_hca_to_wav_with_cridecoder(input_path, output_path, SimpleNamespace())
     )
 
     assert decoded is False
@@ -156,9 +158,9 @@ def test_usm_extractor_uses_private_staging_and_promotes_selected_result(
 
     monkeypatch.setattr(bundle.cridecoder, "extract_usm", fake_extract_usm)
     executor = ThreadPoolExecutor(max_workers=1)
-    monkeypatch.setattr(bundle, "_get_shared_usm_process_pool", lambda _config: executor)
+    monkeypatch.setattr(media_video, "_get_shared_usm_process_pool", lambda _config: executor)
     try:
-        selected = asyncio.run(bundle._demux_usm_to_m2v(usm_path, SimpleNamespace()))
+        selected = asyncio.run(media_video._demux_usm_to_m2v(usm_path, SimpleNamespace()))
     finally:
         executor.shutdown(wait=True)
 

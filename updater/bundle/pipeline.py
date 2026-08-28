@@ -8,7 +8,7 @@ import shutil
 import tempfile
 from functools import partial
 from pathlib import Path as StdPath
-from typing import Dict, List, assert_never
+from typing import Dict, List
 
 import cridecoder as cridecoder
 from anyio import Path
@@ -16,24 +16,9 @@ from anyio import Path
 from updater.bundle.acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
 )
-from updater.bundle.audio import (
-    HcaDecodeBackend,
-    run_ffmpeg_audio_encode,
-    run_hca_with_cridecoder,
-    run_hca_with_vgmstream,
-)
-from updater.bundle.audio import (
-    runtime as _audio_runtime,
-)
 from updater.bundle.extraction import extract_unity_objects
-from updater.bundle.images import (
-    save_image_formats as _save_image_formats,  # noqa: F401
-)
 from updater.bundle.paths import (
     build_unityfs_save_path as _build_unityfs_save_path,  # noqa: F401
-)
-from updater.bundle.paths import (
-    canonical_root as _canonical_root,
 )
 from updater.bundle.paths import (
     discard_exported_file as _discard_exported_file_sync,
@@ -59,25 +44,23 @@ from updater.bundle.paths import (
 from updater.bundle.paths import (
     stream_files as _stream_files,
 )
-from updater.bundle.video import (
-    demux_usm_to_m2v,
-    run_ffmpeg_video_to_mp4,
+from updater.media.acb import decode_acb_bytes, extract_acb
+from updater.media.audio import (
+    _process_extracted_audio_file,
 )
-from updater.bundle.video import (
-    runtime as _video_runtime,
+from updater.media.images import (
+    _get_texture_output_formats,
+    _get_texture_png_compression,
+    _get_texture_webp_method,
 )
-from updater.external_process import (
-    EXTERNAL_PROCESS_TERMINATE_GRACE,
-    TERMINATE_TASK_ATTRIBUTE,
-    cleanup_process_output,
-    terminate_process,
-    wait_for_process,
+from updater.media.images import (
+    save_image_formats as _save_image_formats,  # noqa: F401
 )
-from updater.external_process import (
-    get_external_process_timeout as _get_external_process_timeout,
-)
-from updater.external_process import (
-    set_process_output_paths as _set_process_output_paths,
+from updater.media.video import (
+    DEFAULT_USM_IN_MEMORY_MAX_BYTES,
+    _demux_usm_sources_in_memory,
+    _get_usm_in_memory_limit,
+    _process_video_jobs,
 )
 from updater.modes import (  # noqa: F401  (re-exported until pipeline.py is dissolved)
     is_chart_score_bundle,
@@ -87,7 +70,6 @@ from updater.runtime import (
     runtime as _bundle_runtime,
 )
 from updater.security import (
-    SecurityError,
     atomic_write_bytes,
     atomic_write_stream,
     secure_existing_output,
@@ -95,106 +77,11 @@ from updater.security import (
     validate_output_target,
 )
 from updater.unity_rs_adapter import load_bundle as _load_unity_bundle
-from updater.utils.acb import decode_acb_bytes, extract_acb
-from updater.utils.hca import decode_hca_to_wav_bytes
 
 logger = logging.getLogger("live2d")
 
-
-async def _terminate_process(process) -> None:
-    await terminate_process(process, EXTERNAL_PROCESS_TERMINATE_GRACE)
-
-
-async def _wait_for_process(process, timeout: float) -> int:
-    return await wait_for_process(
-        process,
-        timeout,
-        _terminate_process,
-        task_attribute=TERMINATE_TASK_ATTRIBUTE,
-        logger=logger,
-    )
-
-
-async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
-    return await wait_for_process(
-        process,
-        timeout,
-        _terminate_process,
-        task_attribute=TERMINATE_TASK_ATTRIBUTE,
-        logger=logger,
-        communicate=True,
-    )
-
-
-def _cleanup_process_output(process, *, remove_direct_output: bool = False) -> None:
-    cleanup_process_output(process, remove_direct_output=remove_direct_output, logger=logger)
-
-
-def _get_texture_output_formats(config) -> tuple[str, ...]:
-    value = getattr(config, "TEXTURE_OUTPUT_FORMATS", ("png", "webp"))
-    if isinstance(value, str):
-        formats = [part.strip().lower().removeprefix(".") for part in value.split(",")]
-    else:
-        formats = [str(part).strip().lower().removeprefix(".") for part in value]
-
-    valid_formats = []
-    for image_format in formats:
-        if image_format in {"png", "webp"} and image_format not in valid_formats:
-            valid_formats.append(image_format)
-
-    if not valid_formats and formats:
-        logger.warning("No valid TEXTURE_OUTPUT_FORMATS found, skipping texture export")
-
-    return tuple(valid_formats)
-
-
-def _get_texture_webp_method(config) -> int:
-    from updater.bundle.images import DEFAULT_WEBP_METHOD
-
-    value = getattr(config, "TEXTURE_WEBP_METHOD", DEFAULT_WEBP_METHOD)
-    try:
-        method = int(value)
-    except (TypeError, ValueError):
-        logger.warning("Invalid TEXTURE_WEBP_METHOD=%r, using default", value)
-        return DEFAULT_WEBP_METHOD
-    if not 0 <= method <= 6:
-        logger.warning("TEXTURE_WEBP_METHOD must be within 0-6, got %r; using default", value)
-        return DEFAULT_WEBP_METHOD
-    return method
-
-
-def _get_texture_png_compression(config) -> str | int:
-    from updater.bundle.images import DEFAULT_PNG_COMPRESSION
-
-    value = getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)
-    # unity-rs 0.5+ also accepts an explicit zlib level (0-9).
-    if type(value) is int and 0 <= value <= 9:
-        return value
-    text = str(value).lower()
-    if text in {"fast", "default", "best"}:
-        return text
-    logger.warning("Invalid TEXTURE_PNG_COMPRESSION=%r, using default", value)
-    return DEFAULT_PNG_COMPRESSION
-
-
 _get_shared_audio_file_semaphore = _bundle_runtime.audio_file_semaphore
-_get_shared_hca_decode_semaphore = _bundle_runtime.hca_decode_semaphore
-_get_shared_audio_encoder_semaphore = _bundle_runtime.audio_encoder_semaphore
-_get_shared_video_transcode_semaphore = _bundle_runtime.video_transcode_semaphore
 _get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
-_get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
-
-
-def _get_hca_decode_backend(config) -> HcaDecodeBackend:
-    return _audio_runtime.decode_backend(config)
-
-
-def _get_vgmstream_cli() -> str | None:
-    return _audio_runtime.vgmstream_cli()
-
-
-def _report_hca_decoder(message: str) -> None:
-    _audio_runtime.report_decoder(message)
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -261,389 +148,6 @@ async def _resolve_existing_usm_path(expected_path: Path, save_dir: Path) -> Pat
     raise FileNotFoundError(f"{expected_path} not found in {save_dir}")
 
 
-async def _get_ffmpeg_video_encoder(config) -> tuple[str | None, list[str]]:
-    return await _video_runtime.get_encoder(
-        config,
-        communicate=_communicate_with_process,
-        timeout=_get_external_process_timeout(config),
-    )
-
-
-def _disable_ffmpeg_video_encoder() -> None:
-    _video_runtime.disable_encoder()
-
-
-async def _demux_usm_to_m2v(usm_path: Path, config) -> Path | None:
-    """Demux a USM into its raw .m2v video stream via cridecoder.
-
-    Returns the path to the extracted video stream, or ``None`` if no video
-    stream was produced. Audio streams are not exported here — the video
-    pipeline only needs the elementary video for ffmpeg to transcode.
-    """
-    return await demux_usm_to_m2v(
-        usm_path,
-        process_pool=_get_shared_usm_process_pool(config),
-        canonical_root=_canonical_root,
-        resolve_generated_child_path=_resolve_generated_child_path,
-    )
-
-
-async def _run_ffmpeg_video_to_mp4(
-    input_path: Path,
-    output_path: Path,
-    config,
-) -> tuple[asyncio.subprocess.Process, str | None]:
-    return await run_ffmpeg_video_to_mp4(
-        input_path,
-        output_path,
-        config,
-        get_encoder=_get_ffmpeg_video_encoder,
-        set_output_paths=_set_process_output_paths,
-    )
-
-
-async def _run_hca_to_wav_with_cridecoder(
-    input_path: Path,
-    output_path: Path,
-    config,
-) -> bool:
-    return await run_hca_with_cridecoder(
-        input_path,
-        output_path,
-        report_decoder=_report_hca_decoder,
-        decode_bytes=decode_hca_to_wav_bytes,
-    )
-
-
-async def _run_hca_to_wav_with_vgmstream(
-    input_path: Path,
-    output_path: Path,
-    config,
-) -> bool:
-    return await run_hca_with_vgmstream(
-        input_path,
-        output_path,
-        executable=_get_vgmstream_cli(),
-        report_decoder=_report_hca_decoder,
-        communicate=_communicate_with_process,
-        timeout=_get_external_process_timeout(config),
-        set_output_paths=_set_process_output_paths,
-    )
-
-
-async def _run_hca_to_wav(
-    input_path: Path,
-    output_path: Path,
-    config,
-) -> bool:
-    async with _get_shared_hca_decode_semaphore(config):
-        backend = _get_hca_decode_backend(config)
-
-        match backend:
-            case "auto":
-                if await _run_hca_to_wav_with_cridecoder(input_path, output_path, config):
-                    return True
-                logger.warning(
-                    "Falling back to vgmstream-cli for %s after cridecoder failure",
-                    input_path,
-                )
-                return await _run_hca_to_wav_with_vgmstream(input_path, output_path, config)
-            case "python":
-                return await _run_hca_to_wav_with_cridecoder(
-                    input_path,
-                    output_path,
-                    config,
-                )
-            case "vgmstream":
-                if await _run_hca_to_wav_with_vgmstream(input_path, output_path, config):
-                    return True
-                logger.warning(
-                    "Falling back to cridecoder for %s after vgmstream-cli failure",
-                    input_path,
-                )
-                return await _run_hca_to_wav_with_cridecoder(
-                    input_path,
-                    output_path,
-                    config,
-                )
-            case unreachable:
-                assert_never(unreachable)
-
-
-async def _run_ffmpeg_audio_encode(
-    input_path: Path,
-    output_path: Path,
-    config,
-) -> bool:
-    return await run_ffmpeg_audio_encode(
-        input_path,
-        output_path,
-        semaphore=_get_shared_audio_encoder_semaphore(config),
-        wait=_wait_for_process,
-        timeout=_get_external_process_timeout(config),
-        set_output_paths=_set_process_output_paths,
-        cleanup_output=_cleanup_process_output,
-    )
-
-
-async def _process_extracted_audio_file(
-    extracted_audio_file: str,
-    save_dir: Path,
-    config,
-    file_semaphore: asyncio.Semaphore,
-) -> list[Path]:
-    async with file_semaphore:
-        extracted_audio_file_path = Path(extracted_audio_file)
-        exported_audio_files: list[Path] = []
-
-        try:
-            save_root = _canonical_root(StdPath(save_dir.as_posix()))
-            validate_contained_file(
-                save_root,
-                StdPath(extracted_audio_file).resolve().relative_to(save_root).as_posix(),
-            )
-            if not await extracted_audio_file_path.exists():
-                logger.warning("%s not found in %s", extracted_audio_file_path, save_dir)
-                return exported_audio_files
-
-            if (await extracted_audio_file_path.stat()).st_size == 0:
-                logger.warning("%s is empty, skipping", extracted_audio_file_path)
-                return exported_audio_files
-
-            if extracted_audio_file_path.suffix.lower() == ".wav":
-                wav_path = extracted_audio_file_path
-            else:
-                wav_path = extracted_audio_file_path.with_suffix(".wav")
-                if not await _run_hca_to_wav(extracted_audio_file_path, wav_path, config):
-                    logger.warning("Failed to convert %s to wav", extracted_audio_file_path)
-                    return exported_audio_files
-
-                await extracted_audio_file_path.unlink()
-                logger.debug(
-                    "Converted %s to wav and removed the original file",
-                    extracted_audio_file_path,
-                )
-            exported_audio_files.append(wav_path)
-
-            encode_tasks = []
-
-            mp3_path = wav_path.with_suffix(".mp3")
-            encode_tasks.append(
-                (
-                    "mp3",
-                    mp3_path,
-                    _run_ffmpeg_audio_encode(wav_path, mp3_path, config),
-                )
-            )
-
-            if "music" in save_dir.parts:
-                flac_path = wav_path.with_suffix(".flac")
-                encode_tasks.append(
-                    (
-                        "flac",
-                        flac_path,
-                        _run_ffmpeg_audio_encode(wav_path, flac_path, config),
-                    )
-                )
-
-            encode_results = await asyncio.gather(
-                *(task for _, _, task in encode_tasks),
-                return_exceptions=True,
-            )
-            for (format_name, output_path, _), result in zip(
-                encode_tasks,
-                encode_results,
-                strict=True,
-            ):
-                if isinstance(result, Exception):
-                    logger.error(
-                        "Failed to convert %s to %s",
-                        wav_path,
-                        format_name,
-                        exc_info=(type(result), result, result.__traceback__),
-                    )
-                elif not result:
-                    logger.warning("Failed to convert %s to %s", wav_path, format_name)
-                else:
-                    logger.debug("Converted %s to %s", wav_path, format_name)
-                    exported_audio_files.append(output_path)
-        except (asyncio.CancelledError, asyncio.TimeoutError):
-            raise
-        except Exception as exc:
-            logger.exception(
-                "Failed processing extracted audio %s: %s",
-                extracted_audio_file_path,
-                exc,
-            )
-
-        return exported_audio_files
-
-
-async def _process_video_job(
-    usm_output_path_text: str,
-    config,
-    video_transcode_semaphore: asyncio.Semaphore,
-) -> tuple[list[Path], list[Path]]:
-    usm_output_path = Path(usm_output_path_text)
-    if not await usm_output_path.exists():
-        return [], []
-
-    exported_video_files: list[Path] = []
-    discarded_video_files: list[Path] = []
-    video_output_path = usm_output_path.with_suffix(".mp4")
-    m2v_path: Path | None = None
-    ffmpeg_process = None
-
-    usm_source: Path | None = None
-    try:
-        if usm_output_path.suffix.lower() == ".m2v":
-            # The extract stage already demuxed the USM in memory; the job
-            # carries the elementary video stream directly.
-            m2v_path = usm_output_path
-        else:
-            usm_source = usm_output_path
-            m2v_path = await _demux_usm_to_m2v(usm_source, config)
-        if m2v_path is None:
-            logger.warning("Failed to demux %s", usm_output_path)
-        else:
-            async with video_transcode_semaphore:
-                ffmpeg_process, encoder_name = await _run_ffmpeg_video_to_mp4(
-                    m2v_path,
-                    video_output_path,
-                    config,
-                )
-                await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
-
-                if ffmpeg_process.returncode != 0 and encoder_name:
-                    _cleanup_process_output(ffmpeg_process)
-                    logger.warning(
-                        "Failed to convert %s to mp4 with %s, falling back to software encoding",
-                        usm_output_path,
-                        encoder_name,
-                    )
-                    _disable_ffmpeg_video_encoder()
-                    ffmpeg_process, _ = await _run_ffmpeg_video_to_mp4(
-                        m2v_path,
-                        video_output_path,
-                        config,
-                    )
-                    await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
-
-                if ffmpeg_process.returncode != 0:
-                    _cleanup_process_output(ffmpeg_process)
-                    logger.warning("Failed to convert %s to mp4", usm_output_path)
-                else:
-                    staged_output = getattr(ffmpeg_process, "_bundle_output_path", None)
-                    if staged_output is not None:
-                        secure_existing_output(staged_output.parent, staged_output)
-                        validate_output_target(video_output_path.parent, video_output_path)
-                        os.replace(staged_output, video_output_path)
-                        staging_dir = getattr(ffmpeg_process, "_bundle_staging_dir", None)
-                        if staging_dir is not None:
-                            shutil.rmtree(staging_dir, ignore_errors=True)
-                    logger.debug("Converted %s to mp4", usm_output_path)
-                    exported_video_files.append(video_output_path)
-    except (OSError, SecurityError, ValueError):
-        if ffmpeg_process is not None:
-            _cleanup_process_output(ffmpeg_process)
-        logger.exception("Failed to process video %s", usm_output_path)
-    finally:
-        for discarded_file in (m2v_path, usm_source):
-            if discarded_file is None:
-                continue
-            try:
-                if await discarded_file.exists():
-                    await discarded_file.unlink()
-                    logger.debug("Removed %s", discarded_file)
-                    discarded_video_files.append(discarded_file)
-            except OSError:
-                logger.exception(
-                    "Failed to remove video intermediate %s",
-                    discarded_file,
-                )
-
-    return exported_video_files, discarded_video_files
-
-
-async def _process_video_jobs(
-    video_jobs: list[str],
-    config,
-) -> list[tuple[list[Path], list[Path]]]:
-    video_transcode_semaphore = _get_shared_video_transcode_semaphore(config)
-    video_tasks = [
-        asyncio.create_task(
-            _process_video_job(
-                usm_output_path_text,
-                config,
-                video_transcode_semaphore,
-            )
-        )
-        for usm_output_path_text in video_jobs
-    ]
-    return await asyncio.gather(*video_tasks)
-
-
-# Above this size, USM demuxing falls back to the disk-streaming path so that
-# concurrent extract workers do not hold whole movies in memory.
-DEFAULT_USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
-
-
-def _get_usm_in_memory_limit(config) -> int:
-    value = getattr(config, "USM_IN_MEMORY_MAX_BYTES", DEFAULT_USM_IN_MEMORY_MAX_BYTES)
-    try:
-        limit = int(value)
-    except (TypeError, ValueError):
-        logger.warning("Invalid USM_IN_MEMORY_MAX_BYTES=%r, using default", value)
-        return DEFAULT_USM_IN_MEMORY_MAX_BYTES
-    return max(0, limit)
-
-
-def _demux_usm_sources_in_memory(
-    source_paths: list[StdPath],
-    usm_output_path: StdPath,
-    save_dir: StdPath,
-    limit_bytes: int,
-) -> StdPath | None:
-    """Demux USM parts fully in memory to one ``.m2v`` next to the sources.
-
-    Returns the written video-stream path, or ``None`` when the sources exceed
-    the in-memory budget or the demux fails — callers then use the existing
-    disk-streaming merge + file demux path.
-    """
-    try:
-        total_bytes = sum(path.stat().st_size for path in source_paths)
-    except OSError:
-        return None
-    if total_bytes > limit_bytes:
-        return None
-
-    try:
-        usm_data = b"".join(path.read_bytes() for path in source_paths)
-        streams = cridecoder.extract_usm_bytes(usm_data, None, False)
-        selected = None
-        for stream in streams:
-            extension = str(stream.get("extension") or "").lower().lstrip(".")
-            if extension == "m2v":
-                selected = stream
-                break
-            if selected is None:
-                selected = stream
-        if selected is None:
-            logger.warning("cridecoder produced no usable video stream for %s", usm_output_path)
-            return None
-        m2v_path = _resolve_generated_child_path(save_dir, f"{usm_output_path.stem}.m2v")
-        validate_output_target(save_dir, m2v_path)
-        atomic_write_bytes(m2v_path, selected["data"])
-        return m2v_path
-    except Exception:
-        logger.warning(
-            "In-memory USM demux failed for %s, falling back to file demux",
-            usm_output_path,
-            exc_info=True,
-        )
-        return None
-
-
 def _extract_bundle_files_sync(
     bundle_save_path: str,
     bundle: Dict[str, str],
@@ -657,7 +161,7 @@ def _extract_bundle_files_sync(
     png_compression: str | int | None = None,
     usm_in_memory_limit: int | None = None,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
-    from updater.bundle.images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
+    from updater.media.images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
 
     if usm_in_memory_limit is None:
         usm_in_memory_limit = DEFAULT_USM_IN_MEMORY_MAX_BYTES
