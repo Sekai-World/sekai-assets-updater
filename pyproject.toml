@@ -83,8 +83,7 @@ include = [
     "updater/security.py",
     "updater/state.py",
     "updater/media/acb.py",
-    "updater/utils/chart.py",
-    "updater/utils/playable.py",
+    "updater/extract/playable.py",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 from pathlib import Path
@@ -8,40 +9,47 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from anyio import Path as AsyncPath
 
 import main
-from updater import specialized
 from updater.modes import is_live2d_bundle
 from updater.modes import filter_bundles_for_mode, get_mode_bundle_prefixes
 from updater.net.plan import select_bundles_for_download
-from updater.specialized import (
+from updater.modes import (
+    get_enabled_specialized_modes,
+    get_required_bundle_prefixes,
+    mode_uses_bundle_pipeline,
+    needs_live2d_bundle_cache,
+    needs_shared_workspace,
+    retains_live2d_extracted_outputs,
+)
+from updater.postprocess import charts, dispatch, incremental_state, live2d_models
+from updater.postprocess.charts import (
+    collect_score_files,
+    get_json_url,
+    has_local_chart_sources,
+    music_id_from_score_path,
+    needs_temporary_chart_source,
+)
+from updater.postprocess.config import (
+    get_chart_data_server,
+    get_normal_storage_candidates,
+    get_specialized_storage,
+)
+from updater.postprocess.dispatch import run_specialized_postprocess
+from updater.postprocess.incremental_state import (
     chart_fingerprint,
     chart_state_path,
-    collect_score_files,
     compute_motion_bundle_hashes,
     compute_score_hashes,
-    get_chart_data_server,
-    get_enabled_specialized_modes,
-    get_normal_storage_candidates,
-    get_required_bundle_prefixes,
-    get_specialized_storage,
-    has_local_chart_sources,
     hash_score_file,
     live2d_state_path,
     load_chart_state,
     load_live2d_state,
-    mode_uses_bundle_pipeline,
-    music_id_from_score_path,
-    needs_live2d_bundle_cache,
-    needs_shared_workspace,
-    needs_temporary_chart_source,
     pending_motion_bundles,
     pending_score_paths,
-    retains_live2d_extracted_outputs,
-    run_specialized_postprocess,
     validate_chart_state,
     validate_live2d_state,
 )
-from updater.utils.chart import get_json_url
-from updater.worker import get_bundle_cache_path, get_bundle_cache_root, recover_live2d_model_outputs
+from updater.postprocess.live2d_models import recover_live2d_model_outputs
+from updater.workspace import get_bundle_cache_path, get_bundle_cache_root
 
 
 class SpecializedHelpersTest(unittest.TestCase):
@@ -252,11 +260,11 @@ class SpecializedHelpersTest(unittest.TestCase):
 
     def test_remote_model_paths_reject_unsafe_entries(self):
         with self.assertRaises(ValueError):
-            specialized._models_from_remote_entries(
+            live2d_models._models_from_remote_entries(
                 [{"Path": "../old.model3.json", "IsDir": False}]
             )
         with self.assertRaises(ValueError):
-            specialized._models_from_remote_entries(
+            live2d_models._models_from_remote_entries(
                 [{"Path": "/absolute.model3.json", "IsDir": False}]
             )
 
@@ -267,7 +275,7 @@ class SpecializedHelpersTest(unittest.TestCase):
             "args": ["copyto", "src", "dst", "--s3-no-check-bucket", "--config", "opaque.conf"],
         }
         self.assertEqual(
-            specialized._listing_args(storage, "sekai-ts:/live2d/model"),
+            live2d_models._listing_args(storage, "sekai-ts:/live2d/model"),
             [
                 "lsjson",
                 "sekai-ts:/live2d/model",
@@ -319,11 +327,10 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 score.write_text("# SUS", encoding="utf-8")
             config = SimpleNamespace(REGION=SimpleNamespace(name="JP"))
 
-            with patch.object(
-                specialized, "get_list", new=AsyncMock(return_value=[{"id": 1}, {"id": 2}])
+            with patch.object(charts, "get_list", new=AsyncMock(return_value=[{"id": 1}, {"id": 2}])
             ):
-                with patch.object(specialized, "render_chart", new=AsyncMock()) as render:
-                    await specialized._render_charts(
+                with patch.object(charts, "render_chart", new=AsyncMock()) as render:
+                    await charts._render_charts(
                         config, extracted_dir, [r"^music/music_score/001_song$"]
                     )
 
@@ -344,13 +351,11 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 score.write_text("# SUS", encoding="utf-8")
             config = SimpleNamespace(REGION=SimpleNamespace(name="JP"))
 
-            with patch.object(
-                specialized,
-                "get_list",
+            with patch.object(charts, "get_list",
                 new=AsyncMock(return_value=[{"id": 1}, {"id": 12345}]),
             ):
-                with patch.object(specialized, "render_chart", new=AsyncMock()) as render:
-                    await specialized._render_charts(config, extracted_dir)
+                with patch.object(charts, "render_chart", new=AsyncMock()) as render:
+                    await charts._render_charts(config, extracted_dir)
 
             self.assertEqual(render.await_count, 2)
             rendered_paths = {call.args[1] for call in render.await_args_list}
@@ -388,8 +393,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 return [AsyncPath(str(output / "unit.model3.json"))]
 
             extract_bundle = AsyncMock(side_effect=extract)
-            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("updater.worker.extract_asset_bundle", new=extract_bundle):
+            with patch("updater.postprocess.live2d_models.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.postprocess.live2d_models.extract_asset_bundle", new=extract_bundle):
                     await recover_live2d_model_outputs(config, bundles)
 
             self.assertTrue((extracted / "live2d" / "model").is_dir())
@@ -427,8 +432,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 output.write_text("new", encoding="utf-8")
                 return [AsyncPath(str(output))]
 
-            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("updater.worker.extract_asset_bundle", new=AsyncMock(side_effect=extract)):
+            with patch("updater.postprocess.live2d_models.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.postprocess.live2d_models.extract_asset_bundle", new=AsyncMock(side_effect=extract)):
                     with self.assertRaisesRegex(RuntimeError, "extracting cached model bundle"):
                         await recover_live2d_model_outputs(
                             config,
@@ -455,8 +460,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 UNITY_VERSION="2022.3",
             )
             extract = AsyncMock()
-            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("updater.worker.extract_asset_bundle", new=extract):
+            with patch("updater.postprocess.live2d_models.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.postprocess.live2d_models.extract_asset_bundle", new=extract):
                     with self.assertRaisesRegex(RuntimeError, "bundle file is missing"):
                         await recover_live2d_model_outputs(
                             config,
@@ -494,7 +499,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(root / "extracted")),
                 UNITY_VERSION="2022.3",
             )
-            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+            with patch("updater.postprocess.live2d_models.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
                 with self.assertRaisesRegex(RuntimeError, "cached motion source is missing"):
                     await recover_live2d_model_outputs(
                         config, {"unit": {"bundleName": "live2d/model/unit"}}
@@ -588,8 +593,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(live2d_models, "upload_directory", new=AsyncMock()) as upload:
                     process = MagicMock(returncode=0)
                     process.communicate = AsyncMock(
                         return_value=(
@@ -599,16 +604,16 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                     )
                     process.wait = AsyncMock()
                     with patch.object(
-                        specialized.asyncio,
+                        asyncio,
                         "create_subprocess_exec",
                         new=AsyncMock(return_value=process),
                     ):
                         await run_specialized_postprocess("live2d", config)
 
             restore.assert_awaited_once_with(
-                specialized.Path(str(bundle_cache / "live2d" / "motion")),
-                specialized.Path(str(extracted_dir / "live2d" / "motion")),
-                specialized.Path(str(extracted_dir / "live2d" / "model")),
+                AsyncPath(str(bundle_cache / "live2d" / "motion")),
+                AsyncPath(str(extracted_dir / "live2d" / "motion")),
+                AsyncPath(str(extracted_dir / "live2d" / "model")),
                 "2022.3",
                 config=config,
                 param_id_map={},
@@ -616,26 +621,25 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(upload.await_count, 2)
             self.assertEqual(
-                upload.await_args_list[0].args[1], specialized.Path("live-target/live2d")
+                upload.await_args_list[0].args[1], AsyncPath("live-target/live2d")
             )
             self.assertEqual(
-                upload.await_args_list[1].args[1], specialized.Path("live-target/live2d")
+                upload.await_args_list[1].args[1], AsyncPath("live-target/live2d")
             )
 
     async def test_live2d_listing_failure_does_not_publish_index(self):
-        with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()) as assets:
-            with patch.object(
-                specialized, "_publish_live2d_model_list", new=AsyncMock()
+        with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()) as assets:
+            with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()
             ) as publish:
                 process = MagicMock(returncode=1)
                 process.communicate = AsyncMock(return_value=(b"[]", b"failed"))
                 with patch.object(
-                    specialized.asyncio,
+                    asyncio,
                     "create_subprocess_exec",
                     new=AsyncMock(return_value=process),
                 ):
                     with self.assertRaises(RuntimeError):
-                        await specialized._remote_model_list(
+                        await live2d_models._remote_model_list(
                             {
                                 "base": "sekai-ts:",
                                 "program": "rclone",
@@ -660,10 +664,10 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
-        with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-            with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+        with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+            with patch.object(live2d_models, "upload_directory", new=AsyncMock()) as upload:
                 with patch.object(
-                    specialized.asyncio, "create_subprocess_exec", new=AsyncMock()
+                    asyncio, "create_subprocess_exec", new=AsyncMock()
                 ) as execute:
                     with self.assertRaisesRegex(ValueError, "copy or copyto"):
                         await run_specialized_postprocess("live2d", config)
@@ -685,7 +689,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
-        with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
+        with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
             await run_specialized_postprocess("live2d", config, skip_missing_sources=True)
         restore.assert_not_awaited()
 
@@ -706,12 +710,10 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 REGION=SimpleNamespace(name="JP"),
                 ASSET_REMOTE_STORAGE=[],
             )
-            with patch.object(
-                specialized,
-                "fetch_chart_sources_from_storage",
+            with patch.object(dispatch, "fetch_chart_sources_from_storage",
                 new=AsyncMock(side_effect=RuntimeError("no source")),
             ) as fetch:
-                with patch.object(specialized, "_render_charts", new=AsyncMock()) as render:
+                with patch.object(dispatch, "_render_charts", new=AsyncMock()) as render:
                     await run_specialized_postprocess("charts", config, skip_missing_sources=True)
             fetch.assert_awaited_once()
             render.assert_not_awaited()
@@ -730,15 +732,14 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
         process = MagicMock(returncode=0)
         process.communicate = AsyncMock(return_value=(b"[]", b""))
         with patch.object(
-            specialized.asyncio,
+            asyncio,
             "create_subprocess_exec",
             new=AsyncMock(return_value=process),
         ) as execute:
-            with patch.object(
-                specialized, "_get_external_process_timeout", return_value=7
+            with patch.object(live2d_models, "_get_external_process_timeout", return_value=7
             ) as timeout:
                 with self.assertRaises(RuntimeError):
-                    await specialized._remote_model_list(
+                    await live2d_models._remote_model_list(
                         {"base": "sekai-ts:", "program": "rclone", "args": ["copy", "src", "dst"]},
                         SimpleNamespace(),
                     )
@@ -748,8 +749,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             "lsjson",
             "sekai-ts:/live2d/model",
             "--recursive",
-            stdout=specialized.asyncio.subprocess.PIPE,
-            stderr=specialized.asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
     async def test_charts_postprocess_uses_local_scores_and_chart_storage(self):
@@ -777,18 +778,17 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 (source_dir / "charts" / "jp").mkdir(parents=True)
                 return set()
 
-            with patch.object(
-                specialized, "fetch_chart_sources_from_storage", new=AsyncMock()
+            with patch.object(dispatch, "fetch_chart_sources_from_storage", new=AsyncMock()
             ) as fetch:
-                with patch.object(specialized, "_render_charts", new=render_charts):
-                    with patch.object(specialized, "upload_directory", new=AsyncMock()) as upload:
+                with patch.object(dispatch, "_render_charts", new=render_charts):
+                    with patch.object(dispatch, "upload_directory", new=AsyncMock()) as upload:
                         await run_specialized_postprocess("charts", config)
 
             fetch.assert_not_awaited()
             self.assertEqual(rendered_dirs, [extracted_dir])
             upload.assert_awaited_once_with(
-                specialized.Path(str(extracted_dir / "charts" / "jp")),
-                specialized.Path("chart-target/jp"),
+                AsyncPath(str(extracted_dir / "charts" / "jp")),
+                AsyncPath("chart-target/jp"),
                 "rclone",
                 [],
                 config=config,
@@ -843,11 +843,10 @@ class ChartIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
         async def upload_dir(mode, source_dir, config):
             upload_calls.append((mode, str(source_dir)))
 
-        with patch.object(specialized, "_render_charts", new=render):
-            with patch.object(
-                specialized, "_upload_specialized_directory", new=upload_dir
+        with patch.object(dispatch, "_render_charts", new=render):
+            with patch.object(dispatch, "_upload_specialized_directory", new=upload_dir
             ):
-                await specialized._process_charts(config, workspace, include_list)
+                await dispatch._process_charts(config, workspace, include_list)
         return rendered_files, upload_calls
 
     async def test_initial_build_no_state_renders_all_and_persists(self):
@@ -943,11 +942,10 @@ class ChartIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
                 nonlocal upload_called
                 upload_called = True
 
-            with patch.object(specialized, "_render_charts", new=render):
-                with patch.object(
-                    specialized, "_upload_specialized_directory", new=upload_dir
+            with patch.object(dispatch, "_render_charts", new=render):
+                with patch.object(dispatch, "_upload_specialized_directory", new=upload_dir
                 ):
-                    await specialized._process_charts(config, workspace)
+                    await dispatch._process_charts(config, workspace)
 
             self.assertFalse(render_called)
             self.assertFalse(upload_called)
@@ -978,12 +976,11 @@ class ChartIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             async def failing_upload(mode, source_dir, config):
                 raise RuntimeError("upload failed")
 
-            with patch.object(specialized, "_render_charts", new=render):
-                with patch.object(
-                    specialized, "_upload_specialized_directory", new=failing_upload
+            with patch.object(dispatch, "_render_charts", new=render):
+                with patch.object(dispatch, "_upload_specialized_directory", new=failing_upload
                 ):
                     with self.assertRaisesRegex(RuntimeError, "upload failed"):
-                        await specialized._process_charts(config, workspace)
+                        await dispatch._process_charts(config, workspace)
 
             # State should still be the old state (no 002)
             state_after_fail = load_chart_state(self._state_file(config))
@@ -1186,11 +1183,11 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             self._make_model_dir(root)
             config = self._make_config(root)
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1223,22 +1220,22 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             config = self._make_config(root)
 
             # First build to populate state
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
             # Add c.bundle
             self._make_motion(motion_source, "c.bundle", b"v1")
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1268,22 +1265,22 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             config = self._make_config(root)
 
             # First build
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
             # Change a.bundle
             a.write_bytes(b"v2")
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1309,20 +1306,20 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             config = self._make_config(root)
 
             # First build
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
             # Nothing changed — second run should be a no-op
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()) as upload:
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()) as upload:
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1343,22 +1340,22 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             config = self._make_config(root)
 
             # First build
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()):
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()):
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
             # Change moc3 file → fingerprint invalidation → full restore
             (root / "live2d" / "model" / "unit" / "unit.moc3").write_bytes(b"\x01" * 272)
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1388,11 +1385,11 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             # First build: restore a only (mock to only claim we restored a)
             async def restore_first(config_arg, motion_extracted, model_extracted, unity_version, **kwargs):
                 pass
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock(side_effect=restore_first)):
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock(side_effect=restore_first)):
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 
@@ -1404,11 +1401,11 @@ class Live2DIncrementalStateTest(unittest.IsolatedAsyncioTestCase):
             c = self._make_motion(motion_source, "c.bundle", b"v1")
             a.write_bytes(b"v2")
 
-            with patch.object(specialized, "restore_live2d_motions", new=AsyncMock()) as restore:
-                with patch.object(specialized, "_upload_live2d_assets", new=AsyncMock()):
-                    with patch.object(specialized, "_remote_model_list", new=AsyncMock(return_value={})):
-                        with patch.object(specialized, "_publish_live2d_model_list", new=AsyncMock()):
-                            await specialized._process_live2d(
+            with patch.object(dispatch, "restore_live2d_motions", new=AsyncMock()) as restore:
+                with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()):
+                    with patch.object(dispatch, "_remote_model_list", new=AsyncMock(return_value={})):
+                        with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()):
+                            await dispatch._process_live2d(
                                 config, StdPath(str(motion_source)), StdPath(str(root))
                             )
 

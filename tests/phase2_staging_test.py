@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-from updater import specialized, worker
+from updater import worker
+from updater.postprocess import dispatch
 
 
 def _config(
@@ -207,7 +208,7 @@ def test_live2d_postprocess_uses_model_tree_from_pathlib_workspace(
     async def fake_restore(motion_root, motion_output, model_root, *_args, **_kwargs):
         restored.append((motion_root, motion_output, model_root))
 
-    monkeypatch.setattr(specialized, "restore_live2d_motions", fake_restore)
+    monkeypatch.setattr(dispatch, "restore_live2d_motions", fake_restore)
     _run_extract_stage(
         artifact,
         config,
@@ -215,7 +216,7 @@ def test_live2d_postprocess_uses_model_tree_from_pathlib_workspace(
         "live2d/model/08_shizuku/08shizuku_cloth001.model3.json",
     )
 
-    asyncio.run(specialized.run_specialized_postprocess("live2d", config))
+    asyncio.run(dispatch.run_specialized_postprocess("live2d", config))
 
     assert restored == [
         (
