@@ -13,7 +13,7 @@ from pathlib import Path as StdPath
 import cridecoder
 from anyio import Path
 
-from security import (
+from updater.security import (
     SecurityError,
     resolve_secure_path,
     validate_contained_file,

@@ -15,78 +15,78 @@ import aiohttp
 import cridecoder as cridecoder
 from anyio import Path, open_file
 
-from bundle_acb_cache import (
+from updater.bundle.acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
 )
-from bundle_audio import (
+from updater.bundle.audio import (
     HcaDecodeBackend,
     run_ffmpeg_audio_encode,
     run_hca_with_cridecoder,
     run_hca_with_vgmstream,
 )
-from bundle_audio import (
+from updater.bundle.audio import (
     runtime as _audio_runtime,
 )
-from bundle_extraction import extract_unity_objects
-from bundle_images import (
+from updater.bundle.extraction import extract_unity_objects
+from updater.bundle.images import (
     save_image_formats as _save_image_formats,  # noqa: F401
 )
-from bundle_integrity import (
+from updater.bundle.integrity import (
     DownloadIntegrityError,
     RetryableDownloadError,
 )
-from bundle_integrity import (
+from updater.bundle.integrity import (
     validate_unityfs_bundle as _validate_unityfs_bundle,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     build_unityfs_save_path as _build_unityfs_save_path,  # noqa: F401
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     canonical_root as _canonical_root,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     discard_exported_file as _discard_exported_file_sync,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     replace_suffix_secure as _replace_suffix_secure,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     resolve_existing_path as _resolve_existing_path_sync,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     resolve_existing_usm_path as _resolve_existing_usm_path_sync,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     resolve_generated_child_path as _resolve_generated_child_path,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     resolve_local_audio_outputs as _resolve_local_audio_outputs_sync,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     resolve_shared_audio_outputs as _resolve_shared_audio_outputs_sync,
 )
-from bundle_paths import (
+from updater.bundle.paths import (
     stream_files as _stream_files,
 )
-from bundle_runtime import (
+from updater.bundle.runtime import (
     runtime as _bundle_runtime,
 )
-from bundle_video import (
+from updater.bundle.video import (
     demux_usm_to_m2v,
     run_ffmpeg_video_to_mp4,
 )
-from bundle_video import (
+from updater.bundle.video import (
     runtime as _video_runtime,
 )
-from external_process import (
+from updater.external_process import (
     cleanup_process_output,
     terminate_process,
     wait_for_process,
 )
-from external_process import (
+from updater.external_process import (
     set_process_output_paths as _set_process_output_paths,
 )
-from helpers import (
+from updater.helpers import (
     get_download_http_session_options,
     get_download_max_retries,
     get_download_retry_base_delay,
@@ -94,7 +94,7 @@ from helpers import (
     sanitize_http_log_value,
     sanitize_url,
 )
-from security import (
+from updater.security import (
     SecurityError,
     atomic_write_bytes,
     atomic_write_stream,
@@ -103,9 +103,9 @@ from security import (
     validate_contained_file,
     validate_output_target,
 )
-from unity_rs_adapter import load_bundle as _load_unity_bundle
-from utils.acb import decode_acb_bytes, extract_acb
-from utils.hca import decode_hca_to_wav_bytes
+from updater.unity_rs_adapter import load_bundle as _load_unity_bundle
+from updater.utils.acb import decode_acb_bytes, extract_acb
+from updater.utils.hca import decode_hca_to_wav_bytes
 
 logger = logging.getLogger("live2d")
 
@@ -181,7 +181,7 @@ def _get_texture_output_formats(config) -> tuple[str, ...]:
 
 
 def _get_texture_webp_method(config) -> int:
-    from bundle_images import DEFAULT_WEBP_METHOD
+    from updater.bundle.images import DEFAULT_WEBP_METHOD
 
     value = getattr(config, "TEXTURE_WEBP_METHOD", DEFAULT_WEBP_METHOD)
     try:
@@ -196,7 +196,7 @@ def _get_texture_webp_method(config) -> int:
 
 
 def _get_texture_png_compression(config) -> str | int:
-    from bundle_images import DEFAULT_PNG_COMPRESSION
+    from updater.bundle.images import DEFAULT_PNG_COMPRESSION
 
     value = getattr(config, "TEXTURE_PNG_COMPRESSION", DEFAULT_PNG_COMPRESSION)
     # unity-rs 0.5+ also accepts an explicit zlib level (0-9).
@@ -694,7 +694,7 @@ def _extract_bundle_files_sync(
     png_compression: str | int | None = None,
     usm_in_memory_limit: int | None = None,
 ) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
-    from bundle_images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
+    from updater.bundle.images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
 
     if usm_in_memory_limit is None:
         usm_in_memory_limit = DEFAULT_USM_IN_MEMORY_MAX_BYTES

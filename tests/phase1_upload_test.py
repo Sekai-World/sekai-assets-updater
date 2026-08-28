@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-import helpers
-from helpers import _derive_storage_remote_path, get_download_max_retries, upload_to_storage
-from security import SecurityError
+from updater import helpers
+from updater.helpers import _derive_storage_remote_path, get_download_max_retries, upload_to_storage
+from updater.security import SecurityError
 
 
 def test_upload_validates_sources_and_derives_posix_remote_keys(

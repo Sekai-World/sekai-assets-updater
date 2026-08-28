@@ -6,9 +6,9 @@ from typing import Any, Dict
 
 import aiohttp
 
-from constants import NUVERSE_REGIONS
-from crypto import unpack
-from helpers import (
+from updater.constants import NUVERSE_REGIONS
+from updater.crypto import unpack
+from updater.helpers import (
     build_metadata_headers,
     format_url_template,
     get_http_session_options,
@@ -16,7 +16,7 @@ from helpers import (
     sanitize_headers,
     sanitize_url,
 )
-from model import ConfigLike
+from updater.model import ConfigLike
 
 logger = logging.getLogger("asset_updater")
 

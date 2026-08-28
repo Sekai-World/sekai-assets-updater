@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from specialized import get_chart_jacket_url
+from updater.specialized import get_chart_jacket_url
 
 
 def test_chart_jacket_url_uses_legacy_region_url_when_unconfigured() -> None:

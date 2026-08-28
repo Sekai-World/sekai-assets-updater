@@ -11,7 +11,7 @@ from typing import Literal
 
 from anyio import Path
 
-from security import (
+from updater.security import (
     SecurityError,
     atomic_write_bytes,
     resolve_secure_path,

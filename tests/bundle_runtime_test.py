@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import bundle_runtime
+from updater.bundle import runtime as bundle_runtime
 
 
 class FakeExecutor:

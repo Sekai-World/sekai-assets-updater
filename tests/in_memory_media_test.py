@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import cridecoder
 import pytest
 
-import bundle
+from updater.bundle import pipeline as bundle
 
 
 class _FakeUnityObject:

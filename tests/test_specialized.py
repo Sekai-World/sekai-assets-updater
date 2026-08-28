@@ -8,10 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from anyio import Path as AsyncPath
 
 import main
-import specialized
-from bundle import is_live2d_bundle
-from helpers import filter_bundles_for_mode, get_mode_bundle_prefixes, select_bundles_for_download
-from specialized import (
+from updater import specialized
+from updater.bundle.pipeline import is_live2d_bundle
+from updater.helpers import filter_bundles_for_mode, get_mode_bundle_prefixes, select_bundles_for_download
+from updater.specialized import (
     chart_fingerprint,
     chart_state_path,
     collect_score_files,
@@ -39,8 +39,8 @@ from specialized import (
     validate_chart_state,
     validate_live2d_state,
 )
-from utils.chart import get_json_url
-from worker import get_bundle_cache_path, get_bundle_cache_root, recover_live2d_model_outputs
+from updater.utils.chart import get_json_url
+from updater.worker import get_bundle_cache_path, get_bundle_cache_root, recover_live2d_model_outputs
 
 
 class SpecializedHelpersTest(unittest.TestCase):
@@ -387,8 +387,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 return [AsyncPath(str(output / "unit.model3.json"))]
 
             extract_bundle = AsyncMock(side_effect=extract)
-            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("worker.extract_asset_bundle", new=extract_bundle):
+            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.worker.extract_asset_bundle", new=extract_bundle):
                     await recover_live2d_model_outputs(config, bundles)
 
             self.assertTrue((extracted / "live2d" / "model").is_dir())
@@ -426,8 +426,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 output.write_text("new", encoding="utf-8")
                 return [AsyncPath(str(output))]
 
-            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("worker.extract_asset_bundle", new=AsyncMock(side_effect=extract)):
+            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.worker.extract_asset_bundle", new=AsyncMock(side_effect=extract)):
                     with self.assertRaisesRegex(RuntimeError, "extracting cached model bundle"):
                         await recover_live2d_model_outputs(
                             config,
@@ -454,8 +454,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 UNITY_VERSION="2022.3",
             )
             extract = AsyncMock()
-            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
-                with patch("worker.extract_asset_bundle", new=extract):
+            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+                with patch("updater.worker.extract_asset_bundle", new=extract):
                     with self.assertRaisesRegex(RuntimeError, "bundle file is missing"):
                         await recover_live2d_model_outputs(
                             config,
@@ -493,7 +493,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 ASSET_LOCAL_EXTRACTED_DIR=AsyncPath(str(root / "extracted")),
                 UNITY_VERSION="2022.3",
             )
-            with patch("worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
+            with patch("updater.worker.prepare_secure_directory", side_effect=lambda path: Path(str(path))):
                 with self.assertRaisesRegex(RuntimeError, "cached motion source is missing"):
                     await recover_live2d_model_outputs(
                         config, {"unit": {"bundleName": "live2d/model/unit"}}

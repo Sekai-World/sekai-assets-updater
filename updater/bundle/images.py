@@ -7,8 +7,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from security import SecurityError, resolve_secure_path
-from unity_rs_adapter import RenderedImage, UnityRsObject, read_image
+from updater.security import SecurityError, resolve_secure_path
+from updater.unity_rs_adapter import RenderedImage, UnityRsObject, read_image
 
 logger = logging.getLogger("live2d")
 

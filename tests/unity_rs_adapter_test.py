@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import unity_rs_adapter
+from updater import unity_rs_adapter
 
 
 class _Info:

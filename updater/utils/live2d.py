@@ -12,8 +12,8 @@ from zlib import crc32
 import orjson as json
 from anyio import Path, open_file
 
-from constants import UNITY_FS_CONTAINER_BASE
-from unity_rs_adapter import UnityRsObject, load_bundle
+from updater.constants import UNITY_FS_CONTAINER_BASE
+from updater.unity_rs_adapter import UnityRsObject, load_bundle
 
 from .binary import BinaryStream
 

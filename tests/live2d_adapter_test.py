@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-import unity_rs_adapter
-import utils.live2d as live2d
-from unity_rs_adapter import load_bundle
+import updater.utils.live2d as live2d
+from updater import unity_rs_adapter
+from updater.unity_rs_adapter import load_bundle
 
 # An optional real on-disk bundle that exposes AnimationClip typetrees, used only
 # for a smoke test of the data-reading path. It is NOT a Live2D motion bundle,
@@ -320,9 +320,7 @@ def test_class_id_89_is_cubemap() -> None:
     assert unity_rs_adapter.CLASS_ID_NAMES[89] == "Cubemap"
 
 
-def test_restore_live2d_motions_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_restore_live2d_motions_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Drive the public ``restore_live2d_motions`` entry point without mocking it.
 
     ``live2d.load_bundle`` is monkeypatched to the synthetic unity-rs
@@ -371,11 +369,7 @@ def test_restore_live2d_motions_end_to_end(
 
     motion3 = json.loads(motion_file.read_bytes())
     assert motion3["Version"] == 3
-    assert motion3["Curves"] == [
-        {"Target": "Parameter", "Id": "ParamA", "Segments": [0, 1]}
-    ]
+    assert motion3["Curves"] == [{"Target": "Parameter", "Id": "ParamA", "Segments": [0, 1]}]
 
     facial3 = json.loads(facial_file.read_bytes())
-    assert facial3["Curves"] == [
-        {"Target": "PartOpacity", "Id": "ParamB", "Segments": [0, 1]}
-    ]
+    assert facial3["Curves"] == [{"Target": "PartOpacity", "Id": "ParamB", "Segments": [0, 1]}]

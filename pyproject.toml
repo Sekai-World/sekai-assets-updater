@@ -27,9 +27,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
-addopts = ["--ignore=test_download_extract.py"]
 
 [tool.ruff]
 target-version = "py312"
@@ -50,7 +49,7 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"utils/__init__.py" = ["F403"]
+"updater/utils/__init__.py" = ["F403"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -60,24 +59,24 @@ docstring-code-line-length = "dynamic"
 
 [tool.pyright]
 include = [
-    "bundle_audio.py",
-    "bundle_integrity.py",
-    "bundle_paths.py",
-    "bundle_runtime.py",
-    "bundle_video.py",
-    "constants.py",
-    "crypto.py",
-    "external_process.py",
     "main.py",
-    "model.py",
-    "security.py",
-    "state.py",
-    "utils/acb.py",
-    "utils/binary.py",
-    "utils/chart.py",
-    "utils/hca.py",
-    "utils/playable.py",
-    "utils/usm.py",
+    "updater/bundle/audio.py",
+    "updater/bundle/integrity.py",
+    "updater/bundle/paths.py",
+    "updater/bundle/runtime.py",
+    "updater/bundle/video.py",
+    "updater/constants.py",
+    "updater/crypto.py",
+    "updater/external_process.py",
+    "updater/model.py",
+    "updater/security.py",
+    "updater/state.py",
+    "updater/utils/acb.py",
+    "updater/utils/binary.py",
+    "updater/utils/chart.py",
+    "updater/utils/hca.py",
+    "updater/utils/playable.py",
+    "updater/utils/usm.py",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"

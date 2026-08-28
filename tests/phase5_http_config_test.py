@@ -9,12 +9,10 @@ import pytest
 from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
-import asset_bundle_info
-import bundle
-import helpers
 import main
-import worker
-from model import SekaiServerRegion
+from updater import asset_bundle_info, helpers, worker
+from updater.bundle import pipeline as bundle
+from updater.model import SekaiServerRegion
 
 
 class _Response:

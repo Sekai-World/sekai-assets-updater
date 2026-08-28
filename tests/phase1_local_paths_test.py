@@ -8,9 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 from anyio import Path as AnyioPath
 
-import bundle
-import security
-import worker
+from updater import security, worker
+from updater.bundle import pipeline as bundle
 
 
 def test_unityfs_mapping_rejects_absolute_traversal_and_backslash_names(tmp_path: Path) -> None:

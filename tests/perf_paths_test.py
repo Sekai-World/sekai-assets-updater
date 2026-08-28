@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-import bundle_acb_cache
-import helpers
-from bundle_images import save_image_formats
-from helpers import upload_to_storage
-from security import SecurityError
-from unity_rs_adapter import RenderedImage, _rendered_image
+from updater import helpers
+from updater.bundle import acb_cache as bundle_acb_cache
+from updater.bundle.images import save_image_formats
+from updater.helpers import upload_to_storage
+from updater.security import SecurityError
+from updater.unity_rs_adapter import RenderedImage, _rendered_image
 
 
 class _FakeNativeImage:
@@ -79,7 +79,7 @@ def test_rendered_image_to_pil_validates_pixels() -> None:
     image = RenderedImage(
         native=SimpleNamespace(width=2, height=2, rgba=b"short"), width=2, height=2
     )
-    from unity_rs_adapter import UnsupportedUnityObjectError
+    from updater.unity_rs_adapter import UnsupportedUnityObjectError
 
     with pytest.raises(UnsupportedUnityObjectError):
         image.to_pil()
@@ -202,7 +202,7 @@ def test_cached_acb_lookup_remembers_source_bundle(
 
 
 def test_png_compression_config_accepts_profiles_and_levels() -> None:
-    import bundle
+    from updater.bundle import pipeline as bundle
 
     assert bundle._get_texture_png_compression(SimpleNamespace()) == "fast"
     assert (

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from anyio import Path as AnyioPath
 
-import worker
+from updater import worker
 
 
 def _config(extracted_root: Path | None) -> SimpleNamespace:

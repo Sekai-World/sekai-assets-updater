@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-import bundle
-import security
+from updater import security
+from updater.bundle import pipeline as bundle
 
 
 def test_resolve_secure_path_accepts_nested_relative_path(tmp_path: Path) -> None:

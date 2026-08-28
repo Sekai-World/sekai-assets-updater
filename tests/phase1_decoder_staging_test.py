@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import bundle
-import security
+from updater import security
+from updater.bundle import pipeline as bundle
 
 
 def test_hca_decoder_decodes_in_memory_and_writes_atomically(

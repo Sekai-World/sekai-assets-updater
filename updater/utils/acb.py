@@ -32,11 +32,15 @@ def decode_acb_bytes(
     tracks = cridecoder.decode_acb_to_wav_bytes(acb_data, None)
     outputs: list[tuple[str, bytes]] = []
     for track in tracks:
-        name = track["name"]
+        name = str(track["name"])
         if cue_name is not None and name != cue_name:
             continue
-        extension = (track["extension"] or "wav").lstrip(".")
-        outputs.append((f"{name}.{extension}", track["data"]))
+        extension_value = track["extension"]
+        extension = (str(extension_value) if extension_value else "wav").lstrip(".")
+        data = track["data"]
+        if not isinstance(data, bytes):
+            raise TypeError(f"cridecoder returned non-bytes track data for {name!r}")
+        outputs.append((f"{name}.{extension}", data))
     if not tracks:
         raise ValueError("in-memory ACB decode produced no tracks")
     return outputs

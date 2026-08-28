@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import bundle
-import bundle_acb_cache
+from updater.bundle import acb_cache as bundle_acb_cache
+from updater.bundle import pipeline as bundle
 
 
 class _FakeTextAsset:

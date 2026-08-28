@@ -2,7 +2,7 @@ import os
 
 from anyio import Path
 
-from model import SekaiServerRegion
+from updater.model import SekaiServerRegion
 
 # Proxy for fetching restricted content
 PROXY_URL = None

@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import bundle
-import helpers
 import main
+from updater import helpers
+from updater.bundle import pipeline as bundle
 
 
 class _HangingProcess:

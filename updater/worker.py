@@ -11,13 +11,13 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from bundle import (
+from updater.bundle.pipeline import (
     download_deobfuscate_bundle,
     extract_asset_bundle,
     is_chart_score_bundle,
     is_live2d_bundle,
 )
-from helpers import (
+from updater.helpers import (
     DownloadDiskSpaceGate,
     build_cdn_headers,
     get_download_http_session_options,
@@ -25,8 +25,8 @@ from helpers import (
     upload_to_storage,
     upload_to_storage_opendal,
 )
-from security import prepare_secure_directory, resolve_secure_path, validate_contained_file
-from specialized import get_enabled_specialized_modes
+from updater.security import prepare_secure_directory, resolve_secure_path, validate_contained_file
+from updater.specialized import get_enabled_specialized_modes
 
 logger = logging.getLogger("asset_updater")
 

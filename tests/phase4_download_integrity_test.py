@@ -9,8 +9,8 @@ import aiohttp
 import pytest
 from anyio import Path as AnyioPath
 
-import bundle
-import worker
+from updater import worker
+from updater.bundle import pipeline as bundle
 
 
 class _Content:

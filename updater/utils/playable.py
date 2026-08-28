@@ -4,7 +4,7 @@
 import logging
 from typing import Any
 
-from unity_rs_adapter import load_bundle
+from updater.unity_rs_adapter import load_bundle
 
 # Track class names (tracks that contain m_Clips)
 TRACK_CLASSES = {

@@ -4,12 +4,12 @@ import logging
 from contextlib import ExitStack
 from pathlib import Path, PurePosixPath
 
-from constants import (
+from updater.constants import (
     UNITY_FS_BUILT_IN_ALT_CONTAINER_BASE,
     UNITY_FS_BUILT_IN_CONTAINER_BASE,
     UNITY_FS_CONTAINER_BASE,
 )
-from security import SecurityError, resolve_secure_path, validate_contained_file
+from updater.security import SecurityError, resolve_secure_path, validate_contained_file
 
 logger = logging.getLogger("live2d")
 

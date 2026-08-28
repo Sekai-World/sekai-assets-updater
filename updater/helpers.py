@@ -20,8 +20,8 @@ import aiohttp
 import orjson as json
 from anyio import Path, open_file
 
-from security import derive_remote_key, validate_contained_file
-from state import (
+from updater.security import derive_remote_key, validate_contained_file
+from updater.state import (
     StateNotFoundError,
     StateValidationError,
     load_asset_metadata,

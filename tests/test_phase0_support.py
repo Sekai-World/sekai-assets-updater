@@ -9,8 +9,8 @@ from pathlib import Path
 from aiohttp import web
 from anyio import Path as AnyioPath
 
-import bundle
-from helpers import upload_to_storage
+from updater.bundle import pipeline as bundle
+from updater.helpers import upload_to_storage
 
 
 def test_download_fixture_serves_and_deobfuscates_a_bundle(

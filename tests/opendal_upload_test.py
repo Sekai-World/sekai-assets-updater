@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from helpers import upload_to_storage_opendal
-from security import SecurityError
+from updater.helpers import upload_to_storage_opendal
+from updater.security import SecurityError
 
 
 def _fs_storage(remote_root: Path, **extra) -> dict:

@@ -7,9 +7,8 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-import helpers
 import main
-import state
+from updater import helpers, state
 
 
 def _metadata(name: str = "bundle", checksum: str = "hash") -> dict:

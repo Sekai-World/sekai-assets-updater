@@ -9,9 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 import orjson as json
 from anyio import open_file
 
-from asset_bundle_info import build_request_headers, fetch_asset_bundle_info
-from bundle import shutdown_process_pools
-from helpers import (
+from updater.asset_bundle_info import build_request_headers, fetch_asset_bundle_info
+from updater.bundle.pipeline import shutdown_process_pools
+from updater.helpers import (
     DownloadPlan,
     build_download_disk_space_gate,
     dedupe_download_items,
@@ -24,8 +24,8 @@ from helpers import (
     select_bundles_for_download,
     setup_logging_queue,
 )
-from model import ConfigLike
-from specialized import (
+from updater.model import ConfigLike
+from updater.specialized import (
     get_enabled_specialized_modes,
     get_required_bundle_prefixes,
     mode_uses_bundle_pipeline,
@@ -33,7 +33,7 @@ from specialized import (
     needs_shared_workspace,
     run_specialized_postprocess,
 )
-from state import (
+from updater.state import (
     StateLock,
     StateNotFoundError,
     StatePaths,
@@ -50,7 +50,7 @@ from state import (
     validate_game_version,
     validate_pending_queue,
 )
-from worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
+from updater.worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
 
 logger = logging.getLogger("asset_updater")
 

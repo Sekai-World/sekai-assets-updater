@@ -5,13 +5,13 @@ import threading
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 
-from security import (
+from updater.security import (
     SecurityError,
     atomic_write_bytes,
     validate_contained_file,
     validate_output_target,
 )
-from unity_rs_adapter import load_bundle, read_text_bytes
+from updater.unity_rs_adapter import load_bundle, read_text_bytes
 
 logger = logging.getLogger("live2d")
 

@@ -8,10 +8,8 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-import asset_bundle_info
-import helpers
-import state
-from model import SekaiServerRegion
+from updater import asset_bundle_info, helpers, state
+from updater.model import SekaiServerRegion
 
 
 def _config(root: Path, *, url: str = "https://cdn.test/{bundleName}") -> SimpleNamespace:

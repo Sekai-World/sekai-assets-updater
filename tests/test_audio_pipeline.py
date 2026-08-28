@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 from anyio import Path as AnyioPath
 
-import bundle
-from utils.acb import extract_acb
+from updater.bundle import pipeline as bundle
+from updater.utils.acb import extract_acb
 
 
 class ExtractAcbTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class ExtractAcbTests(unittest.TestCase):
             output_path = tmp_path / "voice.wav"
 
             with patch(
-                "utils.acb.cridecoder.decode_acb_to_wav",
+                "updater.utils.acb.cridecoder.decode_acb_to_wav",
                 return_value=[output_path.as_posix()],
             ) as decode_mock:
                 outputs = extract_acb(BytesIO(b"ignored"), tmp_dir, acb_path.as_posix())
@@ -40,7 +40,7 @@ class ExtractAcbTests(unittest.TestCase):
             removed_path.write_bytes(b"wav")
 
             with patch(
-                "utils.acb.cridecoder.decode_acb_to_wav",
+                "updater.utils.acb.cridecoder.decode_acb_to_wav",
                 return_value=[kept_path.as_posix(), removed_path.as_posix()],
             ):
                 outputs = extract_acb(
