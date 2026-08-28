@@ -8,13 +8,10 @@ import aiohttp
 
 from updater.constants import NUVERSE_REGIONS
 from updater.crypto import unpack
-from updater.helpers import (
-    build_metadata_headers,
-    format_url_template,
-    get_http_session_options,
-    refresh_cookie,
-)
 from updater.model import ConfigLike
+from updater.net.cookies import refresh_cookie
+from updater.net.http import build_metadata_headers, get_http_session_options
+from updater.net.urls import format_url_template
 from updater.sanitize import sanitize_headers, sanitize_url
 
 logger = logging.getLogger("asset_updater")

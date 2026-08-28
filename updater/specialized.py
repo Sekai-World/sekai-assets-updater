@@ -14,7 +14,7 @@ from anyio import Path
 from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
 )
-from updater.helpers import get_request_timeout, upload_directory
+from updater.helpers import upload_directory
 from updater.modes import (  # noqa: F401  (re-exported until specialized.py is dissolved)
     SPECIALIZED_MODES,
     get_enabled_specialized_modes,
@@ -24,6 +24,7 @@ from updater.modes import (  # noqa: F401  (re-exported until specialized.py is 
     needs_shared_workspace,
     retains_live2d_extracted_outputs,
 )
+from updater.net.http import get_request_timeout
 from updater.state import atomic_write_json, prepare_state_directory
 from updater.utils.chart import get_json_url, get_list, render_chart
 from updater.utils.live2d import collect_param_id_map, restore_live2d_motions

@@ -16,11 +16,10 @@ from updater.bundle.pipeline import (
 )
 from updater.helpers import (
     DownloadDiskSpaceGate,
-    build_cdn_headers,
-    get_download_http_session_options,
     upload_to_storage,
     upload_to_storage_opendal,
 )
+from updater.net.http import build_cdn_headers, get_download_http_session_options
 from updater.sanitize import sanitize_log_label
 from updater.security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 from updater.workspace import (

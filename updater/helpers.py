@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import inspect
 import logging
 import os
@@ -9,12 +8,8 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from http.cookies import SimpleCookie
-from string import Formatter
 from typing import AsyncIterator, Dict, List, Mapping, Tuple
 
-import aiohttp
-import orjson as json
 from anyio import Path, open_file
 
 from updater.external_process import (
@@ -31,6 +26,7 @@ from updater.modes import (  # noqa: F401  (re-exported until helpers.py is diss
     filter_download_items_for_mode,
     get_mode_bundle_prefixes,
 )
+from updater.net.urls import format_url_template, get_template_placeholders
 from updater.sanitize import (
     sanitize_url,
 )
@@ -44,7 +40,6 @@ from updater.state import (
 
 logger = logging.getLogger("asset_updater")
 
-DEFAULT_REQUEST_TIMEOUT = 30 * 60
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
 DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
 DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
@@ -95,68 +90,6 @@ def bundle_has_changed(bundle: Dict, cached_bundle: Dict | None) -> bool:
     return get_bundle_checksum(bundle) != get_bundle_checksum(cached_bundle)
 
 
-def get_template_placeholders(template: str) -> set[str]:
-    return {
-        field_name.split(".", 1)[0].split("[", 1)[0]
-        for _, field_name, _, _ in Formatter().parse(template)
-        if field_name
-    }
-
-
-def format_url_template(template: str, **values: str | None) -> str:
-    placeholders = get_template_placeholders(template)
-    missing_placeholders = [
-        name for name in placeholders if name not in values or values[name] is None
-    ]
-    if missing_placeholders:
-        missing_fields = ", ".join(sorted(missing_placeholders))
-        raise ValueError(f"Missing format values for {missing_fields}: {template}")
-
-    normalized_values = {}
-    for name in placeholders:
-        value = values[name]
-        if isinstance(value, str):
-            normalized_values[name] = value.strip()
-        else:
-            normalized_values[name] = value
-    return template.format(**normalized_values)
-
-
-def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
-    timeout_value = getattr(config, "REQUEST_TIMEOUT", DEFAULT_REQUEST_TIMEOUT)
-
-    if timeout_value in (None, 0, 0.0):
-        return aiohttp.ClientTimeout(total=None)
-
-    try:
-        timeout_seconds = float(timeout_value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid REQUEST_TIMEOUT=%r, falling back to %ss",
-            timeout_value,
-            DEFAULT_REQUEST_TIMEOUT,
-        )
-        timeout_seconds = float(DEFAULT_REQUEST_TIMEOUT)
-
-    if timeout_seconds <= 0:
-        return aiohttp.ClientTimeout(total=None)
-
-    return aiohttp.ClientTimeout(total=timeout_seconds)
-
-
-def get_http_session_options(config=None) -> dict[str, object]:
-    """Build the common aiohttp session options for configured HTTP requests."""
-    return {
-        "proxy": getattr(config, "PROXY_URL", None),
-        "timeout": get_request_timeout(config),
-    }
-
-
-def get_download_http_session_options(config=None) -> dict[str, object]:
-    """Build direct-CDN session options while retaining configured timeouts."""
-    return {"timeout": get_request_timeout(config)}
-
-
 async def _terminate_process(process) -> None:
     await terminate_process(process, EXTERNAL_PROCESS_TERMINATE_GRACE)
 
@@ -169,32 +102,6 @@ async def _wait_for_process(process, timeout: float) -> int:
         task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,
     )
-
-
-def build_metadata_headers(config) -> dict[str, str]:
-    """Headers allowed on metadata and game API requests."""
-    headers = {
-        "Accept": "*/*",
-        "X-Unity-Version": config.UNITY_VERSION,
-    }
-    if config.USER_AGENT:
-        headers["User-Agent"] = config.USER_AGENT
-    return headers
-
-
-def build_cookie_request_headers() -> dict[str, str]:
-    """Cookie acquisition must not receive public or credential-bearing headers."""
-    return {}
-
-
-def build_cdn_headers(cookie: str | None = None) -> dict[str, str]:
-    """Build headers for a CDN request without adding public API headers.
-
-    This is intentionally separate from :func:`build_metadata_headers` so
-    future download callers cannot accidentally send Unity/API headers to a
-    signed CDN endpoint.
-    """
-    return {"Cookie": cookie} if cookie else {}
 
 
 def get_download_max_retries(config=None) -> int:
@@ -653,46 +560,6 @@ async def sort_download_list(
     return download_list
 
 
-def build_cookie_header(set_cookie_headers: List[str]) -> str:
-    """Convert Set-Cookie headers to a request Cookie header."""
-    cookie = SimpleCookie()
-    for header in set_cookie_headers:
-        cookie.load(header)
-
-    return "; ".join(f"{key}={morsel.value}" for key, morsel in cookie.items() if morsel.value)
-
-
-def get_cookie_value(cookie_header: str, cookie_name: str) -> str | None:
-    prefix = f"{cookie_name}="
-    for part in cookie_header.split(";"):
-        part = part.strip()
-        if part.startswith(prefix):
-            return part[len(prefix) :]
-    return None
-
-
-def get_cookie_expire_time(cookie_header: str) -> int | None:
-    """Extract the CloudFront policy expiry from a Cookie header."""
-    policy_value = get_cookie_value(cookie_header, "CloudFront-Policy")
-    if not policy_value:
-        return None
-
-    padded_value = policy_value.rstrip("_")
-    padded_value += "=" * (-len(padded_value) % 4)
-    try:
-        decoded_policy = base64.urlsafe_b64decode(padded_value).decode("utf-8")
-        policy_json = json.loads(decoded_policy)
-    except Exception:
-        logger.warning("Failed to parse CloudFront-Policy cookie, forcing refresh")
-        return None
-
-    statements = policy_json.get("Statement") or []
-    if not statements:
-        return None
-
-    return statements[0].get("Condition", {}).get("DateLessThan", {}).get("AWS:EpochTime")
-
-
 def _derive_storage_remote_path(remote_base: str, relative_key: str) -> str:
     """Append one validated object key to an opaque configured storage target.
 
@@ -711,47 +578,6 @@ def _derive_storage_remote_path(remote_base: str, relative_key: str) -> str:
     remote_key = derive_remote_key(relative_key)
     separator = "" if remote_base.endswith("/") else "/"
     return f"{remote_base}{separator}{remote_key}"
-
-
-async def refresh_cookie(
-    config,
-    headers: Dict[str, str],
-    cookie: str | None = None,
-) -> Tuple[Dict[str, str], str]:
-    """Refresh the cookie using the GAME_COOKIE_URL."""
-    if cookie:
-        cookie_expire_time = get_cookie_expire_time(cookie)
-        if isinstance(cookie_expire_time, int) and cookie_expire_time > int(time.time()) + 3600:
-            headers["Cookie"] = cookie
-            return headers, cookie
-
-    # If the cookie is expired or not set, fetch a new one
-    if config.GAME_COOKIE_URL:
-        transport_error = None
-        try:
-            async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-                async with session.post(
-                    config.GAME_COOKIE_URL, headers=build_cookie_request_headers()
-                ) as response:
-                    if response.status == 200:
-                        cookie = build_cookie_header(response.headers.getall("Set-Cookie", []))
-                        assert cookie, "Cookie is empty"
-                        headers["Cookie"] = cookie
-                    else:
-                        raise RuntimeError(
-                            f"Failed to fetch cookie from {sanitize_url(config.GAME_COOKIE_URL)}"
-                        )
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            transport_error = RuntimeError(
-                "Failed to fetch cookie from "
-                f"{sanitize_url(config.GAME_COOKIE_URL)} ({type(exc).__name__})"
-            )
-        if transport_error is not None:
-            raise transport_error
-    else:
-        raise ValueError("GAME_COOKIE_URL is not set in the config")
-
-    return headers, cookie
 
 
 async def deobfuscate(data: bytes) -> bytes:

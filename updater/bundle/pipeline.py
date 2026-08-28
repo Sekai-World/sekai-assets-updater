@@ -89,7 +89,6 @@ from updater.external_process import (
     set_process_output_paths as _set_process_output_paths,
 )
 from updater.helpers import (
-    get_download_http_session_options,
     get_download_max_retries,
     get_download_retry_base_delay,
     get_download_retry_max_delay,
@@ -98,6 +97,7 @@ from updater.modes import (  # noqa: F401  (re-exported until pipeline.py is dis
     is_chart_score_bundle,
     is_live2d_bundle,
 )
+from updater.net.http import get_download_http_session_options
 from updater.runtime import (
     runtime as _bundle_runtime,
 )

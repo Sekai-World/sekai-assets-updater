@@ -60,6 +60,8 @@ docstring-code-line-length = "dynamic"
 [tool.pyright]
 include = [
     "main.py",
+    "updater/net/http.py",
+    "updater/net/urls.py",
     "updater/cli/logging_setup.py",
     "updater/modes.py",
     "updater/runtime.py",

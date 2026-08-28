@@ -10,6 +10,7 @@ from anyio import Path as AnyioPath
 
 from updater import asset_bundle_info, helpers, state
 from updater.model import SekaiServerRegion
+from updater.net import urls as net_urls
 
 
 def _config(root: Path, *, url: str = "https://cdn.test/{bundleName}") -> SimpleNamespace:
@@ -251,14 +252,14 @@ def test_colorful_same_checksum_live2d_selected_only_when_cache_path_absent(
 
 def test_url_template_rejects_missing_and_none_values() -> None:
     with pytest.raises(ValueError, match=r"Missing format values for assetVer"):
-        helpers.format_url_template(
+        net_urls.format_url_template(
             "https://cdn.test/{appVersion}/{assetVer}",
             appVersion="1.0",
             assetVer=None,
         )
 
     with pytest.raises(ValueError, match=r"Missing format values for assetVer"):
-        helpers.format_url_template(
+        net_urls.format_url_template(
             "https://cdn.test/{appVersion}/{assetVer}",
             appVersion="1.0",
         )

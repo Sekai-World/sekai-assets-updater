@@ -10,9 +10,11 @@ from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
 import main
-from updater import asset_bundle_info, helpers, worker
+from updater import asset_bundle_info, worker
 from updater.bundle import pipeline as bundle
 from updater.model import SekaiServerRegion
+from updater.net import cookies as net_cookies
+from updater.net import http as net_http
 
 
 class _Response:
@@ -88,7 +90,7 @@ def _config(**overrides):
 
 
 def test_common_http_options_include_proxy_and_configured_timeout():
-    options = helpers.get_http_session_options(_config())
+    options = net_http.get_http_session_options(_config())
 
     assert options["proxy"] == "http://proxy.test:8080"
     assert isinstance(options["timeout"], ClientTimeout)
@@ -96,7 +98,7 @@ def test_common_http_options_include_proxy_and_configured_timeout():
 
 
 def test_download_http_options_omit_proxy_and_keep_configured_timeout():
-    options = helpers.get_download_http_session_options(_config())
+    options = net_http.get_download_http_session_options(_config())
 
     assert "proxy" not in options
     assert isinstance(options["timeout"], ClientTimeout)
@@ -125,25 +127,25 @@ def test_worker_cdn_session_omits_proxy(monkeypatch):
 def test_public_headers_are_metadata_only_and_cookie_cdn_headers_are_separate():
     config = _config(GAME_COOKIE_URL=None)
 
-    assert helpers.build_metadata_headers(config) == {
+    assert net_http.build_metadata_headers(config) == {
         "Accept": "*/*",
         "X-Unity-Version": "2024.1",
         "User-Agent": "public-agent",
     }
-    assert helpers.build_cookie_request_headers() == {}
-    assert helpers.build_cdn_headers("CloudFront-Policy=private") == {
+    assert net_http.build_cookie_request_headers() == {}
+    assert net_http.build_cdn_headers("CloudFront-Policy=private") == {
         "Cookie": "CloudFront-Policy=private"
     }
-    assert "User-Agent" not in helpers.build_cdn_headers()
+    assert "User-Agent" not in net_http.build_cdn_headers()
 
 
 def test_cookie_request_uses_common_options_without_public_headers(monkeypatch):
     _Session.instances.clear()
     _Session.responses[:] = [_Response(headers={"Set-Cookie": "CloudFront-Policy=policy; Path=/"})]
-    monkeypatch.setattr(helpers.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(net_cookies.aiohttp, "ClientSession", _Session)
 
     config = _config()
-    headers, cookie = asyncio.run(helpers.refresh_cookie(config, {}))
+    headers, cookie = asyncio.run(net_cookies.refresh_cookie(config, {}))
 
     session = _Session.instances[-1]
     assert session.options["proxy"] == config.PROXY_URL
@@ -166,7 +168,7 @@ def test_http_transport_errors_are_sanitized(monkeypatch, target):
             )
 
         def post(self, *_args, **_kwargs):
-            raise helpers.aiohttp.ClientConnectionError(
+            raise net_cookies.aiohttp.ClientConnectionError(
                 f"Cookie: a={secret}; Authorization: Bearer {secret}"
             )
 
@@ -183,8 +185,8 @@ def test_http_transport_errors_are_sanitized(monkeypatch, target):
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(request)
     else:
-        monkeypatch.setattr(helpers.aiohttp, "ClientSession", _FailingSession)
-        request = helpers.refresh_cookie(config, {})
+        monkeypatch.setattr(net_cookies.aiohttp, "ClientSession", _FailingSession)
+        request = net_cookies.refresh_cookie(config, {})
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(request)
 
@@ -226,7 +228,7 @@ def test_metadata_requests_use_common_options_and_public_headers(monkeypatch):
     asyncio.run(
         asset_bundle_info.fetch_asset_bundle_info(
             _config(),  # type: ignore[arg-type]
-            headers=helpers.build_metadata_headers(_config()),
+            headers=net_http.build_metadata_headers(_config()),
         )
     )
 
