@@ -13,12 +13,12 @@ from pathlib import Path as StdPath
 import cridecoder
 from anyio import Path
 
-from updater.bundle.paths import canonical_root as _canonical_root
-from updater.bundle.paths import (
-    resolve_generated_child_path as _resolve_generated_child_path,
-)
 from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
+)
+from updater.extract.paths import canonical_root as _canonical_root
+from updater.extract.paths import (
+    resolve_generated_child_path as _resolve_generated_child_path,
 )
 from updater.media.process import (
     _cleanup_process_output,

@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from updater.bundle import pipeline as bundle  # noqa: F401
 from updater.external_process import TERMINATE_TASK_ATTRIBUTE
 from updater.media import audio as media_audio
 from updater.media import process as media_process

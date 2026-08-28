@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from updater.bundle import acb_cache as bundle_acb_cache
+from updater.extract import acb_cache as bundle_acb_cache
 from updater.media import images as media_images
 from updater.media.images import save_image_formats
 from updater.security import SecurityError

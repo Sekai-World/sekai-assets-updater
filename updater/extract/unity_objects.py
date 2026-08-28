@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import orjson as json
 
-from updater.bundle.paths import build_unityfs_save_path, resolve_generated_child_path
+from updater.extract.paths import build_unityfs_save_path, resolve_generated_child_path
 from updater.media.images import (
     DEFAULT_PNG_COMPRESSION,
     DEFAULT_WEBP_METHOD,

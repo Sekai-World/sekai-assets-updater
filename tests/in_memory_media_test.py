@@ -12,8 +12,9 @@ from types import SimpleNamespace
 
 import cridecoder
 import pytest
+from anyio import Path as AnyioPath
 
-from updater.bundle import pipeline as bundle
+from updater.extract import sync_worker
 from updater.media import video as media_video
 
 
@@ -73,14 +74,14 @@ def test_acb_decodes_fully_in_memory_without_staging(
             ),
         }
     )
-    monkeypatch.setattr(bundle, "_load_unity_bundle", lambda _path, _version: fake_unity_file)
+    monkeypatch.setattr(sync_worker, "_load_unity_bundle", lambda _path, _version: fake_unity_file)
     monkeypatch.setattr(
-        bundle,
+        sync_worker,
         "extract_acb",
         lambda *_args: pytest.fail("path-based ACB decoder must not run"),
     )
 
-    exported, audio_jobs, video_jobs = bundle._extract_bundle_files_sync(
+    exported, audio_jobs, video_jobs = sync_worker._extract_bundle_files_sync(
         bundle_path.as_posix(),
         {"bundleName": "test"},
         output_root.as_posix(),
@@ -122,21 +123,21 @@ def test_usm_single_part_demuxes_in_memory(tmp_path: Path, monkeypatch: pytest.M
         received.append(usm_data)
         return [{"name": "stream", "extension": "m2v", "data": b"video-stream"}]
 
-    monkeypatch.setattr(bundle.cridecoder, "extract_usm_bytes", fake_extract_usm_bytes)
+    monkeypatch.setattr(cridecoder, "extract_usm_bytes", fake_extract_usm_bytes)
     monkeypatch.setattr(
-        bundle.cridecoder,
+        cridecoder,
         "extract_usm",
         lambda *_args: pytest.fail("path-based USM demux must not run"),
     )
     monkeypatch.setattr(
-        bundle,
+        sync_worker,
         "_load_unity_bundle",
         lambda _path, _version: _movie_unity_file(
             ["movie.usm.bytes"], {"movie.usm.bytes": b"CRID-payload"}
         ),
     )
 
-    exported, audio_jobs, video_jobs = bundle._extract_bundle_files_sync(
+    exported, audio_jobs, video_jobs = sync_worker._extract_bundle_files_sync(
         bundle_path.as_posix(),
         {"bundleName": "test"},
         output_root.as_posix(),
@@ -166,9 +167,9 @@ def test_usm_split_parts_merge_in_memory_without_disk_intermediate(
         received.append(usm_data)
         return [{"name": "stream", "extension": "m2v", "data": b"merged-video"}]
 
-    monkeypatch.setattr(bundle.cridecoder, "extract_usm_bytes", fake_extract_usm_bytes)
+    monkeypatch.setattr(cridecoder, "extract_usm_bytes", fake_extract_usm_bytes)
     monkeypatch.setattr(
-        bundle,
+        sync_worker,
         "_load_unity_bundle",
         lambda _path, _version: _movie_unity_file(
             ["movie-001.usm.bytes", "movie-002.usm.bytes"],
@@ -176,7 +177,7 @@ def test_usm_split_parts_merge_in_memory_without_disk_intermediate(
         ),
     )
 
-    exported, _audio_jobs, video_jobs = bundle._extract_bundle_files_sync(
+    exported, _audio_jobs, video_jobs = sync_worker._extract_bundle_files_sync(
         bundle_path.as_posix(),
         {"bundleName": "test"},
         output_root.as_posix(),
@@ -201,12 +202,12 @@ def test_usm_over_limit_falls_back_to_disk_merge(
     output_root.mkdir()
 
     monkeypatch.setattr(
-        bundle.cridecoder,
+        cridecoder,
         "extract_usm_bytes",
         lambda *_args: pytest.fail("in-memory demux must not run above the size limit"),
     )
     monkeypatch.setattr(
-        bundle,
+        sync_worker,
         "_load_unity_bundle",
         lambda _path, _version: _movie_unity_file(
             ["movie-001.usm.bytes", "movie-002.usm.bytes"],
@@ -214,7 +215,7 @@ def test_usm_over_limit_falls_back_to_disk_merge(
         ),
     )
 
-    _exported, _audio_jobs, video_jobs = bundle._extract_bundle_files_sync(
+    _exported, _audio_jobs, video_jobs = sync_worker._extract_bundle_files_sync(
         bundle_path.as_posix(),
         {"bundleName": "test"},
         output_root.as_posix(),
@@ -261,6 +262,6 @@ def test_process_video_job_transcodes_m2v_without_demux(
     )
 
     mp4_path = tmp_path / "movie.mp4"
-    assert exported == [bundle.Path(mp4_path.as_posix())]
+    assert exported == [AnyioPath(mp4_path.as_posix())]
     assert mp4_path.read_bytes() == b"mp4:video-stream"
     assert not m2v_path.exists()

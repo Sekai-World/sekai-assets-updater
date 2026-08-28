@@ -75,7 +75,7 @@ include = [
     "updater/runtime.py",
     "updater/sanitize.py",
     "updater/workspace.py",
-    "updater/bundle/paths.py",
+    "updater/extract/paths.py",
     "updater/constants.py",
     "updater/crypto.py",
     "updater/external_process.py",

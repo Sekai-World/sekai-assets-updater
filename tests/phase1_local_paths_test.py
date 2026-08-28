@@ -9,7 +9,7 @@ import pytest
 from anyio import Path as AnyioPath
 
 from updater import security, worker
-from updater.bundle import pipeline as bundle
+from updater.extract import paths as extract_paths
 
 
 def test_unityfs_mapping_rejects_absolute_traversal_and_backslash_names(tmp_path: Path) -> None:
@@ -20,7 +20,7 @@ def test_unityfs_mapping_rejects_absolute_traversal_and_backslash_names(tmp_path
     )
     for unityfs_path in bad_paths:
         with pytest.raises((ValueError, security.SecurityError)):
-            bundle._build_unityfs_save_path(unityfs_path, tmp_path)
+            extract_paths.build_unityfs_save_path(unityfs_path, tmp_path)
 
 
 def test_unityfs_mapping_rejects_precreated_extraction_symlink(tmp_path: Path) -> None:
@@ -29,44 +29,46 @@ def test_unityfs_mapping_rejects_precreated_extraction_symlink(tmp_path: Path) -
     (tmp_path / "link").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(security.SecurityError):
-        bundle._build_unityfs_save_path(
+        extract_paths.build_unityfs_save_path(
             "assets/sekai/assetbundle/resources/characters/link/asset.bytes",
             tmp_path,
         )
 
 
 def test_audio_clip_sample_names_are_contained_and_reject_escape(tmp_path: Path) -> None:
-    assert bundle._resolve_generated_child_path(tmp_path, "voice.wav") == tmp_path / "voice.wav"
+    assert (
+        extract_paths.resolve_generated_child_path(tmp_path, "voice.wav") == tmp_path / "voice.wav"
+    )
     for filename in ("/outside.wav", "../outside.wav", "voice\\outside.wav"):
         with pytest.raises(security.SecurityError):
-            bundle._resolve_generated_child_path(tmp_path, filename)
+            extract_paths.resolve_generated_child_path(tmp_path, filename)
 
 
 def test_acb_cue_and_textasset_names_are_contained(tmp_path: Path) -> None:
-    assert bundle._resolve_generated_child_path(tmp_path, "voice", ".acb") == (
+    assert extract_paths.resolve_generated_child_path(tmp_path, "voice", ".acb") == (
         tmp_path / "voice.acb"
     )
     for cue_name in ("../escape", "/escape", "cue\\escape"):
         with pytest.raises(security.SecurityError):
-            bundle._resolve_generated_child_path(tmp_path, cue_name, ".acb")
+            extract_paths.resolve_generated_child_path(tmp_path, cue_name, ".acb")
     with pytest.raises(security.SecurityError):
-        bundle._resolve_generated_child_path(tmp_path, "../textasset.bytes")
+        extract_paths.resolve_generated_child_path(tmp_path, "../textasset.bytes")
 
 
 def test_usm_expected_and_fallback_paths_are_contained(tmp_path: Path) -> None:
     expected = tmp_path / "movie.usm"
     expected.write_bytes(b"usm")
-    assert bundle._resolve_existing_usm_path_sync(expected, tmp_path) == expected
+    assert extract_paths.resolve_existing_usm_path(expected, tmp_path) == expected
 
     fallback = tmp_path / "actual.usm"
     fallback.write_bytes(b"usm")
     expected.unlink()
-    assert bundle._resolve_existing_usm_path_sync(expected, tmp_path) == fallback
+    assert extract_paths.resolve_existing_usm_path(expected, tmp_path) == fallback
 
     escape = tmp_path / "link.usm"
     escape.symlink_to(tmp_path.parent / "outside.usm")
     with pytest.raises(security.SecurityError):
-        bundle._resolve_existing_usm_path_sync(escape, tmp_path)
+        extract_paths.resolve_existing_usm_path(escape, tmp_path)
 
 
 def test_worker_rejects_bundle_name_before_download_and_cache_symlink(

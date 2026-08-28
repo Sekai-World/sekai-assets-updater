@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from updater.bundle.pipeline import extract_asset_bundle
+from updater.extract.bundle import extract_asset_bundle
 from updater.net.disk_space import DownloadDiskSpaceGate
 from updater.net.download import download_deobfuscate_bundle
 from updater.net.http import build_cdn_headers, get_download_http_session_options

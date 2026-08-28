@@ -9,7 +9,7 @@ from anyio import Path as AsyncPath
 
 import main
 from updater import specialized
-from updater.bundle.pipeline import is_live2d_bundle
+from updater.modes import is_live2d_bundle
 from updater.modes import filter_bundles_for_mode, get_mode_bundle_prefixes
 from updater.net.plan import select_bundles_for_download
 from updater.specialized import (
