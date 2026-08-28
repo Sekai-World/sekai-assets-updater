@@ -15,9 +15,10 @@ import struct
 from pathlib import Path
 
 import pytest
+from anyio import Path as AnyioPath
 
-import updater.utils.live2d as live2d
 from updater import unity_rs_adapter
+from updater.live2d import curves, motion3, restore
 from updater.unity_rs_adapter import load_bundle
 
 # An optional real on-disk bundle that exposes AnimationClip typetrees, used only
@@ -119,7 +120,7 @@ def _build_environment(
     """Construct a synthetic BuildMotionData bundle.
 
     Layout mirrors ``assets/sekai/assetbundle/resources/ondemand/live2d/motion/...``
-    so that :func:`live2d._build_motion_save_dir` resolves a stable save path.
+    so that :func:`restore._build_motion_save_dir` resolves a stable save path.
     """
     base = "assets/sekai/assetbundle/resources/ondemand/live2d/motion/base"
     buildmotion_path = f"{base}/buildmotiondata.asset"
@@ -196,9 +197,9 @@ def test_restore_motion_base_bundle_writes_motion3_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env = _build_environment()
-    monkeypatch.setattr(live2d, "load_bundle", lambda _path, _version: env)
+    monkeypatch.setattr(restore, "load_bundle", lambda _path, _version: env)
 
-    save_dir = live2d._restore_motion_base_bundle_sync(
+    save_dir = restore._restore_motion_base_bundle_sync(
         "fake.bundle",
         tmp_path.as_posix(),
         {"12345": "ParamA", "6789": "ParamB"},
@@ -236,9 +237,9 @@ def test_restore_motion_base_bundle_falls_back_to_container_anims(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env = _build_environment(empty_groups=True, with_container_anims=True)
-    monkeypatch.setattr(live2d, "load_bundle", lambda _path, _version: env)
+    monkeypatch.setattr(restore, "load_bundle", lambda _path, _version: env)
 
-    save_dir = live2d._restore_motion_base_bundle_sync(
+    save_dir = restore._restore_motion_base_bundle_sync(
         "fake.bundle",
         tmp_path.as_posix(),
         {"12345": "ParamA", "6789": "ParamB"},
@@ -258,7 +259,7 @@ def test_restore_unity_object_to_motion3_rejects_empty_clip() -> None:
     entry = unity_rs_adapter._AttrDict()
     entry["clip_asset_name"] = "x"
     entry["clip"] = unity_rs_adapter._PPtr(0, 0, lambda _f, _p: None)
-    assert live2d.restore_unity_object_to_motion3(entry) is None
+    assert motion3.restore_unity_object_to_motion3(entry) is None
 
 
 @pytest.mark.skipif(
@@ -286,28 +287,28 @@ def test_real_bundle_smoke_reads_animationclip_typetree(monkeypatch: pytest.Monk
     # The sample is not a Live2D motion bundle, so the Cubism-specific
     # MonoScript name mapping cannot be exercised here; stub it with a neutral
     # one-to-one mapping so the real typetree data-reading path is still smoked.
-    original = live2d.build_binding_info_lookup
+    original = motion3.build_binding_info_lookup
 
     def fake_lookup(generic_bindings):
         lookup = []
         for i, b in enumerate(generic_bindings):
-            count = live2d._binding_curve_count(b)
+            count = curves._binding_curve_count(b)
             lookup.extend([("Parameter", str(b.get("path", i)))] * count)
         return lookup
 
-    monkeypatch.setattr(live2d, "build_binding_info_lookup", fake_lookup)
+    monkeypatch.setattr(motion3, "build_binding_info_lookup", fake_lookup)
     try:
-        result = live2d.restore_unity_object_to_motion3(entry)
+        result = motion3.restore_unity_object_to_motion3(entry)
     finally:
-        monkeypatch.setattr(live2d, "build_binding_info_lookup", original)
+        monkeypatch.setattr(motion3, "build_binding_info_lookup", original)
 
     assert result is not None
-    name, motion3 = result
+    name, motion3_doc = result
     assert name == clip.name
-    assert motion3["Version"] == 3
-    assert isinstance(motion3["Curves"], list)
+    assert motion3_doc["Version"] == 3
+    assert isinstance(motion3_doc["Curves"], list)
     # No silent format change: keys are the documented motion3 contract.
-    assert set(motion3) == {"Version", "Meta", "Curves", "UserData"}
+    assert set(motion3_doc) == {"Version", "Meta", "Curves", "UserData"}
 
 
 def test_class_id_89_is_cubemap() -> None:
@@ -323,7 +324,7 @@ def test_class_id_89_is_cubemap() -> None:
 def test_restore_live2d_motions_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Drive the public ``restore_live2d_motions`` entry point without mocking it.
 
-    ``live2d.load_bundle`` is monkeypatched to the synthetic unity-rs
+    ``restore.load_bundle`` is monkeypatched to the synthetic unity-rs
     environment so no real on-disk bundle or network is required. A raw bundle
     file lives in a temp motion cache, and a model directory (only existence is
     required because the param ID map is pre-supplied) satisfies the inputs.
@@ -341,15 +342,15 @@ def test_restore_live2d_motions_end_to_end(tmp_path: Path, monkeypatch: pytest.M
     extracted = tmp_path / "extracted"
     extracted.mkdir()
 
-    monkeypatch.setattr(live2d, "load_bundle", lambda _path, _version: _build_environment())
+    monkeypatch.setattr(restore, "load_bundle", lambda _path, _version: _build_environment())
 
     param_id_map = {"12345": "ParamA", "6789": "ParamB"}
 
     asyncio.run(
-        live2d.restore_live2d_motions(
-            live2d.Path(str(motion_cache)),
-            live2d.Path(str(extracted)),
-            live2d.Path(str(model_dir)),
+        restore.restore_live2d_motions(
+            AnyioPath(str(motion_cache)),
+            AnyioPath(str(extracted)),
+            AnyioPath(str(model_dir)),
             "2022.3.21f1",
             param_id_map=param_id_map,
         )

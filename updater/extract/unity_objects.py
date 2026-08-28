@@ -7,6 +7,8 @@ from typing import Any, cast
 import orjson as json
 
 from updater.extract.paths import build_unityfs_save_path, resolve_generated_child_path
+from updater.live2d.moc3 import extract_params_ids_from_moc3
+from updater.live2d.motion3 import correct_param_ids, restore_unity_object_to_motion3
 from updater.media.images import (
     DEFAULT_PNG_COMPRESSION,
     DEFAULT_WEBP_METHOD,
@@ -15,11 +17,6 @@ from updater.media.images import (
 )
 from updater.security import atomic_write_bytes
 from updater.unity_rs_adapter import read_text_bytes
-from updater.utils.live2d import (
-    correct_param_ids,
-    extract_params_ids_from_moc3,
-    restore_unity_object_to_motion3,
-)
 from updater.utils.playable import extract_playable
 
 logger = logging.getLogger("live2d")
