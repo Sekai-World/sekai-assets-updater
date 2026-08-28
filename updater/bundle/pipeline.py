@@ -79,9 +79,14 @@ from updater.bundle.video import (
     runtime as _video_runtime,
 )
 from updater.external_process import (
+    EXTERNAL_PROCESS_TERMINATE_GRACE,
+    TERMINATE_TASK_ATTRIBUTE,
     cleanup_process_output,
     terminate_process,
     wait_for_process,
+)
+from updater.external_process import (
+    get_external_process_timeout as _get_external_process_timeout,
 )
 from updater.external_process import (
     set_process_output_paths as _set_process_output_paths,
@@ -109,8 +114,6 @@ from updater.utils.hca import decode_hca_to_wav_bytes
 
 logger = logging.getLogger("live2d")
 
-_EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
-
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
     """Return whether this individual bundle belongs to the Live2D namespace."""
@@ -122,19 +125,8 @@ def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
     return (bundle.get("bundleName") or "").startswith("music/music_score/")
 
 
-def _get_external_process_timeout(config) -> float:
-    value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", 300)
-    try:
-        timeout = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}") from None
-    if timeout <= 0:
-        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}")
-    return timeout
-
-
 async def _terminate_process(process) -> None:
-    await terminate_process(process, _EXTERNAL_PROCESS_TERMINATE_GRACE)
+    await terminate_process(process, EXTERNAL_PROCESS_TERMINATE_GRACE)
 
 
 async def _wait_for_process(process, timeout: float) -> int:
@@ -142,7 +134,7 @@ async def _wait_for_process(process, timeout: float) -> int:
         process,
         timeout,
         _terminate_process,
-        task_attribute="_bundle_terminate_task",
+        task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,
     )
 
@@ -152,7 +144,7 @@ async def _communicate_with_process(process, timeout: float) -> tuple[bytes, byt
         process,
         timeout,
         _terminate_process,
-        task_attribute="_bundle_terminate_task",
+        task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,
         communicate=True,
     )

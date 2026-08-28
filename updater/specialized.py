@@ -11,7 +11,10 @@ from pathlib import Path as StdPath
 import orjson as json
 from anyio import Path
 
-from updater.helpers import _get_external_process_timeout, get_request_timeout, upload_directory
+from updater.external_process import (
+    get_external_process_timeout as _get_external_process_timeout,
+)
+from updater.helpers import get_request_timeout, upload_directory
 from updater.state import atomic_write_json, prepare_state_directory
 from updater.utils.chart import get_json_url, get_list, render_chart
 from updater.utils.live2d import collect_param_id_map, restore_live2d_motions

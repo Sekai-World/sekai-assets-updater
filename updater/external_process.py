@@ -9,6 +9,24 @@ from typing import Any
 
 TerminateProcess = Callable[[object], Coroutine[Any, Any, None]]
 
+# How long a terminated child gets to exit before it is killed.
+EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
+DEFAULT_EXTERNAL_PROCESS_TIMEOUT = 300.0
+# Attribute caching the shared termination task on the process object, so
+# repeated cancellations never start a second termination sequence.
+TERMINATE_TASK_ATTRIBUTE = "_external_terminate_task"
+
+
+def get_external_process_timeout(config=None) -> float:
+    value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", DEFAULT_EXTERNAL_PROCESS_TIMEOUT)
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}") from None
+    if timeout <= 0:
+        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}")
+    return timeout
+
 
 async def terminate_process(process, grace_period: float) -> None:
     """Terminate a child, kill it if needed, and wait until it has exited."""

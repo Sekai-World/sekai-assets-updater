@@ -10,6 +10,7 @@ import pytest
 import main
 from updater import helpers
 from updater.bundle import pipeline as bundle
+from updater.external_process import TERMINATE_TASK_ATTRIBUTE
 
 
 class _HangingProcess:
@@ -77,7 +78,7 @@ class _ArtifactProcess:
 @pytest.mark.parametrize("terminate_exits", [True, False])
 def test_wait_timeout_terminates_and_waits_for_process(monkeypatch, terminate_exits: bool) -> None:
     process = _HangingProcess(terminate_exits=terminate_exits)
-    monkeypatch.setattr(bundle, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
+    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
 
     wait = bundle._wait_for_process(process, 0.001)
     with pytest.raises(asyncio.TimeoutError):
@@ -165,7 +166,7 @@ def test_ffmpeg_video_partial_output_is_cleaned_after_timeout_or_cancel(
         with pytest.raises(expected):
             await task
 
-    monkeypatch.setattr(bundle, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
     asyncio.run(scenario())
     process = process_holder["process"]
     assert process.order == ["wait", "terminate", "wait", "kill", "wait"]
@@ -194,7 +195,7 @@ def test_ffmpeg_audio_partial_output_is_cleaned_after_timeout_or_cancel(
         return process
 
     monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(bundle, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
 
     async def scenario() -> None:
         task = asyncio.create_task(
@@ -239,7 +240,7 @@ def test_vgmstream_partial_output_is_cleaned_after_timeout_or_cancel(
 
     monkeypatch.setattr(bundle, "_get_vgmstream_cli", lambda: "vgmstream-cli")
     monkeypatch.setattr(bundle.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(bundle, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
+    monkeypatch.setattr(bundle, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.001)
 
     async def scenario() -> None:
         task = asyncio.create_task(
@@ -310,7 +311,7 @@ def test_upload_timeout_cleans_up_process_and_redacts_remote_query(
         return process
 
     monkeypatch.setattr(helpers.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(helpers, "_EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
+    monkeypatch.setattr(helpers, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
     config = SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=0.001)
     upload = helpers.upload_to_storage(
         [source],
@@ -507,8 +508,8 @@ def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
 @pytest.mark.parametrize(
     ("module", "waiter", "task_attribute"),
     [
-        (bundle, bundle._wait_for_process, "_bundle_terminate_task"),
-        (helpers, helpers._wait_for_process, "_helpers_terminate_task"),
+        (bundle, bundle._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
+        (helpers, helpers._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
     ],
 )
 def test_cancelled_wait_preserves_cancellation_when_termination_fails(
@@ -586,7 +587,7 @@ def test_cancelled_communicate_preserves_cancellation_when_termination_fails(
     assert cancellation.__context__ is None
     assert terminate_calls["count"] == 1
     assert process.terminate_calls == 0
-    termination_task = process._bundle_terminate_task
+    termination_task = getattr(process, TERMINATE_TASK_ATTRIBUTE)
     assert termination_task.done()
     assert termination_task.exception() is not None
 

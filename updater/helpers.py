@@ -20,6 +20,15 @@ import aiohttp
 import orjson as json
 from anyio import Path, open_file
 
+from updater.external_process import (
+    EXTERNAL_PROCESS_TERMINATE_GRACE,
+    TERMINATE_TASK_ATTRIBUTE,
+    terminate_process,
+    wait_for_process,
+)
+from updater.external_process import (
+    get_external_process_timeout as _get_external_process_timeout,
+)
 from updater.security import derive_remote_key, validate_contained_file
 from updater.state import (
     StateNotFoundError,
@@ -36,8 +45,6 @@ DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
 DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
 DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
-DEFAULT_EXTERNAL_PROCESS_TIMEOUT = 300.0
-_EXTERNAL_PROCESS_TERMINATE_GRACE = 2.0
 
 _SENSITIVE_HEADER_RE = re.compile(
     r"(?:^|[-_])(authorization|cookie|set-cookie|api[-_]?key|api[-_]?token|"
@@ -313,95 +320,18 @@ def get_download_http_session_options(config=None) -> dict[str, object]:
     return {"timeout": get_request_timeout(config)}
 
 
-def _get_external_process_timeout(config=None) -> float:
-    value = getattr(config, "EXTERNAL_PROCESS_TIMEOUT", DEFAULT_EXTERNAL_PROCESS_TIMEOUT)
-    try:
-        timeout = float(value)
-    except (TypeError, ValueError):
-        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}") from None
-    if timeout <= 0:
-        raise ValueError(f"EXTERNAL_PROCESS_TIMEOUT must be positive, got {value!r}")
-    return timeout
-
-
 async def _terminate_process(process) -> None:
-    """Terminate a child, kill it after the grace period, and await exit."""
-    if process.returncode is not None:
-        return
-    process.terminate()
-    try:
-        await asyncio.wait_for(process.wait(), _EXTERNAL_PROCESS_TERMINATE_GRACE)
-    except asyncio.TimeoutError:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-
-
-async def _ensure_process_terminated(process) -> tuple[BaseException | None, bool]:
-    """Run one termination/reap sequence, even if the waiter is cancelled repeatedly.
-
-    Cancellation is remembered while the child is being reaped and reported to
-    the caller only after cleanup has completed.  This keeps cancellation from
-    being swallowed without allowing it to interrupt the termination sequence.
-    """
-    task = getattr(process, "_helpers_terminate_task", None)
-    if task is None:
-        task = asyncio.create_task(_terminate_process(process))
-        process._helpers_terminate_task = task
-
-    cancellation_seen = False
-    cleanup_error: BaseException | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:
-            # Keep waiting on the same shielded task. Never start a second
-            # termination sequence while the first one is still in progress.
-            cancellation_seen = True
-            if task.done():
-                break
-        except Exception as exc:
-            cleanup_error = exc
-            break
-
-    if task.done():
-        if task.cancelled():
-            cancellation_seen = True
-        elif cleanup_error is None:
-            # ``Task.exception`` returns the original exception object without
-            # catching it, so its traceback and cancellation state are not
-            # replaced by this cleanup bookkeeping.
-            cleanup_error = task.exception()
-
-    if cancellation_seen:
-        if cleanup_error is not None:
-            logger.error(
-                "Process termination cleanup failed while propagating cancellation: %s",
-                cleanup_error,
-            )
-        return None, True
-    return cleanup_error, False
+    await terminate_process(process, EXTERNAL_PROCESS_TERMINATE_GRACE)
 
 
 async def _wait_for_process(process, timeout: float) -> int:
-    original_error: BaseException | None = None
-    cancellation = False
-    try:
-        async with asyncio.timeout(timeout):
-            return await process.wait()
-    except asyncio.CancelledError as exc:
-        original_error = exc
-        cancellation = True
-    except asyncio.TimeoutError as exc:
-        original_error = exc
-
-    cleanup_error, cleanup_cancelled = await _ensure_process_terminated(process)
-    if cancellation or cleanup_cancelled:
-        raise asyncio.CancelledError() from None
-    if cleanup_error is not None:
-        raise cleanup_error from None
-    raise original_error
+    return await wait_for_process(
+        process,
+        timeout,
+        _terminate_process,
+        task_attribute=TERMINATE_TASK_ATTRIBUTE,
+        logger=logger,
+    )
 
 
 def build_metadata_headers(config) -> dict[str, str]:
