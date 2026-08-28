@@ -173,8 +173,10 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-config*.py
-!config.example.py
+# User config files live at the repo root only; anchor the pattern so it
+# cannot swallow package modules like updater/cli/configuration.py.
+/config*.py
+!/config.example.py
 
 cache/
 test*.py
