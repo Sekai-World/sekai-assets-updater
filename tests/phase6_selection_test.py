@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-from updater import helpers, state
+from updater import state
 from updater.model import SekaiServerRegion
 from updater.net import metadata as asset_bundle_info
+from updater.net import plan as net_plan
 from updater.net import urls as net_urls
 
 
@@ -44,7 +45,7 @@ def test_priority_patterns_follow_declared_order_and_unmatched_tail() -> None:
     ]
 
     result = asyncio.run(
-        helpers.sort_download_list(
+        net_plan.sort_download_list(
             candidates,
             priority_list=[r"^music/", r"^character/"],
         )
@@ -74,7 +75,7 @@ def test_nuverse_checksum_change_is_downloaded_when_assetver_is_unchanged(
     )
 
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata({"bundleName": "changed", "hash": "new"}),
             _version(),
             config=config,
@@ -99,7 +100,7 @@ def test_nuverse_assetver_change_alone_does_not_redownload(tmp_path: Path) -> No
     )
 
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata({"bundleName": "stable", "hash": "same"}),
             _version(),
             config=config,
@@ -127,7 +128,7 @@ def test_incompatible_metadata_caches_are_treated_as_missing(
     (tmp_path / cache_name).write_text(json.dumps(legacy_payload))
 
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata({"bundleName": "fresh", "hash": "new"}),
             _version(),
             config=config,
@@ -227,7 +228,7 @@ def test_colorful_same_checksum_live2d_selected_only_when_cache_path_absent(
 
     # Cache file absent -> unchanged bundle with identical checksum is selected.
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata({"bundleName": "live2d/motion/foo", "hash": "same"}),
             _version(),
             config=config,
@@ -240,7 +241,7 @@ def test_colorful_same_checksum_live2d_selected_only_when_cache_path_absent(
     # Cache file present -> unchanged bundle is no longer selected.
     (cache_dir / "live2d_motion_foo").write_bytes(b"cached")
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata({"bundleName": "live2d/motion/foo", "hash": "same"}),
             _version(),
             config=config,

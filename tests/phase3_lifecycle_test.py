@@ -8,7 +8,8 @@ import pytest
 from anyio import Path as AnyioPath
 
 import main
-from updater import helpers, state
+from updater import state
+from updater.net import plan as net_plan
 
 
 def _metadata(name: str = "bundle", checksum: str = "hash") -> dict:
@@ -106,7 +107,7 @@ def test_current_invalid_network_version_remains_a_commit_error(
         return fetch_result
 
     async def fake_plan(*_args, **_kwargs):
-        return helpers.DownloadPlan([], _metadata(), invalid_version)
+        return net_plan.DownloadPlan([], _metadata(), invalid_version)
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "get_download_list", fake_plan)
@@ -133,7 +134,7 @@ def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue
         return fetch_result
 
     async def fake_plan(*_args, **_kwargs):
-        return helpers.DownloadPlan([], _metadata(), _version("fetched"))
+        return net_plan.DownloadPlan([], _metadata(), _version("fetched"))
 
     async def unexpected_pipeline(*_args, **_kwargs):
         raise AssertionError("empty calculated queue must not start pipeline")
@@ -274,7 +275,7 @@ def test_malformed_queue_without_journal_fails_closed_and_preserves_bytes(
         )
 
     async def fake_plan(*_args, **_kwargs):
-        return helpers.DownloadPlan([], _metadata(), _version())
+        return net_plan.DownloadPlan([], _metadata(), _version())
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "get_download_list", fake_plan)

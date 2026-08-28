@@ -10,12 +10,6 @@ import orjson as json
 from anyio import open_file
 
 from updater.cli.logging_setup import setup_logging_queue
-from updater.helpers import (
-    DownloadPlan,
-    dedupe_download_items,
-    get_download_list,
-    select_bundles_for_download,
-)
 from updater.model import ConfigLike
 from updater.modes import (
     filter_bundles_for_mode,
@@ -24,6 +18,12 @@ from updater.modes import (
 )
 from updater.net.disk_space import build_download_disk_space_gate
 from updater.net.metadata import build_request_headers, fetch_asset_bundle_info
+from updater.net.plan import (
+    DownloadPlan,
+    dedupe_download_items,
+    get_download_list,
+    select_bundles_for_download,
+)
 from updater.runtime import shutdown_process_pools
 from updater.sanitize import sanitize_http_log_value
 from updater.specialized import (

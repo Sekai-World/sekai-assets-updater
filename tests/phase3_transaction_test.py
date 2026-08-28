@@ -8,7 +8,8 @@ import pytest
 from anyio import Path as AnyioPath
 
 import main
-from updater import helpers, state
+from updater import state
+from updater.net import plan as net_plan
 
 
 def _metadata(name: str = "current", checksum: str = "new"):
@@ -64,14 +65,14 @@ def test_download_selection_is_persistence_free(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata(),
             _version(),
             config=config,
             force_full_download=True,
         )
     )
-    assert isinstance(plan, helpers.DownloadPlan)
+    assert isinstance(plan, net_plan.DownloadPlan)
     assert plan.candidates[0][1]["bundleName"] == "current"
     assert not (tmp_path / "metadata.json").exists()
     assert not (tmp_path / "version.json").exists()
@@ -93,7 +94,7 @@ def test_download_plan_retains_fetched_assetver_even_when_cache_differs_or_match
         state.validate_game_version,
     )
     plan = asyncio.run(
-        helpers.get_download_list(
+        net_plan.get_download_list(
             _metadata("current", "new"),
             _version(),
             config=config,
@@ -156,7 +157,7 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
         return _fetch_result()
 
     async def fake_plan(*_args, **_kwargs):
-        return helpers.DownloadPlan([], _metadata("fresh", "new"), _version())
+        return net_plan.DownloadPlan([], _metadata("fresh", "new"), _version())
 
     original_replay = main.replay_journal
 
@@ -230,7 +231,7 @@ def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatc
         return _fetch_result()
 
     async def fake_plan(*_args, **_kwargs):
-        return helpers.DownloadPlan([], _metadata(), _version())
+        return net_plan.DownloadPlan([], _metadata(), _version())
 
     monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(main, "get_download_list", fake_plan)
