@@ -21,7 +21,11 @@ from updater.postprocess.config import (
     get_normal_storage_candidates,
 )
 
-logger = logging.getLogger("charts")
+# The fetch/render flows came from specialized.py and keep its channel so
+# name-based log filtering is unchanged; the renderer preload keeps the
+# historic "charts" channel from utils/chart.py.
+logger = logging.getLogger("asset_updater")
+_renderer_logger = logging.getLogger("charts")
 DEFAULT_STYLE_SHEET = (
     Path(__file__).with_name("pjsekai_scores_default.css").read_text(encoding="utf-8")
 )
@@ -39,7 +43,7 @@ def _load_scores_module():
             try:
                 ctypes.CDLL(freetype, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
             except OSError:
-                logger.debug("Failed to preload %s", freetype, exc_info=True)
+                _renderer_logger.debug("Failed to preload %s", freetype, exc_info=True)
 
     try:
         import pjsekai_scores_rs as scores

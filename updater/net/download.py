@@ -25,6 +25,9 @@ from updater.security import resolve_secure_path, validate_output_target
 # Historic logger name for download records, preserved so existing log
 # routing/filtering keeps seeing these events on the same channel.
 logger = logging.getLogger("live2d")
+# Config-validation warnings historically came from helpers.py and stay on
+# its channel so name-based log filtering keeps seeing them.
+_config_logger = logging.getLogger("asset_updater")
 
 DEFAULT_DOWNLOAD_MAX_RETRIES = 3
 DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
@@ -36,7 +39,7 @@ def get_download_max_retries(config=None) -> int:
     try:
         retries = int(value)
     except (TypeError, ValueError):
-        logger.warning(
+        _config_logger.warning(
             "Invalid DOWNLOAD_MAX_RETRIES=%r, falling back to %d",
             value,
             DEFAULT_DOWNLOAD_MAX_RETRIES,
