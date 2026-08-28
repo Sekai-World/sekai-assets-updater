@@ -15,72 +15,24 @@ from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
 )
 from updater.helpers import get_request_timeout, upload_directory
+from updater.modes import (  # noqa: F401  (re-exported until specialized.py is dissolved)
+    SPECIALIZED_MODES,
+    get_enabled_specialized_modes,
+    get_required_bundle_prefixes,
+    mode_uses_bundle_pipeline,
+    needs_live2d_bundle_cache,
+    needs_shared_workspace,
+    retains_live2d_extracted_outputs,
+)
 from updater.state import atomic_write_json, prepare_state_directory
 from updater.utils.chart import get_json_url, get_list, render_chart
 from updater.utils.live2d import collect_param_id_map, restore_live2d_motions
 
 logger = logging.getLogger("asset_updater")
 
-SPECIALIZED_MODES = ("live2d", "charts")
-SPECIALIZED_BUNDLE_PREFIXES = {
-    "live2d": ("live2d/",),
-    "charts": (),
-}
 CHART_SOURCE_CONCURRENCY = 4
 CHART_SOURCE_TERMINATE_TIMEOUT = 5
 DEFAULT_CHART_JACKET_BASE_URL = "https://storage.sekai.best/sekai-{region}-assets/music/jacket"
-
-
-def mode_uses_bundle_pipeline(mode: str) -> bool:
-    """Whether a mode fetches and processes game asset bundles."""
-    if mode not in ("assets", "live2d", "charts"):
-        raise ValueError(f"Unsupported updater mode: {mode}")
-    return mode != "charts"
-
-
-def get_enabled_specialized_modes(mode: str, config) -> tuple[str, ...]:
-    """Select specialized processors from mode and independent config flags."""
-    if mode in SPECIALIZED_MODES:
-        return (mode,)
-    if mode != "assets":
-        raise ValueError(f"Unsupported updater mode: {mode}")
-    return tuple(
-        specialized_mode
-        for specialized_mode in SPECIALIZED_MODES
-        if getattr(config, f"ENABLE_{specialized_mode.upper()}_POSTPROCESS", False)
-    )
-
-
-def get_required_bundle_prefixes(mode: str, config) -> tuple[str, ...]:
-    """Return prefixes that enabled post-processors must always download."""
-    return tuple(
-        prefix
-        for specialized_mode in get_enabled_specialized_modes(mode, config)
-        for prefix in SPECIALIZED_BUNDLE_PREFIXES[specialized_mode]
-    )
-
-
-def needs_shared_workspace(mode: str, config) -> bool:
-    """Whether specialized processing needs a run-scoped extracted workspace."""
-    return (
-        bool(get_enabled_specialized_modes(mode, config))
-        and getattr(config, "ASSET_LOCAL_EXTRACTED_DIR", None) is None
-    )
-
-
-def needs_live2d_bundle_cache(mode: str, config) -> bool:
-    """Whether Live2D needs a run-scoped bundle cache root."""
-    return (
-        "live2d" in get_enabled_specialized_modes(mode, config)
-        and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None
-    )
-
-
-def retains_live2d_extracted_outputs(config) -> bool:
-    """Whether Live2D extraction must remain available for post-processing."""
-    return "live2d" in get_enabled_specialized_modes(
-        getattr(config, "UPDATER_MODE", "assets"), config
-    )
 
 
 def get_specialized_storage(config, mode: str) -> list[dict]:

@@ -10,11 +10,8 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
-from logging.handlers import QueueHandler, QueueListener
-from queue import SimpleQueue
 from string import Formatter
 from typing import AsyncIterator, Dict, List, Mapping, Tuple
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import orjson as json
@@ -28,6 +25,14 @@ from updater.external_process import (
 )
 from updater.external_process import (
     get_external_process_timeout as _get_external_process_timeout,
+)
+from updater.modes import (  # noqa: F401  (re-exported until helpers.py is dissolved)
+    filter_bundles_for_mode,
+    filter_download_items_for_mode,
+    get_mode_bundle_prefixes,
+)
+from updater.sanitize import (
+    sanitize_url,
 )
 from updater.security import derive_remote_key, validate_contained_file
 from updater.state import (
@@ -46,56 +51,6 @@ DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
 DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
 DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
 
-_SENSITIVE_HEADER_RE = re.compile(
-    r"(?:^|[-_])(authorization|cookie|set-cookie|api[-_]?key|api[-_]?token|"
-    r"access[-_]?token|refresh[-_]?token|auth[-_]?token|client[-_]?secret|"
-    r"secret|credential)(?:$|[-_])",
-    re.IGNORECASE,
-)
-_SENSITIVE_QUERY_RE = re.compile(
-    r"(?:^|[-_])(signature|sig|token|access[-_]?token|auth|authorization|"
-    r"api[-_]?key|secret|credential|policy|key|key[-_]?id|access[-_]?key|"
-    r"aws[-_]?access[-_]?key[-_]?id|expires|date)(?:$|[-_])|"
-    r"^(?:x[-_]amz|cloudfront)[-_]",
-    re.IGNORECASE,
-)
-_HTTP_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
-_SENSITIVE_ASSIGNMENT_RE = re.compile(
-    r"(?<![\w-])"
-    r"(?P<prefix>(?:token|api[-_]key|api[-_]token|access[-_]token|refresh[-_]token|"
-    r"auth[-_]token|authorization|proxy[-_]authorization|client[-_]secret|"
-    r"secret|credential|body|response[-_]body)\b\s*[:=]\s*)"
-    r"(?:(?P<single>'(?P<single_value>[^']*)')|"
-    r"(?P<double>\"(?P<double_value>[^\"]*)\")|"
-    r"(?P<bare>[^\s,;]+))",
-    re.IGNORECASE,
-)
-_TOKEN_HEADER_ASSIGNMENT_RE = re.compile(
-    r"(?P<prefix>\bX[-_](?:Api[-_]Token|Access[-_]Token)\b\s*[:=]\s*)"
-    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
-    re.IGNORECASE,
-)
-_API_KEY_HEADER_ASSIGNMENT_RE = re.compile(
-    r"(?P<prefix>\bX[-_]Api[-_]Key\b\s*[:=]\s*)"
-    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
-    re.IGNORECASE,
-)
-_AUTHORIZATION_ASSIGNMENT_RE = re.compile(
-    r"(?P<prefix>\b(?:authorization|proxy[-_]authorization)\b\s*[:=]\s*)"
-    r"(?:(?:Bearer|Basic)\s+)?"
-    r"(?:'[^']*'|\"[^\"]*\"|[^\s,;]+)",
-    re.IGNORECASE,
-)
-_COOKIE_MORSEL_RE = re.compile(
-    r"(?P<name>[^\s=;,]+)(?P<separator>\s*=\s*)"
-    r"(?:(?P<single>'[^']*')|(?P<double>\"[^\"]*\")|(?P<bare>[^;\s,]+))",
-)
-_COOKIE_TEXT_RE = re.compile(
-    r"(?P<prefix>\bCookie\b\s*[:=]\s*)(?P<value>[^\r\n]*)",
-    re.IGNORECASE,
-)
-_REDACTED = "<redacted>"
-
 
 @dataclass(frozen=True)
 class DownloadPlan:
@@ -104,52 +59,6 @@ class DownloadPlan:
     candidates: List[Tuple[str, Dict]]
     asset_metadata: Dict
     game_version: Dict
-
-
-class LocalQueueHandler(QueueHandler):
-    def emit(self, record: logging.LogRecord) -> None:
-        # Removed the call to self.prepare(), handle task cancellation
-        try:
-            self.enqueue(record)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self.handleError(record)
-
-
-def setup_logging_queue() -> None:
-    """Move log handlers to a separate thread.
-
-    Replace handlers on the root logger with a LocalQueueHandler,
-    and start a logging.QueueListener holding the original
-    handlers.
-
-    """
-    queue = SimpleQueue()
-    root = logging.getLogger()
-
-    handlers: List[logging.Handler] = []
-
-    handler = LocalQueueHandler(queue)
-    root.addHandler(handler)
-    for h in root.handlers[:]:
-        if h is not handler:
-            root.removeHandler(h)
-            handlers.append(h)
-
-    listener = QueueListener(queue, *handlers, respect_handler_level=True)
-    listener.start()
-
-
-async def ensure_dir_exists(dir_path: Path):
-    """Ensure the directory exists, create it if not."""
-    if not await dir_path.exists():
-        await dir_path.mkdir(parents=True, exist_ok=True)
-
-    if not await dir_path.is_dir():
-        raise NotADirectoryError(
-            f"Failed to create directory {dir_path}, path exists but is not a directory"
-        )
 
 
 def get_bundle_checksum(bundle: Dict) -> Tuple[str | None, str]:
@@ -211,78 +120,6 @@ def format_url_template(template: str, **values: str | None) -> str:
         else:
             normalized_values[name] = value
     return template.format(**normalized_values)
-
-
-def sanitize_headers(headers: Mapping | None) -> dict[str, str]:
-    """Return headers safe to include in logs.
-
-    Header names are treated case-insensitively.  In particular, this avoids
-    accidentally exposing credentials when a caller uses a differently cased
-    spelling of ``Cookie`` or an API key header.
-    """
-    if not headers:
-        return {}
-    sanitized = {}
-    for name, value in headers.items():
-        name_text = str(name)
-        if name_text.casefold() == "cookie":
-            sanitized[name_text] = _sanitize_cookie_value(str(value))
-        else:
-            sanitized[name_text] = (
-                _REDACTED if _SENSITIVE_HEADER_RE.search(name_text) else str(value)
-            )
-    return sanitized
-
-
-def _sanitize_cookie_value(value: str) -> str:
-    sanitized = _COOKIE_MORSEL_RE.sub(
-        lambda match: f"{match.group('name')}{match.group('separator')}{_REDACTED}",
-        value,
-    )
-    return sanitized if sanitized != value else _REDACTED
-
-
-def _sanitize_assignment(match: re.Match[str]) -> str:
-    return f"{match.group('prefix')}{_REDACTED}"
-
-
-def sanitize_url(url: str) -> str:
-    """Redact signed and credential-bearing query values without hiding the URL."""
-    try:
-        parts = urlsplit(str(url))
-        query = urlencode(
-            [
-                (key, _REDACTED if _SENSITIVE_QUERY_RE.search(key) else value)
-                for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            ]
-        )
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
-    except (TypeError, ValueError):
-        # Logging must not turn an otherwise useful error into a second error.
-        return "<invalid-url>"
-
-
-def sanitize_http_log_value(value):
-    """Sanitize common HTTP values before they are passed to a logger."""
-    if isinstance(value, Mapping):
-        return sanitize_headers(value)
-    if isinstance(value, str) and "://" in value:
-        value = _HTTP_URL_RE.sub(lambda match: sanitize_url(match.group(0)), value)
-    if isinstance(value, str):
-        value = _COOKIE_TEXT_RE.sub(
-            lambda match: f"{match.group('prefix')}{_sanitize_cookie_value(match.group('value'))}",
-            value,
-        )
-        value = _API_KEY_HEADER_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
-        value = _TOKEN_HEADER_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
-        value = _AUTHORIZATION_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
-        value = _SENSITIVE_ASSIGNMENT_RE.sub(_sanitize_assignment, value)
-    return value
-
-
-def sanitize_log_label(value) -> str:
-    """Return a safe, printable label for pipeline diagnostics."""
-    return str(sanitize_http_log_value(str(value)))
 
 
 def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
@@ -785,40 +622,6 @@ def dedupe_download_items(items: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict
             result.append(item)
             seen_names.add(bundle_name)
     return result
-
-
-MODE_BUNDLE_PREFIXES = {"assets": (), "live2d": ("live2d/",), "charts": ()}
-
-
-def get_mode_bundle_prefixes(mode: str) -> tuple[str, ...]:
-    try:
-        return MODE_BUNDLE_PREFIXES[mode]
-    except KeyError as exc:
-        raise ValueError(f"Unknown updater mode: {mode}") from exc
-
-
-def filter_bundles_for_mode(bundles: Dict[str, Dict], mode: str = "assets") -> Dict[str, Dict]:
-    prefixes = get_mode_bundle_prefixes(mode)
-    return (
-        bundles
-        if not prefixes
-        else {
-            key: value
-            for key, value in bundles.items()
-            if (value.get("bundleName") or "").startswith(prefixes)
-        }
-    )
-
-
-def filter_download_items_for_mode(
-    items: List[Tuple[str, Dict]], mode: str
-) -> List[Tuple[str, Dict]]:
-    prefixes = get_mode_bundle_prefixes(mode)
-    return (
-        items
-        if not prefixes
-        else [item for item in items if (item[1].get("bundleName") or "").startswith(prefixes)]
-    )
 
 
 async def sort_download_list(

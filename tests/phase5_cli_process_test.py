@@ -11,6 +11,8 @@ import main
 from updater import helpers
 from updater.bundle import pipeline as bundle
 from updater.external_process import TERMINATE_TASK_ATTRIBUTE
+from updater.runtime import runtime as bundle_runtime
+from updater.runtime import shutdown_process_pools
 
 
 class _HangingProcess:
@@ -604,27 +606,27 @@ def test_shutdown_process_pools_shuts_down_all_cached_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executors = {name: _RecordingExecutor() for name in ("extract", "audio", "usm")}
-    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", (4, executors["extract"]))
-    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", (2, executors["audio"]))
-    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", (2, executors["usm"]))
+    monkeypatch.setattr(bundle_runtime, "_extract_process_pool", (4, executors["extract"]))
+    monkeypatch.setattr(bundle_runtime, "_audio_process_pool", (2, executors["audio"]))
+    monkeypatch.setattr(bundle_runtime, "_usm_process_pool", (2, executors["usm"]))
 
-    bundle.shutdown_process_pools()
+    shutdown_process_pools()
 
     for executor in executors.values():
         assert executor.shutdown_calls == [(True, True)]
-    assert bundle._bundle_runtime._extract_process_pool is None
-    assert bundle._bundle_runtime._audio_process_pool is None
-    assert bundle._bundle_runtime._usm_process_pool is None
+    assert bundle_runtime._extract_process_pool is None
+    assert bundle_runtime._audio_process_pool is None
+    assert bundle_runtime._usm_process_pool is None
 
 
 def test_shutdown_process_pools_is_idempotent_without_cached_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(bundle._bundle_runtime, "_extract_process_pool", None)
-    monkeypatch.setattr(bundle._bundle_runtime, "_audio_process_pool", None)
-    monkeypatch.setattr(bundle._bundle_runtime, "_usm_process_pool", None)
+    monkeypatch.setattr(bundle_runtime, "_extract_process_pool", None)
+    monkeypatch.setattr(bundle_runtime, "_audio_process_pool", None)
+    monkeypatch.setattr(bundle_runtime, "_usm_process_pool", None)
 
-    bundle.shutdown_process_pools()
+    shutdown_process_pools()
 
 
 @pytest.mark.parametrize("pipeline_error", [None, RuntimeError, KeyboardInterrupt])

@@ -68,9 +68,6 @@ from updater.bundle.paths import (
 from updater.bundle.paths import (
     stream_files as _stream_files,
 )
-from updater.bundle.runtime import (
-    runtime as _bundle_runtime,
-)
 from updater.bundle.video import (
     demux_usm_to_m2v,
     run_ffmpeg_video_to_mp4,
@@ -96,9 +93,15 @@ from updater.helpers import (
     get_download_max_retries,
     get_download_retry_base_delay,
     get_download_retry_max_delay,
-    sanitize_http_log_value,
-    sanitize_url,
 )
+from updater.modes import (  # noqa: F401  (re-exported until pipeline.py is dissolved)
+    is_chart_score_bundle,
+    is_live2d_bundle,
+)
+from updater.runtime import (
+    runtime as _bundle_runtime,
+)
+from updater.sanitize import sanitize_http_log_value, sanitize_url
 from updater.security import (
     SecurityError,
     atomic_write_bytes,
@@ -113,16 +116,6 @@ from updater.utils.acb import decode_acb_bytes, extract_acb
 from updater.utils.hca import decode_hca_to_wav_bytes
 
 logger = logging.getLogger("live2d")
-
-
-def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
-    """Return whether this individual bundle belongs to the Live2D namespace."""
-    return (bundle.get("bundleName") or "").startswith("live2d/")
-
-
-def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
-    """Return whether this individual bundle contains chart score assets."""
-    return (bundle.get("bundleName") or "").startswith("music/music_score/")
 
 
 async def _terminate_process(process) -> None:
@@ -207,11 +200,6 @@ _get_shared_audio_encoder_semaphore = _bundle_runtime.audio_encoder_semaphore
 _get_shared_video_transcode_semaphore = _bundle_runtime.video_transcode_semaphore
 _get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
 _get_shared_usm_process_pool = _bundle_runtime.usm_process_pool
-
-
-def shutdown_process_pools(*, wait: bool = True, cancel_futures: bool = True) -> None:
-    """Shut down all cached process pools used by bundle processing."""
-    _bundle_runtime.shutdown(wait=wait, cancel_futures=cancel_futures)
 
 
 def _get_hca_decode_backend(config) -> HcaDecodeBackend:

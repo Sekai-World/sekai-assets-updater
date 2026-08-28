@@ -10,21 +10,22 @@ import orjson as json
 from anyio import open_file
 
 from updater.asset_bundle_info import build_request_headers, fetch_asset_bundle_info
-from updater.bundle.pipeline import shutdown_process_pools
+from updater.cli.logging_setup import setup_logging_queue
 from updater.helpers import (
     DownloadPlan,
     build_download_disk_space_gate,
     dedupe_download_items,
-    ensure_dir_exists,
-    filter_bundles_for_mode,
-    filter_download_items_for_mode,
     get_download_list,
-    get_mode_bundle_prefixes,
-    sanitize_http_log_value,
     select_bundles_for_download,
-    setup_logging_queue,
 )
 from updater.model import ConfigLike
+from updater.modes import (
+    filter_bundles_for_mode,
+    filter_download_items_for_mode,
+    get_mode_bundle_prefixes,
+)
+from updater.runtime import shutdown_process_pools
+from updater.sanitize import sanitize_http_log_value
 from updater.specialized import (
     get_enabled_specialized_modes,
     get_required_bundle_prefixes,
@@ -51,6 +52,7 @@ from updater.state import (
     validate_pending_queue,
 )
 from updater.worker import get_bundle_cache_path, recover_live2d_model_outputs, run_pipeline
+from updater.workspace import ensure_dir_exists
 
 logger = logging.getLogger("asset_updater")
 

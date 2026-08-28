@@ -202,3 +202,8 @@ class BundleRuntime:
 
 runtime = BundleRuntime()
 atexit.register(runtime.shutdown)
+
+
+def shutdown_process_pools(*, wait: bool = True, cancel_futures: bool = True) -> None:
+    """Shut down all cached process pools used by bundle processing."""
+    runtime.shutdown(wait=wait, cancel_futures=cancel_futures)

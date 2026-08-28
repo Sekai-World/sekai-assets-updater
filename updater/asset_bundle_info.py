@@ -13,10 +13,9 @@ from updater.helpers import (
     format_url_template,
     get_http_session_options,
     refresh_cookie,
-    sanitize_headers,
-    sanitize_url,
 )
 from updater.model import ConfigLike
+from updater.sanitize import sanitize_headers, sanitize_url
 
 logger = logging.getLogger("asset_updater")
 
