@@ -404,9 +404,12 @@ def _demux_usm_sources_in_memory(
         if selected is None:
             logger.warning("cridecoder produced no usable video stream for %s", usm_output_path)
             return None
+        stream_data = selected["data"]
+        if not isinstance(stream_data, bytes):
+            raise TypeError("cridecoder returned non-bytes stream data")
         m2v_path = _resolve_generated_child_path(save_dir, f"{usm_output_path.stem}.m2v")
         validate_output_target(save_dir, m2v_path)
-        atomic_write_bytes(m2v_path, selected["data"])
+        atomic_write_bytes(m2v_path, stream_data)
         return m2v_path
     except Exception:
         logger.warning(

@@ -48,9 +48,6 @@ select = [
     "B",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"updater/utils/__init__.py" = ["F403"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -66,16 +63,19 @@ include = [
     "updater/storage/remote.py",
     "updater/net/disk_space.py",
     "updater/net/urls.py",
+    "updater/postprocess/charts.py",
     "updater/cli/configuration.py",
     "updater/cli/entry.py",
     "updater/cli/lifecycle.py",
     "updater/cli/logging_setup.py",
     "updater/cli/pending.py",
     "updater/cli/runner.py",
+    "updater/media/audio.py",
     "updater/media/binary.py",
     "updater/media/hca.py",
     "updater/media/process.py",
     "updater/media/usm.py",
+    "updater/media/video.py",
     "updater/modes.py",
     "updater/runtime.py",
     "updater/sanitize.py",

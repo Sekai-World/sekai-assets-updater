@@ -179,9 +179,10 @@ cython_debug/
 !/config.example.py
 
 cache/
-test*.py
-!test_audio_pipeline.py
-!tests/test_phase0_support.py
+# Scratch test scripts at the repo root only; the real suite lives in
+# tests/ and must stay visible to git AND to gitignore-respecting tools
+# like ruff (an unanchored pattern made ruff silently skip suite files).
+/test*.py
 .omo/
 .tools/
 .slim/deepwork/
