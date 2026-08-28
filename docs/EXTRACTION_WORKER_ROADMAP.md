@@ -17,7 +17,7 @@ IO-oriented pipelines.
 
 ## Current Problem
 
-`run_pipeline` in `updater/worker.py` creates a fixed number of `extract_worker-*` coroutines
+`run_pipeline` in `updater/pipeline.py` creates a fixed number of `extract_worker-*` coroutines
 (`MAX_CONCURRENCY_EXTRACTS`, typically equal to `MAX_CONCURRENCY` / `os.cpu_count()`).
 Each worker pulls `PipelineArtifact` items from a bounded `asyncio.Queue` and runs
 `extract_asset_bundle` sequentially.
