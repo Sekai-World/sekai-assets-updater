@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from anyio import Path as AsyncPath
 
 import main
+from updater.cli import configuration, entry, lifecycle, pending, runner
 from updater.modes import is_live2d_bundle
 from updater.modes import filter_bundles_for_mode, get_mode_bundle_prefixes
 from updater.net.plan import select_bundles_for_download
@@ -294,8 +295,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             ENABLE_CHARTS_POSTPROCESS=True,
             DL_INCLUDE_LIST=[r"^music/music_score/001_song$"],
         )
-        with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
-            await main._run_enabled_specialized_postprocess("assets", config, False)
+        with patch.object(lifecycle, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+            await lifecycle._run_enabled_specialized_postprocess("assets", config, False)
         postprocess.assert_awaited_once_with(
             "charts",
             config,
@@ -306,8 +307,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_forced_charts_does_not_pass_download_include_list(self):
         config = SimpleNamespace(DL_INCLUDE_LIST=[r"^music/music_score/001_song$"])
-        with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
-            await main._run_enabled_specialized_postprocess("charts", config, False)
+        with patch.object(lifecycle, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+            await lifecycle._run_enabled_specialized_postprocess("charts", config, False)
         postprocess.assert_awaited_once_with(
             "charts",
             config,
@@ -477,9 +478,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             ASSET_LOCAL_EXTRACTED_DIR=AsyncPath("extracted"),
             LIVE2D_BUNDLE_CACHE_DIR=AsyncPath("cache"),
         )
-        with patch.object(main, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
-            with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
-                await main._run_enabled_specialized_postprocess(
+        with patch.object(lifecycle, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
+            with patch.object(lifecycle, "run_specialized_postprocess", new=AsyncMock()) as postprocess:
+                await lifecycle._run_enabled_specialized_postprocess(
                     "live2d", config, False, {"unit": {"bundleName": "live2d/model/unit"}}
                 )
         recover.assert_awaited_once()
@@ -512,10 +513,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             ENABLE_CHARTS_POSTPROCESS=False,
         )
 
-        with patch.object(
-            main, "_run_enabled_specialized_postprocess", new=AsyncMock()
+        with patch.object(lifecycle, "_run_enabled_specialized_postprocess", new=AsyncMock()
         ) as postprocess:
-            await main._complete_with_empty_download_list(
+            await lifecycle._complete_with_empty_download_list(
                 config,
                 "assets",
                 [],
@@ -533,9 +533,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
         )
         bundles = {"unit": {"bundleName": "live2d/model/unit"}}
 
-        with patch.object(main, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
-            with patch.object(main, "run_specialized_postprocess", new=AsyncMock()) as process:
-                await main._complete_with_empty_download_list(
+        with patch.object(lifecycle, "recover_live2d_model_outputs", new=AsyncMock()) as recover:
+            with patch.object(lifecycle, "run_specialized_postprocess", new=AsyncMock()) as process:
+                await lifecycle._complete_with_empty_download_list(
                     config,
                     "assets",
                     [],
@@ -552,10 +552,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
     async def test_forced_specialized_noop_retains_postprocessing(self):
         config = SimpleNamespace(DL_LIST_CACHE_PATH=AsyncPath("/tmp/unused-dl-list.json"))
 
-        with patch.object(
-            main, "_run_enabled_specialized_postprocess", new=AsyncMock()
+        with patch.object(lifecycle, "_run_enabled_specialized_postprocess", new=AsyncMock()
         ) as postprocess:
-            await main._complete_with_empty_download_list(
+            await lifecycle._complete_with_empty_download_list(
                 config,
                 "live2d",
                 [],

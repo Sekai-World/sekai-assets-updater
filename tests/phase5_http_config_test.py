@@ -9,8 +9,8 @@ import pytest
 from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
-import main
 from updater import worker
+from updater.cli import lifecycle
 from updater.model import SekaiServerRegion
 from updater.net import cookies as net_cookies
 from updater.net import download as net_download
@@ -202,12 +202,12 @@ def test_main_pipeline_boundary_does_not_log_raw_transport_exception(monkeypatch
     async def failing_pipeline(*_args, **_kwargs):
         raise RuntimeError(f"signed URL https://cdn.test/?token={secret} body={secret}")
 
-    monkeypatch.setattr(main, "run_pipeline", failing_pipeline)
+    monkeypatch.setattr(lifecycle, "run_pipeline", failing_pipeline)
     config = SimpleNamespace()
     paths = SimpleNamespace(queue="pending.json")
 
     with caplog.at_level(logging.ERROR):
-        download = main.do_download([], config, {}, None, paths)
+        download = lifecycle.do_download([], config, {}, None, paths)
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(download)
 

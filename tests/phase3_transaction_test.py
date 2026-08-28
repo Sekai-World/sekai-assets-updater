@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-import main
 from updater import state
+from updater.cli import configuration, lifecycle, pending, runner
 from updater.net import plan as net_plan
 
 
@@ -106,10 +106,10 @@ def test_download_plan_retains_fetched_assetver_even_when_cache_differs_or_match
 
 def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
     events: list[str] = []
-    original_create = main.create_journal
-    original_replay = main.replay_journal
+    original_create = runner.create_journal
+    original_replay = runner.replay_journal
 
     async def fake_fetch(*_args, **_kwargs):
         return _fetch_result()
@@ -133,12 +133,12 @@ def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatc
         events.append("replay")
         return result
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    monkeypatch.setattr(main, "create_journal", create)
-    monkeypatch.setattr(main, "replay_journal", replay)
-    monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(runner, "create_journal", create)
+    monkeypatch.setattr(runner, "replay_journal", replay)
+    monkeypatch.setattr(lifecycle, "run_pipeline", fake_pipeline)
 
-    asyncio.run(main.main(force_full_download=True))
+    asyncio.run(runner.main(force_full_download=True))
 
     assert events == ["replay", "journal", "replay", "pipeline"]
     assert not (tmp_path / "dl.json").exists()
@@ -150,7 +150,7 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
     events: list[str] = []
 
     async def fake_fetch(*_args, **_kwargs):
@@ -159,16 +159,16 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
     async def fake_plan(*_args, **_kwargs):
         return net_plan.DownloadPlan([], _metadata("fresh", "new"), _version())
 
-    original_replay = main.replay_journal
+    original_replay = runner.replay_journal
 
     def replay(*args, **kwargs):
         events.append("replay")
         return original_replay(*args, **kwargs)
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    monkeypatch.setattr(main, "get_download_list", fake_plan)
-    monkeypatch.setattr(main, "replay_journal", replay)
-    asyncio.run(main.main())
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(pending, "get_download_list", fake_plan)
+    monkeypatch.setattr(runner, "replay_journal", replay)
+    asyncio.run(runner.main())
 
     assert events == ["replay"]  # startup recovery only
     paths = state.derive_state_paths(
@@ -215,7 +215,7 @@ def test_empty_transaction_failure_retains_journal_for_recovery(
 
 def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatch) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -233,12 +233,12 @@ def test_startup_replay_is_authoritative_before_fetch(tmp_path: Path, monkeypatc
     async def fake_plan(*_args, **_kwargs):
         return net_plan.DownloadPlan([], _metadata(), _version())
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    monkeypatch.setattr(main, "get_download_list", fake_plan)
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(pending, "get_download_list", fake_plan)
     monkeypatch.setattr(
-        main, "do_download", lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
+        lifecycle, "do_download", lambda *_args, **_kwargs: asyncio.sleep(0, result=True)
     )
-    asyncio.run(main.main())
+    asyncio.run(runner.main())
     assert fetched
     assert not paths.queue.exists()
 
@@ -255,7 +255,7 @@ def test_pipeline_exception_or_cancellation_preserves_complete_queue(
     )
     queue = [["url", {"bundleName": "current", "hash": "new"}]]
     state.atomic_write_json(paths.queue, queue, state.validate_pending_queue)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
 
     async def fake_fetch(*_args, **_kwargs):
         return _fetch_result()
@@ -265,9 +265,9 @@ def test_pipeline_exception_or_cancellation_preserves_complete_queue(
             raise asyncio.CancelledError
         raise RuntimeError("pipeline crash")
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    monkeypatch.setattr(main, "run_pipeline", fake_pipeline)
-    run = main.main()
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", fake_pipeline)
+    run = runner.main()
     with pytest.raises((RuntimeError, asyncio.CancelledError)):
         asyncio.run(run)
     assert state.load_pending_queue(paths.queue) == [
@@ -279,7 +279,7 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -292,9 +292,9 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(
     async def failed_pipeline(*_args, **_kwargs):
         return [("url", {"bundleName": "current", "hash": "new"})]
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    monkeypatch.setattr(main, "run_pipeline", failed_pipeline)
-    asyncio.run(main.main(force_full_download=True))
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", failed_pipeline)
+    asyncio.run(runner.main(force_full_download=True))
     assert state.load_pending_queue(paths.queue) == [
         ["url", {"bundleName": "current", "hash": "new"}]
     ]
@@ -302,8 +302,8 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(
     async def successful_pipeline(*_args, **_kwargs):
         return []
 
-    monkeypatch.setattr(main, "run_pipeline", successful_pipeline)
-    asyncio.run(main.main())
+    monkeypatch.setattr(lifecycle, "run_pipeline", successful_pipeline)
+    asyncio.run(runner.main())
     assert not paths.queue.exists()
 
 
@@ -311,7 +311,7 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
     tmp_path: Path, monkeypatch
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
@@ -329,8 +329,8 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
         result.asset_bundle_info = _metadata("observed", "fresh")
         return result
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    asyncio.run(main.main(update_asset_bundle_info_only=True))
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    asyncio.run(runner.main(update_asset_bundle_info_only=True))
     assert paths.asset_metadata.read_bytes() == before_metadata
     assert paths.game_version.read_bytes() == before_version
     assert (tmp_path / "metadata.observed.json").exists()
@@ -343,13 +343,13 @@ def test_metadata_only_rejects_observed_path_aliasing_normal_target(
     config = _config(tmp_path)
     config.DL_LIST_CACHE_PATH = AnyioPath(tmp_path / "metadata.observed.json")
     config.ASSET_BUNDLE_INFO_CACHE_PATH = AnyioPath(tmp_path / "metadata.json")
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
 
     async def fake_fetch(*_args, **_kwargs):
         return _fetch_result()
 
-    monkeypatch.setattr(main, "fetch_asset_bundle_info", fake_fetch)
-    run = main.main(update_asset_bundle_info_only=True)
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    run = runner.main(update_asset_bundle_info_only=True)
     with pytest.raises(RuntimeError, match="aliases"):
         asyncio.run(run)
 
@@ -363,8 +363,8 @@ def test_lock_contention_blocks_second_main_run(tmp_path: Path, monkeypatch) -> 
     )
     holder = state.StateLock(paths.lock).acquire()
     try:
-        monkeypatch.setattr(main, "config", config)
-        run = main.main(force_full_download=True)
+        monkeypatch.setattr(configuration, "config", config)
+        run = runner.main(force_full_download=True)
         with pytest.raises(state.StateLockError, match="already held"):
             asyncio.run(run)
     finally:
@@ -378,14 +378,14 @@ def test_charts_uses_legacy_lock_without_replaying_journal_and_releases(
     config.ASSET_LOCAL_EXTRACTED_DIR = AnyioPath(tmp_path / "extracted")
     paths = state.derive_state_paths(config.DL_LIST_CACHE_PATH)
     state.create_journal(paths, [], _metadata(), _version(), "must-not-replay")
-    monkeypatch.setattr(main, "config", config)
+    monkeypatch.setattr(configuration, "config", config)
 
     async def fake_postprocess(*_args, **_kwargs):
         with pytest.raises(state.StateLockError, match="already held"):
             state.StateLock(paths.lock).acquire()
 
-    monkeypatch.setattr(main, "run_specialized_postprocess", fake_postprocess)
-    asyncio.run(main.main(mode="charts"))
+    monkeypatch.setattr(runner, "run_specialized_postprocess", fake_postprocess)
+    asyncio.run(runner.main(mode="charts"))
 
     assert paths.journal.exists()
     released = state.StateLock(paths.lock).acquire()

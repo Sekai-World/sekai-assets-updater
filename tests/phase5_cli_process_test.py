@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import main
+from updater.cli import configuration, entry
 from updater.external_process import TERMINATE_TASK_ATTRIBUTE
 from updater.media import audio as media_audio
 from updater.media import process as media_process
@@ -385,21 +385,21 @@ def _valid_config() -> SimpleNamespace:
 def test_validate_config_rejects_invalid_values(
     field: str, value, expected: str, monkeypatch
 ) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
     config = _valid_config()
     setattr(config, field, value)
 
     with pytest.raises(ValueError, match=expected):
-        main.validate_config(config)  # type: ignore[arg-type]
+        configuration.validate_config(config)  # type: ignore[arg-type]
 
 
 def test_validate_config_requires_selected_executables(monkeypatch) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: None)
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: None)
     config = _valid_config()
     config.HCA_DECODE_BACKEND = "vgmstream"
 
     with pytest.raises(ValueError, match="vgmstream-cli"):
-        main.validate_config(config)  # type: ignore[arg-type]
+        configuration.validate_config(config)  # type: ignore[arg-type]
 
 
 def test_repeated_cancel_during_terminate_runs_single_reap(
@@ -643,9 +643,9 @@ def test_cli_shuts_down_process_pools_on_completion_and_error(
     config_path.write_text("")
     events: list[str] = []
     monkeypatch.setattr(sys, "argv", ["sekai-updater", "-c", str(config_path)])
-    monkeypatch.setattr(main, "validate_config", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(main, "setup_logging_queue", lambda: None)
-    monkeypatch.setattr(main, "config", None)
+    monkeypatch.setattr(entry, "validate_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(entry, "setup_logging_queue", lambda: None)
+    monkeypatch.setattr(configuration, "config", None)
 
     async def fake_main(**_kwargs):
         events.append("main")
@@ -655,14 +655,14 @@ def test_cli_shuts_down_process_pools_on_completion_and_error(
     def fake_shutdown():
         events.append("shutdown")
 
-    monkeypatch.setattr(main, "main", fake_main)
-    monkeypatch.setattr(main, "shutdown_process_pools", fake_shutdown)
+    monkeypatch.setattr(entry, "main", fake_main)
+    monkeypatch.setattr(entry, "shutdown_process_pools", fake_shutdown)
 
     if pipeline_error is None:
-        main.cli()
+        entry.cli()
     else:
         with pytest.raises(pipeline_error):
-            main.cli()
+            entry.cli()
 
     # Cleanup must run exactly once, after the pipeline, on success and failure.
     assert events == ["main", "shutdown"]
