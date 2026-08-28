@@ -63,6 +63,7 @@ include = [
     "updater/net/http.py",
     "updater/net/integrity.py",
     "updater/net/plan.py",
+    "updater/storage/remote.py",
     "updater/net/disk_space.py",
     "updater/net/urls.py",
     "updater/cli/logging_setup.py",

@@ -7,11 +7,11 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from updater import helpers
 from updater.bundle import acb_cache as bundle_acb_cache
 from updater.bundle.images import save_image_formats
-from updater.helpers import upload_to_storage
 from updater.security import SecurityError
+from updater.storage import rclone as storage_rclone
+from updater.storage.rclone import upload_to_storage
 from updater.unity_rs_adapter import RenderedImage, _rendered_image
 
 
@@ -105,8 +105,10 @@ def test_upload_batches_rclone_copy_into_single_process(
     async def fake_wait(_process, _timeout):
         return 0
 
-    monkeypatch.setattr(helpers.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    monkeypatch.setattr(helpers, "_wait_for_process", fake_wait)
+    monkeypatch.setattr(
+        storage_rclone.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
+    monkeypatch.setattr(storage_rclone, "_wait_for_process", fake_wait)
 
     asyncio.run(
         upload_to_storage(

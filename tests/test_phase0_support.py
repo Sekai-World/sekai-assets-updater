@@ -10,8 +10,8 @@ from aiohttp import web
 from anyio import Path as AnyioPath
 
 from updater.bundle import pipeline as bundle
-from updater.helpers import upload_to_storage
 from updater.net import download as net_download
+from updater.storage.rclone import upload_to_storage
 
 
 def test_download_fixture_serves_and_deobfuscates_a_bundle(

@@ -8,11 +8,11 @@ from types import SimpleNamespace
 import pytest
 
 import main
-from updater import helpers
 from updater.bundle import pipeline as bundle
 from updater.external_process import TERMINATE_TASK_ATTRIBUTE
 from updater.runtime import runtime as bundle_runtime
 from updater.runtime import shutdown_process_pools
+from updater.storage import rclone as storage_rclone
 
 
 class _HangingProcess:
@@ -110,7 +110,7 @@ def test_helpers_wait_cancellation_terminates_before_reraising() -> None:
     process = _HangingProcess(terminate_exits=True)
 
     async def scenario() -> None:
-        task = asyncio.create_task(helpers._wait_for_process(process, 10))
+        task = asyncio.create_task(storage_rclone._wait_for_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -312,10 +312,10 @@ def test_upload_timeout_cleans_up_process_and_redacts_remote_query(
     async def create_process(*_args, **_kwargs):
         return process
 
-    monkeypatch.setattr(helpers.asyncio, "create_subprocess_exec", create_process)
-    monkeypatch.setattr(helpers, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
+    monkeypatch.setattr(storage_rclone.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(storage_rclone, "EXTERNAL_PROCESS_TERMINATE_GRACE", 0.01)
     config = SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=0.001)
-    upload = helpers.upload_to_storage(
+    upload = storage_rclone.upload_to_storage(
         [source],
         tmp_path,
         "remote:bucket?Signature=remote-secret",
@@ -442,7 +442,7 @@ def test_helpers_repeated_cancel_during_terminate_runs_single_reap(
     calls = {"n": 0}
     started = asyncio.Event()
     release = asyncio.Event()
-    original_terminate = helpers._terminate_process
+    original_terminate = storage_rclone._terminate_process
 
     async def slow_terminate(proc) -> None:
         calls["n"] += 1
@@ -450,10 +450,10 @@ def test_helpers_repeated_cancel_during_terminate_runs_single_reap(
         await release.wait()
         await original_terminate(proc)
 
-    monkeypatch.setattr(helpers, "_terminate_process", slow_terminate)
+    monkeypatch.setattr(storage_rclone, "_terminate_process", slow_terminate)
 
     async def scenario() -> None:
-        task = asyncio.create_task(helpers._wait_for_process(process, 10))
+        task = asyncio.create_task(storage_rclone._wait_for_process(process, 10))
         await asyncio.sleep(0)
         task.cancel()
         await started.wait()
@@ -511,7 +511,7 @@ def test_communicate_repeated_cancel_during_terminate_runs_single_reap(
     ("module", "waiter", "task_attribute"),
     [
         (bundle, bundle._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
-        (helpers, helpers._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
+        (storage_rclone, storage_rclone._wait_for_process, TERMINATE_TASK_ATTRIBUTE),
     ],
 )
 def test_cancelled_wait_preserves_cancellation_when_termination_fails(
