@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 from anyio import Path as AnyioPath
 
-from updater import asset_bundle_info, helpers, state
+from updater import helpers, state
 from updater.model import SekaiServerRegion
+from updater.net import metadata as asset_bundle_info
 from updater.net import urls as net_urls
 
 

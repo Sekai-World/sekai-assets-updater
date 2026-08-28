@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from updater import state
-from updater.asset_bundle_info import normalize_asset_bundle_info, normalize_game_version
+from updater.net.metadata import normalize_asset_bundle_info, normalize_game_version
 
 
 def _queue():

@@ -10,11 +10,12 @@ from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
 import main
-from updater import asset_bundle_info, worker
+from updater import worker
 from updater.bundle import pipeline as bundle
 from updater.model import SekaiServerRegion
 from updater.net import cookies as net_cookies
 from updater.net import http as net_http
+from updater.net import metadata as asset_bundle_info
 
 
 class _Response:
