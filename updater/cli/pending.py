@@ -7,7 +7,6 @@ from typing import Any, Dict, List, Tuple, cast
 import orjson as json
 from anyio import open_file
 
-from updater.cli.configuration import require_config  # noqa: F401
 from updater.model import ConfigLike
 from updater.modes import (
     filter_bundles_for_mode,
@@ -19,6 +18,7 @@ from updater.net.plan import (
     dedupe_download_items,
     get_download_list,
 )
+from updater.pipeline import DownloadItem
 from updater.state import (
     StateNotFoundError,
     load_pending_queue,
@@ -26,8 +26,6 @@ from updater.state import (
 from updater.workspace import ensure_dir_exists, get_bundle_cache_path
 
 logger = logging.getLogger("asset_updater")
-
-DownloadItem = Tuple[str, Dict[str, Any]]
 
 
 def _pending_items_outside_mode(items: List[DownloadItem], mode: str) -> List[DownloadItem]:

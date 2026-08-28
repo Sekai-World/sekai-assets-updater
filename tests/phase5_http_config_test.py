@@ -9,7 +9,7 @@ import pytest
 from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
-from updater import worker
+from updater import pipeline
 from updater.cli import lifecycle
 from updater.model import SekaiServerRegion
 from updater.net import cookies as net_cookies
@@ -108,7 +108,7 @@ def test_download_http_options_omit_proxy_and_keep_configured_timeout():
 
 def test_worker_cdn_session_omits_proxy(monkeypatch):
     _Session.instances.clear()
-    monkeypatch.setattr(worker.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(pipeline.aiohttp, "ClientSession", _Session)
     config = SimpleNamespace(
         PROXY_URL="http://proxy.test:8080",
         REQUEST_TIMEOUT=17,
@@ -118,7 +118,7 @@ def test_worker_cdn_session_omits_proxy(monkeypatch):
         PIPELINE_STAGE_QUEUE_SIZE=1,
     )
 
-    assert asyncio.run(worker.run_pipeline([], config, {})) == []
+    assert asyncio.run(pipeline.run_pipeline([], config, {})) == []
 
     session = _Session.instances[-1]
     assert "proxy" not in session.options
@@ -335,19 +335,16 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
 
 def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp_path):
     download_mock = AsyncMock()
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
-
-    refresh_mock = AsyncMock()
-    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock, raising=False)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
 
     config = SimpleNamespace(ASSET_LOCAL_BUNDLE_CACHE_DIR=None)
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait(("https://cdn.test/bundle", {"bundleName": "music/example"}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -363,7 +360,6 @@ def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp
 
     asyncio.run(run())
 
-    refresh_mock.assert_not_awaited()
     download_kwargs = download_mock.await_args.kwargs
     assert download_kwargs["headers"] == {"Cookie": "old-cookie"}
 
@@ -371,7 +367,7 @@ def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp
 def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
     monkeypatch, tmp_path, caplog
 ):
-    signed_url = "https://cdn.test/bundle?Signature=worker-url-secret"
+    signed_url = "https://cdn.test/bundle?Signature=pipeline-url-secret"
     network_error = (
         "request failed for "
         "https://origin.test/?token=exception-url-secret "
@@ -397,7 +393,7 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
             final_exception.append(exc)
             raise
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", exhausted_download)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", exhausted_download)
     final_exception = []
     config = SimpleNamespace(
         ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
@@ -409,11 +405,11 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait((signed_url, {"bundleName": "music/example"}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
     failed_tasks = []
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -432,7 +428,7 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 
     records = caplog.text
     for secret in (
-        "worker-url-secret",
+        "pipeline-url-secret",
         "exception-url-secret",
         "cookie-a-secret",
         "cookie-b-secret",
@@ -459,15 +455,15 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 def test_worker_fallback_label_is_sanitized(monkeypatch, caplog):
     secret = "fallback-label-secret"
     download_mock = AsyncMock(side_effect=RuntimeError("download failed"))
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
     config = SimpleNamespace(ASSET_LOCAL_BUNDLE_CACHE_DIR=None)
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait((f"https://cdn.test/?token={secret}", {}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,

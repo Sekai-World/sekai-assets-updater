@@ -9,7 +9,7 @@ import aiohttp
 import pytest
 from anyio import Path as AnyioPath
 
-from updater import worker
+from updater import pipeline
 from updater.net import download as net_download
 
 
@@ -510,14 +510,14 @@ def test_download_stage_cancellation_removes_temporary_destination(monkeypatch) 
         started.set()
         await release.wait()
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", blocked_download)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", blocked_download)
     queue = asyncio.Queue()
     output = asyncio.Queue()
     queue.put_nowait(("url", {"bundleName": "bundle"}))
 
     async def run():
         task = asyncio.create_task(
-            worker._download_stage(
+            pipeline._download_stage(
                 "id",
                 "download",
                 queue,
@@ -550,11 +550,11 @@ def test_run_pipeline_cancellation_cleans_inflight_temporary_destination(monkeyp
         started.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", blocked_download)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", blocked_download)
 
     async def run():
         task = asyncio.create_task(
-            worker.run_pipeline([("url", {"bundleName": "bundle"})], _worker_config(), {})
+            pipeline.run_pipeline([("url", {"bundleName": "bundle"})], _worker_config(), {})
         )
         await started.wait()
         task.cancel()

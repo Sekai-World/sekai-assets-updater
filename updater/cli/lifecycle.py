@@ -20,6 +20,7 @@ from updater.net.plan import (
     dedupe_download_items,
     select_bundles_for_download,
 )
+from updater.pipeline import run_pipeline
 from updater.postprocess.dispatch import run_specialized_postprocess
 from updater.postprocess.live2d_models import recover_live2d_model_outputs
 from updater.sanitize import sanitize_http_log_value
@@ -31,7 +32,6 @@ from updater.state import (
     validate_game_version,
     validate_pending_queue,
 )
-from updater.worker import run_pipeline
 
 logger = logging.getLogger("asset_updater")
 

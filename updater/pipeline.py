@@ -1,3 +1,19 @@
+"""The asynchronous download -> extract -> upload stage pipeline.
+
+Bundles flow through three bounded stages (fetch -> plan happens in
+updater.net, post-processing in updater.postprocess): the download stage
+streams and deobfuscates bundles, the extract stage fans out to the
+process pool and media jobs, and the upload stage pushes artifacts to the
+configured storage backends. When the adaptive extraction-worker roadmap
+lands, this module becomes the updater/pipeline/ package (engine.py +
+scheduler.py); that is new code with new tests, not part of the structural
+refactor that created this file.
+
+Note: never import refresh_cookie into this namespace — historic tests
+patched a nonexistent "worker.refresh_cookie" as a no-op, and a real
+binding here would silently activate similarly-shaped patches.
+"""
+
 import asyncio
 import logging
 import tempfile
@@ -646,26 +662,3 @@ async def run_pipeline(
     )
 
     return failed_tasks
-
-
-async def worker(
-    name: str,
-    dl_info: DownloadItem,
-    config,
-    headers: Dict[str, str],
-    cookie: str = None,
-    download_disk_space_gate: DownloadDiskSpaceGate | None = None,
-) -> None:
-    failed_tasks = await run_pipeline(
-        [dl_info],
-        config,
-        headers,
-        cookie=cookie,
-        download_disk_space_gate=download_disk_space_gate,
-    )
-    if failed_tasks:
-        _, bundle = dl_info
-        raise RuntimeError(
-            f"{sanitize_log_label(name)} failed processing "
-            f"{sanitize_log_label(bundle.get('bundleName', dl_info[0]))}"
-        )
