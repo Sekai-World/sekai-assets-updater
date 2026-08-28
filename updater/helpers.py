@@ -3,12 +3,9 @@ import inspect
 import logging
 import os
 import re
-import shutil
 import tempfile
-import time
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator, Dict, List, Mapping, Tuple
+from typing import Dict, List, Mapping, Tuple
 
 from anyio import Path, open_file
 
@@ -39,12 +36,6 @@ from updater.state import (
 )
 
 logger = logging.getLogger("asset_updater")
-
-DEFAULT_DOWNLOAD_MAX_RETRIES = 3
-DEFAULT_DOWNLOAD_RETRY_BASE_DELAY = 1.0
-DEFAULT_DOWNLOAD_RETRY_MAX_DELAY = 30.0
-DEFAULT_MIN_FREE_DISK_BYTES = 1024 * 1024 * 1024
-DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL = 5.0
 
 
 @dataclass(frozen=True)
@@ -101,180 +92,6 @@ async def _wait_for_process(process, timeout: float) -> int:
         _terminate_process,
         task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,
-    )
-
-
-def get_download_max_retries(config=None) -> int:
-    value = getattr(config, "DOWNLOAD_MAX_RETRIES", DEFAULT_DOWNLOAD_MAX_RETRIES)
-    try:
-        retries = int(value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid DOWNLOAD_MAX_RETRIES=%r, falling back to %d",
-            value,
-            DEFAULT_DOWNLOAD_MAX_RETRIES,
-        )
-        retries = DEFAULT_DOWNLOAD_MAX_RETRIES
-    return max(1, retries)
-
-
-def get_download_retry_base_delay(config=None) -> float:
-    value = getattr(config, "DOWNLOAD_RETRY_BASE_DELAY", DEFAULT_DOWNLOAD_RETRY_BASE_DELAY)
-    try:
-        delay = float(value)
-    except (TypeError, ValueError):
-        delay = DEFAULT_DOWNLOAD_RETRY_BASE_DELAY
-    return max(0.0, delay)
-
-
-def get_download_retry_max_delay(config=None) -> float:
-    value = getattr(config, "DOWNLOAD_RETRY_MAX_DELAY", DEFAULT_DOWNLOAD_RETRY_MAX_DELAY)
-    try:
-        delay = float(value)
-    except (TypeError, ValueError):
-        delay = DEFAULT_DOWNLOAD_RETRY_MAX_DELAY
-    return max(0.0, delay)
-
-
-def get_min_free_disk_bytes(config=None) -> int:
-    value = getattr(config, "MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES)
-    try:
-        min_free_bytes = int(value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid MIN_FREE_DISK_BYTES=%r, falling back to %d",
-            value,
-            DEFAULT_MIN_FREE_DISK_BYTES,
-        )
-        min_free_bytes = DEFAULT_MIN_FREE_DISK_BYTES
-    return max(0, min_free_bytes)
-
-
-def get_download_disk_space_check_interval(config=None) -> float:
-    value = getattr(
-        config,
-        "DOWNLOAD_DISK_SPACE_CHECK_INTERVAL",
-        DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL,
-    )
-    try:
-        check_interval = float(value)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Invalid DOWNLOAD_DISK_SPACE_CHECK_INTERVAL=%r, falling back to %s",
-            value,
-            DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL,
-        )
-        check_interval = DEFAULT_DOWNLOAD_DISK_SPACE_CHECK_INTERVAL
-    return max(0.1, check_interval)
-
-
-def get_download_target_path(config) -> Path:
-    bundle_dir = getattr(config, "ASSET_LOCAL_BUNDLE_CACHE_DIR", None)
-    if isinstance(bundle_dir, Path):
-        return bundle_dir
-    return Path(tempfile.gettempdir())
-
-
-def _resolve_disk_usage_path(path: Path) -> str:
-    candidate = path.as_posix()
-    while not os.path.exists(candidate):
-        parent = os.path.dirname(candidate)
-        if not parent or parent == candidate:
-            break
-        candidate = parent
-    return candidate
-
-
-class DownloadDiskSpaceGate:
-    def __init__(
-        self,
-        target_path: Path,
-        min_free_bytes: int,
-        check_interval: float,
-    ):
-        self.target_path = target_path
-        self.min_free_bytes = max(0, min_free_bytes)
-        self.check_interval = max(0.1, check_interval)
-        self._disk_usage_path = _resolve_disk_usage_path(target_path)
-        self._reserved_bytes = 0
-        self._condition = asyncio.Condition()
-
-    @property
-    def reserved_bytes(self) -> int:
-        return self._reserved_bytes
-
-    def _get_free_bytes(self) -> int:
-        return shutil.disk_usage(self._disk_usage_path).free
-
-    async def _acquire(self, required_bytes: int, label: str) -> None:
-        required_bytes = max(0, required_bytes)
-        required_free_bytes = self.min_free_bytes + required_bytes
-        last_wait_log_at = 0.0
-
-        async with self._condition:
-            while True:
-                free_bytes = self._get_free_bytes()
-                available_bytes = free_bytes - self._reserved_bytes
-                if available_bytes >= required_free_bytes:
-                    self._reserved_bytes += required_bytes
-                    logger.debug(
-                        "Reserved %d bytes for %s on %s (free=%d reserved=%d)",
-                        required_bytes,
-                        label,
-                        self._disk_usage_path,
-                        free_bytes,
-                        self._reserved_bytes,
-                    )
-                    return
-
-                now = time.monotonic()
-                if now - last_wait_log_at >= 30:
-                    logger.warning(
-                        "Waiting for free disk space before downloading %s: free=%d reserved=%d required=%d path=%s",
-                        label,
-                        free_bytes,
-                        self._reserved_bytes,
-                        required_free_bytes,
-                        self._disk_usage_path,
-                    )
-                    last_wait_log_at = now
-
-                try:
-                    await asyncio.wait_for(
-                        self._condition.wait(),
-                        timeout=self.check_interval,
-                    )
-                except asyncio.TimeoutError:
-                    continue
-
-    async def _release(self, required_bytes: int) -> None:
-        required_bytes = max(0, required_bytes)
-        async with self._condition:
-            self._reserved_bytes = max(0, self._reserved_bytes - required_bytes)
-            self._condition.notify_all()
-
-    @asynccontextmanager
-    async def reserve(
-        self,
-        required_bytes: int,
-        label: str,
-    ) -> AsyncIterator[None]:
-        await self._acquire(required_bytes, label)
-        try:
-            yield
-        finally:
-            await self._release(required_bytes)
-
-
-def build_download_disk_space_gate(config) -> DownloadDiskSpaceGate | None:
-    min_free_bytes = get_min_free_disk_bytes(config)
-    if min_free_bytes <= 0:
-        return None
-
-    return DownloadDiskSpaceGate(
-        target_path=get_download_target_path(config),
-        min_free_bytes=min_free_bytes,
-        check_interval=get_download_disk_space_check_interval(config),
     )
 
 
@@ -578,19 +395,6 @@ def _derive_storage_remote_path(remote_base: str, relative_key: str) -> str:
     remote_key = derive_remote_key(relative_key)
     separator = "" if remote_base.endswith("/") else "/"
     return f"{remote_base}{separator}{remote_key}"
-
-
-async def deobfuscate(data: bytes) -> bytes:
-    """Deobfuscate the bundle data"""
-    if data[:4] == b"\x20\x00\x00\x00":
-        data = data[4:]
-    elif data[:4] == b"\x10\x00\x00\x00":
-        data = data[4:]
-        header = bytes(
-            a ^ b for a, b in zip(data[:128], (b"\xff" * 5 + b"\x00" * 3) * 16, strict=True)
-        )
-        data = header + data[128:]
-    return data
 
 
 def _validate_upload_sources(

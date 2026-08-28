@@ -61,6 +61,8 @@ docstring-code-line-length = "dynamic"
 include = [
     "main.py",
     "updater/net/http.py",
+    "updater/net/integrity.py",
+    "updater/net/disk_space.py",
     "updater/net/urls.py",
     "updater/cli/logging_setup.py",
     "updater/modes.py",
@@ -68,7 +70,6 @@ include = [
     "updater/sanitize.py",
     "updater/workspace.py",
     "updater/bundle/audio.py",
-    "updater/bundle/integrity.py",
     "updater/bundle/paths.py",
     "updater/bundle/video.py",
     "updater/constants.py",

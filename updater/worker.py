@@ -10,15 +10,10 @@ from typing import Any, Dict, List, Tuple, Union
 import aiohttp
 from anyio import Path
 
-from updater.bundle.pipeline import (
-    download_deobfuscate_bundle,
-    extract_asset_bundle,
-)
-from updater.helpers import (
-    DownloadDiskSpaceGate,
-    upload_to_storage,
-    upload_to_storage_opendal,
-)
+from updater.bundle.pipeline import extract_asset_bundle
+from updater.helpers import upload_to_storage, upload_to_storage_opendal
+from updater.net.disk_space import DownloadDiskSpaceGate
+from updater.net.download import download_deobfuscate_bundle
 from updater.net.http import build_cdn_headers, get_download_http_session_options
 from updater.sanitize import sanitize_log_label
 from updater.security import prepare_secure_directory, resolve_secure_path, validate_contained_file

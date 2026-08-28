@@ -10,7 +10,7 @@ import pytest
 from anyio import Path as AnyioPath
 
 from updater import worker
-from updater.bundle import pipeline as bundle
+from updater.net import download as net_download
 
 
 class _Content:
@@ -76,7 +76,7 @@ def _start_run(tmp_path: Path, body: bytes, *, bundle_data=None, headers=None, e
     target.write_bytes(existing)
     response = _Response(body, headers=headers)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         AnyioPath(target.parent),
         "bundle",
@@ -125,22 +125,22 @@ def test_obfuscated_unityfs_is_deobfuscated_and_promoted(tmp_path: Path) -> None
     [b"", b"short", b"NotUnityFS payload", b"\x20\x00\x00\x00", b"\x10\x00\x00\x00short"],
 )
 def test_invalid_or_truncated_download_never_promotes(tmp_path: Path, body: bytes) -> None:
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         _run(tmp_path, body)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
-    assert not list((tmp_path / "nested").glob(".bundle.*.tmp"))
+    assert not list((tmp_path / "nested").glob(".net_download.*.tmp"))
 
 
 def test_content_length_mismatch_preserves_existing(tmp_path: Path) -> None:
     body = _unityfs()
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         _run(tmp_path, body, headers={"Content-Length": "999"})
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
 
 def test_unityfs_declared_size_mismatch_preserves_existing(tmp_path: Path) -> None:
     body = _unityfs(declared_size=1)
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         _run(tmp_path, body)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
@@ -166,7 +166,7 @@ def test_manifest_size_metadata_does_not_participate_in_integrity_validation(
 def test_same_size_malformed_unityfs_is_rejected(tmp_path: Path) -> None:
     data = b"UnityFS\0" + b"x" * 35
     _, download = _start_run(tmp_path, data)
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         asyncio.run(download)
     assert (tmp_path / "nested" / "bundle").read_bytes() == b"old"
 
@@ -186,7 +186,7 @@ def test_non_200_response_does_not_promote(tmp_path: Path) -> None:
     target.write_bytes(b"old")
     response = _Response(_unityfs(), status=503)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         AnyioPath(tmp_path),
         "bundle",
@@ -194,7 +194,7 @@ def test_non_200_response_does_not_promote(tmp_path: Path) -> None:
         config=config,
         session=_Session(response),
     )
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         asyncio.run(download)
     assert target.read_bytes() == b"old"
 
@@ -207,7 +207,7 @@ def test_cancellation_cleans_temp_without_retry_or_replacing_existing(tmp_path: 
     session = _Session(response)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=3, REQUEST_TIMEOUT=1)
 
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         AnyioPath(tmp_path),
         "bundle",
@@ -219,7 +219,7 @@ def test_cancellation_cleans_temp_without_retry_or_replacing_existing(tmp_path: 
         asyncio.run(download)
 
     assert target.read_bytes() == b"old"
-    assert not list(tmp_path.glob(".bundle.*.tmp"))
+    assert not list(tmp_path.glob(".net_download.*.tmp"))
 
 
 def _retry_config(**overrides) -> SimpleNamespace:
@@ -263,12 +263,12 @@ def test_retryable_failures_retry_and_then_succeed(
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(bundle.random, "uniform", lambda low, high: high)
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(net_download.random, "uniform", lambda low, high: high)
     target = tmp_path / "bundle"
     target.write_bytes(b"old")
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             tmp_path,
             "bundle",
@@ -302,9 +302,9 @@ def test_retryable_connection_failures_retry_and_then_succeed(
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             tmp_path,
             "bundle",
@@ -325,9 +325,9 @@ def test_http_408_response_is_retried_then_succeeds(tmp_path: Path, monkeypatch)
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             tmp_path,
             "bundle",
@@ -346,7 +346,7 @@ def test_permanent_http_errors_are_single_attempt(tmp_path: Path, status: int) -
     session = _SequenceSession([_Response(b"", status=status), _successful_response()])
     target = tmp_path / "bundle"
     target.write_bytes(b"old")
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         tmp_path,
         "bundle",
@@ -354,7 +354,7 @@ def test_permanent_http_errors_are_single_attempt(tmp_path: Path, status: int) -
         config=_retry_config(),
         session=session,
     )
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         asyncio.run(download)
     assert session.calls == 1
     assert target.read_bytes() == b"old"
@@ -362,7 +362,7 @@ def test_permanent_http_errors_are_single_attempt(tmp_path: Path, status: int) -
 
 def test_integrity_error_is_single_attempt(tmp_path: Path) -> None:
     session = _SequenceSession([_Response(b"not-a-bundle"), _successful_response()])
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         tmp_path,
         "bundle",
@@ -370,7 +370,7 @@ def test_integrity_error_is_single_attempt(tmp_path: Path) -> None:
         config=_retry_config(),
         session=session,
     )
-    with pytest.raises(bundle.DownloadIntegrityError):
+    with pytest.raises(net_download.DownloadIntegrityError):
         asyncio.run(download)
     assert session.calls == 1
 
@@ -382,8 +382,8 @@ def test_retry_exhaustion_uses_total_attempt_semantics(tmp_path: Path, monkeypat
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
-    download = bundle.download_deobfuscate_bundle(
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         tmp_path,
         "bundle",
@@ -391,7 +391,7 @@ def test_retry_exhaustion_uses_total_attempt_semantics(tmp_path: Path, monkeypat
         config=_retry_config(DOWNLOAD_MAX_RETRIES=3),
         session=session,
     )
-    with pytest.raises(bundle.RetryableDownloadError):
+    with pytest.raises(net_download.RetryableDownloadError):
         asyncio.run(download)
     assert session.calls == 3
     assert len(sleeps) == 2
@@ -411,10 +411,10 @@ def test_full_jitter_bounds_follow_capped_exponential_schedule(tmp_path: Path, m
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.random, "uniform", fake_uniform)
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(net_download.random, "uniform", fake_uniform)
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             tmp_path,
             "bundle",
@@ -437,15 +437,15 @@ def test_retry_after_is_capped_and_used_as_jitter_upper_bound(
     bounds = []
     sleeps = []
     monkeypatch.setattr(
-        bundle.random, "uniform", lambda low, high: bounds.append((low, high)) or high
+        net_download.random, "uniform", lambda low, high: bounds.append((low, high)) or high
     )
 
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(net_download.asyncio, "sleep", fake_sleep)
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             tmp_path,
             "bundle",
@@ -468,8 +468,8 @@ def test_cancellation_during_backoff_does_not_make_next_request(
     async def cancelled_sleep(_delay: float) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(bundle.asyncio, "sleep", cancelled_sleep)
-    download = bundle.download_deobfuscate_bundle(
+    monkeypatch.setattr(net_download.asyncio, "sleep", cancelled_sleep)
+    download = net_download.download_deobfuscate_bundle(
         "https://example.test/bundle",
         tmp_path,
         "bundle",
@@ -481,7 +481,7 @@ def test_cancellation_during_backoff_does_not_make_next_request(
         asyncio.run(download)
     assert session.calls == 1
     assert target.read_bytes() == b"old"
-    assert not list(tmp_path.glob(".bundle.*.tmp"))
+    assert not list(tmp_path.glob(".net_download.*.tmp"))
 
 
 def _worker_config() -> SimpleNamespace:
@@ -574,9 +574,9 @@ def test_download_uses_async_open_file_for_temp_write(
     response = _Response(data)
     config = SimpleNamespace(DOWNLOAD_MAX_RETRIES=1, REQUEST_TIMEOUT=1)
     created_descriptors: list[int] = []
-    original_mkstemp = bundle.tempfile.mkstemp
+    original_mkstemp = net_download.tempfile.mkstemp
     opened_files: list[object] = []
-    original_open_file = bundle.open_file
+    original_open_file = net_download.open_file
 
     def record_mkstemp(*args, **kwargs):
         descriptor, temporary_name = original_mkstemp(*args, **kwargs)
@@ -588,16 +588,16 @@ def test_download_uses_async_open_file_for_temp_write(
         opened_files.append(opened_file)
         return opened_file
 
-    monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
-    monkeypatch.setattr(bundle, "open_file", record_open_file)
+    monkeypatch.setattr(net_download.tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(net_download, "open_file", record_open_file)
 
     def fail_fdopen(*_args, **_kwargs):
         raise AssertionError("sync os.fdopen used in async download path")
 
-    monkeypatch.setattr(bundle.os, "fdopen", fail_fdopen)
+    monkeypatch.setattr(net_download.os, "fdopen", fail_fdopen)
 
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             "https://example.test/bundle",
             AnyioPath(tmp_path),
             "bundle",
@@ -611,4 +611,4 @@ def test_download_uses_async_open_file_for_temp_write(
     assert opened_files
     assert len(opened_files) == len(created_descriptors)
     assert all(file.wrapped.closed for file in opened_files)
-    assert not list(tmp_path.glob(".bundle.*.tmp"))
+    assert not list(tmp_path.glob(".net_download.*.tmp"))

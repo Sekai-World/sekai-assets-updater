@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from updater import helpers
-from updater.helpers import _derive_storage_remote_path, get_download_max_retries, upload_to_storage
+from updater.helpers import _derive_storage_remote_path, upload_to_storage
+from updater.net.download import get_download_max_retries
 from updater.security import SecurityError
 
 

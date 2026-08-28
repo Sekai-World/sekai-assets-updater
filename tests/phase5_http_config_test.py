@@ -11,9 +11,9 @@ from anyio import Path as AnyioPath
 
 import main
 from updater import worker
-from updater.bundle import pipeline as bundle
 from updater.model import SekaiServerRegion
 from updater.net import cookies as net_cookies
+from updater.net import download as net_download
 from updater.net import http as net_http
 from updater.net import metadata as asset_bundle_info
 
@@ -310,7 +310,7 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
 
     class _FailingSession:
         def get(self, *_args, **_kwargs):
-            raise bundle.aiohttp.ClientConnectionError(exception_url)
+            raise net_download.aiohttp.ClientConnectionError(exception_url)
 
     config = SimpleNamespace(
         DOWNLOAD_MAX_RETRIES=2,
@@ -318,13 +318,13 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
         DOWNLOAD_RETRY_MAX_DELAY=0,
         REQUEST_TIMEOUT=1,
     )
-    monkeypatch.setattr(bundle.random, "uniform", lambda *_args: 0)
+    monkeypatch.setattr(net_download.random, "uniform", lambda *_args: 0)
 
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         signed_url, AnyioPath(tmp_path), "bundle", {}, config=config, session=_FailingSession()
     )
     with caplog.at_level(logging.WARNING, logger="live2d"):
-        with pytest.raises(bundle.RetryableDownloadError):
+        with pytest.raises(net_download.RetryableDownloadError):
             asyncio.run(download)
 
     records = "\n".join(record.getMessage() for record in caplog.records)
@@ -387,12 +387,12 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 
     class _FailingSession:
         def get(self, *_args, **_kwargs):
-            raise bundle.aiohttp.ClientConnectionError(network_error)
+            raise net_download.aiohttp.ClientConnectionError(network_error)
 
     async def exhausted_download(*args, **kwargs):
         kwargs["session"] = _FailingSession()
         try:
-            return await bundle.download_deobfuscate_bundle(*args, **kwargs)
+            return await net_download.download_deobfuscate_bundle(*args, **kwargs)
         except Exception as exc:
             final_exception.append(exc)
             raise

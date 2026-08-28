@@ -12,7 +12,6 @@ from anyio import open_file
 from updater.cli.logging_setup import setup_logging_queue
 from updater.helpers import (
     DownloadPlan,
-    build_download_disk_space_gate,
     dedupe_download_items,
     get_download_list,
     select_bundles_for_download,
@@ -23,6 +22,7 @@ from updater.modes import (
     filter_download_items_for_mode,
     get_mode_bundle_prefixes,
 )
+from updater.net.disk_space import build_download_disk_space_gate
 from updater.net.metadata import build_request_headers, fetch_asset_bundle_info
 from updater.runtime import shutdown_process_pools
 from updater.sanitize import sanitize_http_log_value

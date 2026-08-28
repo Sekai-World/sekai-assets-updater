@@ -11,6 +11,7 @@ from anyio import Path as AnyioPath
 
 from updater.bundle import pipeline as bundle
 from updater.helpers import upload_to_storage
+from updater.net import download as net_download
 
 
 def test_download_fixture_serves_and_deobfuscates_a_bundle(
@@ -34,7 +35,7 @@ def test_download_fixture_serves_and_deobfuscates_a_bundle(
     output_path = AnyioPath(temp_dir / "bundle")
 
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             f"{server.url}/bundle",
             temp_dir,
             "bundle",
