@@ -42,7 +42,7 @@ def extract_unity_objects(
             raise
 
         save_path = save_path.with_name(save_path.name.strip())
-        if live2d_bundle and "motion" in save_path.parts:
+        if live2d_bundle and len(save_path.parts) >= 2 and save_path.parts[0] == "live2d" and save_path.parts[1] == "motion":
             logger.debug("Skipping live2d motion asset %s for post-processing", unityfs_path)
             continue
         save_dir = save_path.parent
