@@ -63,9 +63,7 @@ def bundle_has_changed(bundle: Dict, cached_bundle: Dict | None) -> bool:
     return get_bundle_checksum(bundle) != get_bundle_checksum(cached_bundle)
 
 
-async def _load_cached_metadata(
-    config, force_full_download: bool
-) -> tuple[Dict | None, Dict | None]:
+def _load_cached_metadata(config, force_full_download: bool) -> tuple[Dict | None, Dict | None]:
     if force_full_download:
         return None, None
 
@@ -232,7 +230,7 @@ async def get_download_list(
     assert config, "Config must be provided to get_download_list"
     assert config.ASSET_BUNDLE_INFO_CACHE_PATH, "ASSET_BUNDLE_INFO_CACHE_PATH must be set in config"
     assert config.GAME_VERSION_JSON_CACHE_PATH, "GAME_VERSION_JSON_CACHE_PATH must be set in config"
-    cached_asset_bundle_info, cached_game_version_json = await _load_cached_metadata(
+    cached_asset_bundle_info, cached_game_version_json = _load_cached_metadata(
         config, force_full_download
     )
 

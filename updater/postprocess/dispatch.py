@@ -216,11 +216,12 @@ async def _run_charts_postprocess(
                 await _process_charts(config, chart_source_dir, score_include_list)
         return
 
-    if not has_local_chart_sources(extracted_dir, score_include_list):
-        if not await _fetch_chart_sources_or_skip(
-            config, extracted_dir, score_include_list, skip_missing_sources
-        ):
-            return
+    if not has_local_chart_sources(
+        extracted_dir, score_include_list
+    ) and not await _fetch_chart_sources_or_skip(
+        config, extracted_dir, score_include_list, skip_missing_sources
+    ):
+        return
     await _process_charts(config, extracted_dir, score_include_list)
 
 

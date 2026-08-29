@@ -330,7 +330,6 @@ async def _process_video_job(
     discarded_video_files: list[Path] = []
     video_output_path = usm_output_path.with_suffix(".mp4")
     m2v_path: Path | None = None
-    ffmpeg_process = None
 
     usm_source: Path | None = None
     try:
@@ -353,8 +352,6 @@ async def _process_video_job(
             ):
                 exported_video_files.append(video_output_path)
     except (OSError, ValueError):
-        if ffmpeg_process is not None:
-            _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
     finally:
         await _cleanup_video_intermediates(

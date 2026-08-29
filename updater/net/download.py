@@ -72,6 +72,36 @@ class _TransportDecoder:
     header: bytearray = field(default_factory=bytearray)
     mode: str | None = None
 
+    def _set_mode(self, marker: bytes) -> bytes | None:
+        if marker == b"\x20\x00\x00\x00":
+            self.mode = "plain"
+        elif marker == b"\x10\x00\x00\x00":
+            self.mode = "obfuscated"
+        elif marker == b"Unit":
+            self.mode = "raw"
+            return marker
+        else:
+            raise DownloadIntegrityError("unknown bundle transport header")
+        return None
+
+    def _consume_obfuscated_header(self, pending: bytes) -> tuple[bytes, bytes | None]:
+        if len(self.header) < 132:
+            header_bytes_needed = 132 - len(self.header)
+            self.header.extend(pending[:header_bytes_needed])
+            pending = pending[header_bytes_needed:]
+            if len(self.header) < 132:
+                return b"", None
+            decoded_header = bytes(
+                a ^ b
+                for a, b in zip(
+                    self.header[4:132],
+                    (b"\xff" * 5 + b"\x00" * 3) * 16,
+                    strict=True,
+                )
+            )
+            return pending, decoded_header
+        return pending, None
+
     def transform(self, raw_chunk: bytes) -> list[bytes]:
         """Strip and decode the transport header without buffering the body."""
         if not raw_chunk:
@@ -85,38 +115,18 @@ class _TransportDecoder:
             pending = pending[needed:]
             if len(self.header) < 4:
                 return output_chunks
-            marker = bytes(self.header)
-            if marker == b"\x20\x00\x00\x00":
-                self.mode = "plain"
-            elif marker == b"\x10\x00\x00\x00":
-                self.mode = "obfuscated"
-            elif marker == b"Unit":
-                self.mode = "raw"
-                output_chunks.append(bytes(self.header))
-            else:
-                raise DownloadIntegrityError("unknown bundle transport header")
+            header_output = self._set_mode(bytes(self.header))
+            if header_output is not None:
+                output_chunks.append(header_output)
 
         if self.mode in ("plain", "raw"):
             if pending:
                 output_chunks.append(pending)
             return output_chunks
 
-        if len(self.header) < 132:
-            header_bytes_needed = 132 - len(self.header)
-            self.header.extend(pending[:header_bytes_needed])
-            pending = pending[header_bytes_needed:]
-            if len(self.header) < 132:
-                return output_chunks
-            output_chunks.append(
-                bytes(
-                    a ^ b
-                    for a, b in zip(
-                        self.header[4:132],
-                        (b"\xff" * 5 + b"\x00" * 3) * 16,
-                        strict=True,
-                    )
-                )
-            )
+        pending, decoded_header = self._consume_obfuscated_header(pending)
+        if decoded_header is not None:
+            output_chunks.append(decoded_header)
         if pending:
             output_chunks.append(pending)
         return output_chunks
@@ -142,6 +152,29 @@ def _validate_download_response(response) -> None:
             retry_after,
         )
     raise DownloadIntegrityError(f"download returned HTTP status {response.status}")
+
+
+def _validate_download_payload(
+    response,
+    decoder: _TransportDecoder,
+    temporary_path: StdPath,
+    raw_bytes: int,
+    stored_bytes: int,
+    trusted_root: Path,
+    bundle_save_path: Path,
+) -> None:
+    if decoder.mode == "obfuscated" and len(decoder.header) < 132:
+        raise DownloadIntegrityError("truncated obfuscated header")
+    content_length = response.headers.get("Content-Length")
+    if content_length is not None:
+        if not isinstance(content_length, str) or not content_length.isdigit():
+            raise DownloadIntegrityError("Content-Length is not a valid integer")
+        if int(content_length) != raw_bytes:
+            raise DownloadIntegrityError("Content-Length does not match response bytes")
+    if stored_bytes == 0:
+        raise DownloadIntegrityError("downloaded bundle is empty")
+    _validate_unityfs_bundle(temporary_path, stored_bytes)
+    validate_output_target(trusted_root, bundle_save_path)
 
 
 async def _write_download_response(
@@ -170,18 +203,15 @@ async def _write_download_response(
                     stored_bytes += len(output_chunk)
             await output.flush()
             await asyncio.to_thread(os.fsync, output.wrapped.fileno())
-        if decoder.mode == "obfuscated" and len(decoder.header) < 132:
-            raise DownloadIntegrityError("truncated obfuscated header")
-        content_length = response.headers.get("Content-Length")
-        if content_length is not None:
-            if not isinstance(content_length, str) or not content_length.isdigit():
-                raise DownloadIntegrityError("Content-Length is not a valid integer")
-            if int(content_length) != raw_bytes:
-                raise DownloadIntegrityError("Content-Length does not match response bytes")
-        if stored_bytes == 0:
-            raise DownloadIntegrityError("downloaded bundle is empty")
-        _validate_unityfs_bundle(temporary_path, stored_bytes)
-        validate_output_target(trusted_root, bundle_save_path)
+        _validate_download_payload(
+            response,
+            decoder,
+            temporary_path,
+            raw_bytes,
+            stored_bytes,
+            trusted_root,
+            bundle_save_path,
+        )
         os.replace(temporary_path, StdPath(bundle_save_path.as_posix()))
         temporary_path = None
     finally:
@@ -209,6 +239,84 @@ async def _fetch_bundle_once(
         await _write_download_response(response, bundle_save_path, trusted_root)
 
 
+async def _download_with_optional_session(
+    url: str,
+    trusted_root: Path,
+    bundle_save_path: Path,
+    headers: Dict[str, str],
+    config,
+    session: aiohttp.ClientSession | None,
+) -> None:
+    if session is not None:
+        await _fetch_bundle_once(session, url, trusted_root, bundle_save_path, headers)
+        return
+    async with aiohttp.ClientSession(**get_download_http_session_options(config)) as retry_session:
+        await _fetch_bundle_once(retry_session, url, trusted_root, bundle_save_path, headers)
+
+
+async def _run_download_attempt(
+    url: str,
+    trusted_root: Path,
+    bundle_save_path: Path,
+    headers: Dict[str, str],
+    config,
+    session: aiohttp.ClientSession | None,
+) -> RetryableDownloadError | None:
+    try:
+        await _download_with_optional_session(
+            url,
+            trusted_root,
+            bundle_save_path,
+            headers,
+            config,
+            session,
+        )
+    except asyncio.CancelledError:
+        raise
+    except (
+        asyncio.TimeoutError,
+        aiohttp.ClientConnectionError,
+        aiohttp.ServerDisconnectedError,
+        aiohttp.ClientPayloadError,
+    ) as exc:
+        return RetryableDownloadError(sanitize_http_log_value(str(exc)))
+    except RetryableDownloadError as exc:
+        return RetryableDownloadError(
+            sanitize_http_log_value(str(exc)),
+            exc.retry_after,
+        )
+    return None
+
+
+async def _wait_for_download_retry(
+    attempt: int,
+    max_retries: int,
+    retry_error: RetryableDownloadError,
+    retry_base_delay: float,
+    retry_max_delay: float,
+    url: str,
+) -> None:
+    exponential_cap = min(
+        retry_max_delay,
+        retry_base_delay * (2 ** (attempt - 1)),
+    )
+    if retry_error.retry_after is not None:
+        delay_cap = min(retry_max_delay, retry_error.retry_after)
+    else:
+        delay_cap = exponential_cap
+    delay = random.uniform(0.0, delay_cap)
+    logger.warning(
+        "Download attempt %d/%d failed for %s (%s: %s), retrying in %.3fs...",
+        attempt,
+        max_retries,
+        sanitize_url(url),
+        type(retry_error).__name__,
+        sanitize_http_log_value(str(retry_error)),
+        delay,
+    )
+    await asyncio.sleep(delay)
+
+
 async def download_deobfuscate_bundle(
     url: str,
     trusted_root: Path,
@@ -230,56 +338,23 @@ async def download_deobfuscate_bundle(
     retry_max_delay = get_download_retry_max_delay(config)
 
     for attempt in range(1, max_retries + 1):
-        try:
-            if session is not None:
-                await _fetch_bundle_once(session, url, trusted_root, bundle_save_path, headers)
-            else:
-                async with aiohttp.ClientSession(
-                    **get_download_http_session_options(config)
-                ) as retry_session:
-                    await _fetch_bundle_once(
-                        retry_session,
-                        url,
-                        trusted_root,
-                        bundle_save_path,
-                        headers,
-                    )
+        retry_error = await _run_download_attempt(
+            url,
+            trusted_root,
+            bundle_save_path,
+            headers,
+            config,
+            session,
+        )
+        if retry_error is None:
             return
-        except asyncio.CancelledError:
-            raise
-        except (
-            asyncio.TimeoutError,
-            aiohttp.ClientConnectionError,
-            aiohttp.ServerDisconnectedError,
-            aiohttp.ClientPayloadError,
-        ) as exc:
-            retry_error = RetryableDownloadError(sanitize_http_log_value(str(exc)))
-        except RetryableDownloadError as exc:
-            retry_error = RetryableDownloadError(
-                sanitize_http_log_value(str(exc)),
-                exc.retry_after,
-            )
-        else:
-            return
-
         if attempt >= max_retries:
             raise retry_error from None
-        exponential_cap = min(
-            retry_max_delay,
-            retry_base_delay * (2 ** (attempt - 1)),
-        )
-        if retry_error.retry_after is not None:
-            delay_cap = min(retry_max_delay, retry_error.retry_after)
-        else:
-            delay_cap = exponential_cap
-        delay = random.uniform(0.0, delay_cap)
-        logger.warning(
-            "Download attempt %d/%d failed for %s (%s: %s), retrying in %.3fs...",
+        await _wait_for_download_retry(
             attempt,
             max_retries,
-            sanitize_url(url),
-            type(retry_error).__name__,
-            sanitize_http_log_value(str(retry_error)),
-            delay,
+            retry_error,
+            retry_base_delay,
+            retry_max_delay,
+            url,
         )
-        await asyncio.sleep(delay)

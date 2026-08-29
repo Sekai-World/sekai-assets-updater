@@ -396,7 +396,7 @@ async def _download_stage(
             input_queue.task_done()
 
 
-async def _prepare_extraction_destination(artifact: PipelineArtifact, config) -> Path:
+def _prepare_extraction_destination(artifact: PipelineArtifact, config) -> Path:
     configured_extracted_root = _configured_path(config.ASSET_LOCAL_EXTRACTED_DIR)
     if configured_extracted_root is not None:
         configured_root = Path(prepare_secure_directory(configured_extracted_root).as_posix())
@@ -444,7 +444,7 @@ async def _extract_one_artifact(
             if configured_bundle_cache_root is None
             else Path(prepare_secure_directory(configured_bundle_cache_root).as_posix())
         )
-        artifact.extracted_save_path = await _prepare_extraction_destination(artifact, config)
+        artifact.extracted_save_path = _prepare_extraction_destination(artifact, config)
         extracted_outputs = await extract_asset_bundle(
             artifact.bundle_save_path,
             artifact.bundle,

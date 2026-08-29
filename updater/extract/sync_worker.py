@@ -417,9 +417,7 @@ def _extract_bundle_files_sync(
     from updater.media.images import DEFAULT_PNG_COMPRESSION, DEFAULT_WEBP_METHOD
 
     in_memory_limit: int = (
-        DEFAULT_USM_IN_MEMORY_MAX_BYTES
-        if usm_in_memory_limit is None
-        else usm_in_memory_limit
+        DEFAULT_USM_IN_MEMORY_MAX_BYTES if usm_in_memory_limit is None else usm_in_memory_limit
     )
     bundle_path = StdPath(bundle_save_path)
     output_root = StdPath(extracted_save_path)
