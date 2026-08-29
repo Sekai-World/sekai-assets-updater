@@ -165,7 +165,7 @@ cython_debug/
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
+.idea/
 
 # Ruff stuff:
 .ruff_cache/
@@ -173,13 +173,16 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-config*.py
-!config.example.py
+# User config files live at the repo root only; anchor the pattern so it
+# cannot swallow package modules like updater/cli/configuration.py.
+/config*.py
+!/config.example.py
 
 cache/
-test*.py
-!test_audio_pipeline.py
-!tests/test_phase0_support.py
+# Scratch test scripts at the repo root only; the real suite lives in
+# tests/ and must stay visible to git AND to gitignore-respecting tools
+# like ruff (an unanchored pattern made ruff silently skip suite files).
+/test*.py
 .omo/
 .tools/
 .slim/deepwork/

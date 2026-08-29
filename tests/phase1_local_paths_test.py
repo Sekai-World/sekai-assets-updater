@@ -8,9 +8,8 @@ from unittest.mock import AsyncMock
 import pytest
 from anyio import Path as AnyioPath
 
-import bundle
-import security
-import worker
+from updater import pipeline, security
+from updater.extract import paths as extract_paths
 
 
 def test_unityfs_mapping_rejects_absolute_traversal_and_backslash_names(tmp_path: Path) -> None:
@@ -21,7 +20,7 @@ def test_unityfs_mapping_rejects_absolute_traversal_and_backslash_names(tmp_path
     )
     for unityfs_path in bad_paths:
         with pytest.raises((ValueError, security.SecurityError)):
-            bundle._build_unityfs_save_path(unityfs_path, tmp_path)
+            extract_paths.build_unityfs_save_path(unityfs_path, tmp_path)
 
 
 def test_unityfs_mapping_rejects_precreated_extraction_symlink(tmp_path: Path) -> None:
@@ -30,44 +29,46 @@ def test_unityfs_mapping_rejects_precreated_extraction_symlink(tmp_path: Path) -
     (tmp_path / "link").symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(security.SecurityError):
-        bundle._build_unityfs_save_path(
+        extract_paths.build_unityfs_save_path(
             "assets/sekai/assetbundle/resources/characters/link/asset.bytes",
             tmp_path,
         )
 
 
 def test_audio_clip_sample_names_are_contained_and_reject_escape(tmp_path: Path) -> None:
-    assert bundle._resolve_generated_child_path(tmp_path, "voice.wav") == tmp_path / "voice.wav"
+    assert (
+        extract_paths.resolve_generated_child_path(tmp_path, "voice.wav") == tmp_path / "voice.wav"
+    )
     for filename in ("/outside.wav", "../outside.wav", "voice\\outside.wav"):
         with pytest.raises(security.SecurityError):
-            bundle._resolve_generated_child_path(tmp_path, filename)
+            extract_paths.resolve_generated_child_path(tmp_path, filename)
 
 
 def test_acb_cue_and_textasset_names_are_contained(tmp_path: Path) -> None:
-    assert bundle._resolve_generated_child_path(tmp_path, "voice", ".acb") == (
+    assert extract_paths.resolve_generated_child_path(tmp_path, "voice", ".acb") == (
         tmp_path / "voice.acb"
     )
     for cue_name in ("../escape", "/escape", "cue\\escape"):
         with pytest.raises(security.SecurityError):
-            bundle._resolve_generated_child_path(tmp_path, cue_name, ".acb")
+            extract_paths.resolve_generated_child_path(tmp_path, cue_name, ".acb")
     with pytest.raises(security.SecurityError):
-        bundle._resolve_generated_child_path(tmp_path, "../textasset.bytes")
+        extract_paths.resolve_generated_child_path(tmp_path, "../textasset.bytes")
 
 
 def test_usm_expected_and_fallback_paths_are_contained(tmp_path: Path) -> None:
     expected = tmp_path / "movie.usm"
     expected.write_bytes(b"usm")
-    assert bundle._resolve_existing_usm_path_sync(expected, tmp_path) == expected
+    assert extract_paths.resolve_existing_usm_path(expected, tmp_path) == expected
 
     fallback = tmp_path / "actual.usm"
     fallback.write_bytes(b"usm")
     expected.unlink()
-    assert bundle._resolve_existing_usm_path_sync(expected, tmp_path) == fallback
+    assert extract_paths.resolve_existing_usm_path(expected, tmp_path) == fallback
 
     escape = tmp_path / "link.usm"
     escape.symlink_to(tmp_path.parent / "outside.usm")
     with pytest.raises(security.SecurityError):
-        bundle._resolve_existing_usm_path_sync(escape, tmp_path)
+        extract_paths.resolve_existing_usm_path(escape, tmp_path)
 
 
 def test_worker_rejects_bundle_name_before_download_and_cache_symlink(
@@ -80,7 +81,7 @@ def test_worker_rejects_bundle_name_before_download_and_cache_symlink(
     (cache_root / "escape").symlink_to(outside, target_is_directory=True)
 
     download_mock = AsyncMock()
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
     config = SimpleNamespace(
         ASSET_LOCAL_BUNDLE_CACHE_DIR=AnyioPath(cache_root),
         ASSET_LOCAL_EXTRACTED_DIR=None,
@@ -89,10 +90,10 @@ def test_worker_rejects_bundle_name_before_download_and_cache_symlink(
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait(("http://example.test/bundle", {"bundleName": "escape/file"}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -122,7 +123,7 @@ def test_worker_rejects_precreated_extraction_root_symlink(tmp_path: Path) -> No
         ASSET_LOCAL_EXTRACTED_DIR=AnyioPath(linked_root),
         UNITY_VERSION=None,
     )
-    artifact = worker.PipelineArtifact(
+    artifact = pipeline.PipelineArtifact(
         "http://example.test/bundle",
         {"bundleName": "music/example"},
         AnyioPath(tmp_path / "bundle"),
@@ -130,11 +131,11 @@ def test_worker_rejects_precreated_extraction_root_symlink(tmp_path: Path) -> No
     extract_queue: asyncio.Queue = asyncio.Queue()
     upload_queue: asyncio.Queue = asyncio.Queue()
     extract_queue.put_nowait(artifact)
-    extract_queue.put_nowait(worker._QUEUE_SENTINEL)
+    extract_queue.put_nowait(pipeline._QUEUE_SENTINEL)
     failed_tasks: list = []
 
     async def run() -> None:
-        await worker._extract_stage(
+        await pipeline._extract_stage(
             "test", "extract", extract_queue, upload_queue, config, failed_tasks, asyncio.Lock()
         )
 
@@ -147,7 +148,7 @@ def test_worker_disk_gate_supports_temporary_bundle_download(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     download_mock = AsyncMock()
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
 
     class Gate:
         def reserve(self, _size, _label):
@@ -165,11 +166,11 @@ def test_worker_disk_gate_supports_temporary_bundle_download(
     extract_queue: asyncio.Queue = asyncio.Queue()
     item = ("http://example.test/bundle", {"bundleName": "music/example"})
     input_queue.put_nowait(item)
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
     failed_tasks: list = []
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -197,6 +198,6 @@ def test_worker_disk_gate_supports_temporary_bundle_download(
 
 def test_worker_download_destination_guard_is_explicit() -> None:
     """Download path setup must not rely on assert (disabled under -O)."""
-    source = Path(worker.__file__).read_text(encoding="utf-8")
+    source = Path(pipeline.__file__).read_text(encoding="utf-8")
     assert "assert download_root is not None" not in source
     assert "assert download_relative_path is not None" not in source

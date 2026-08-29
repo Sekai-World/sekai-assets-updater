@@ -3,12 +3,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from anyio import Path as AnyioPath
 
-import worker
+from updater import pipeline
 
 
 def _config(extracted_root: Path | None) -> SimpleNamespace:
@@ -55,9 +54,9 @@ def _install_pipeline_fakes(
             if data == contents["failed"]:
                 raise RuntimeError("synthetic upload failure")
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", fake_download)
-    monkeypatch.setattr(worker, "extract_asset_bundle", fake_extract)
-    monkeypatch.setattr(worker, "upload_to_storage", fake_upload)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
 
 
 @pytest.mark.parametrize("configured", [False, True], ids=["temporary", "configured"])
@@ -68,20 +67,20 @@ def test_run_pipeline_isolates_same_name_outputs_and_finishes_all_stage_workers(
     contents = {"first": b"first bytes", "second": b"second bytes"}
     _install_pipeline_fakes(monkeypatch, contents, uploads)
     sentinel_calls: list[tuple[object, int]] = []
-    original_put_sentinels = worker._put_sentinels
+    original_put_sentinels = pipeline._put_sentinels
 
     async def recording_put_sentinels(queue, count):
         sentinel_calls.append((queue, count))
         await original_put_sentinels(queue, count)
 
-    monkeypatch.setattr(worker, "_put_sentinels", recording_put_sentinels)
+    monkeypatch.setattr(pipeline, "_put_sentinels", recording_put_sentinels)
     config = _config(tmp_path / "configured" if configured else None)
     items = [
         ("first-url", {"bundleName": "first"}),
         ("second-url", {"bundleName": "second"}),
     ]
 
-    failed = worker.asyncio.run(worker.run_pipeline(items, config, {}))
+    failed = pipeline.asyncio.run(pipeline.run_pipeline(items, config, {}))
 
     assert failed == []
     assert [(name, data) for name, _root, _file, data in uploads] == [
@@ -116,7 +115,7 @@ def test_run_pipeline_upload_failure_cleans_temporary_roots(
         ("second-url", {"bundleName": "second"}),
     ]
 
-    failed = worker.asyncio.run(worker.run_pipeline(items, config, {}))
+    failed = pipeline.asyncio.run(pipeline.run_pipeline(items, config, {}))
 
     assert failed == [("failed-url", {"bundleName": "failed"})]
     failed_upload = next(item for item in uploads if item[3] == b"failed bytes")
@@ -137,20 +136,17 @@ def test_run_pipeline_download_workers_reuse_the_supplied_cookie(
     uploads: list[tuple[str, Path, Path, bytes]] = []
     _install_pipeline_fakes(monkeypatch, contents, uploads)
 
-    refresh_mock = AsyncMock()
-    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock, raising=False)
-
     download_headers: list[dict[str, str]] = []
-    original_download = worker.download_deobfuscate_bundle
+    original_download = pipeline.download_deobfuscate_bundle
 
     async def record_download(*args, **kwargs):
         download_headers.append(kwargs["headers"])
         await original_download(*args, **kwargs)
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", record_download)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", record_download)
 
-    failed = worker.asyncio.run(
-        worker.run_pipeline(
+    failed = pipeline.asyncio.run(
+        pipeline.run_pipeline(
             [("first-url", {"bundleName": "first"}), ("second-url", {"bundleName": "second"})],
             config,
             {"User-Agent": "public-agent"},
@@ -163,7 +159,6 @@ def test_run_pipeline_download_workers_reuse_the_supplied_cookie(
         {"Cookie": "pipeline-cookie"},
         {"Cookie": "pipeline-cookie"},
     ]
-    refresh_mock.assert_not_awaited()
 
 
 def test_run_pipeline_propagates_unexpected_stage_worker_failure(
@@ -180,14 +175,14 @@ def test_run_pipeline_propagates_unexpected_stage_worker_failure(
 
     async def crashing_extract_stage(*_args, **_kwargs):
         await downloaded.wait()
-        raise RuntimeError("unexpected extract worker failure")
+        raise RuntimeError("unexpected extract pipeline failure")
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", fake_download)
-    monkeypatch.setattr(worker, "_extract_stage", crashing_extract_stage)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "_extract_stage", crashing_extract_stage)
 
-    pipeline = worker.run_pipeline([("url", {"bundleName": "bundle"})], _config(None), {})
-    with pytest.raises(RuntimeError, match="unexpected extract worker failure"):
-        worker.asyncio.run(pipeline)
+    run_coro = pipeline.run_pipeline([("url", {"bundleName": "bundle"})], _config(None), {})
+    with pytest.raises(RuntimeError, match="unexpected extract pipeline failure"):
+        asyncio.run(run_coro)
 
     assert captured_path
     assert not captured_path[0].exists()

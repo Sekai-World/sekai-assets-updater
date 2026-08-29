@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-import main
+from updater.cli import configuration
 
 
 def _valid_config(**overrides) -> SimpleNamespace:
@@ -39,14 +39,14 @@ def _valid_config(**overrides) -> SimpleNamespace:
 
 
 def test_validate_config_keeps_normal_only_mode_compatible(monkeypatch) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
 
-    main.validate_config(_valid_config())  # type: ignore[arg-type]
+    configuration.validate_config(_valid_config())  # type: ignore[arg-type]
 
 
 def test_validate_config_checks_enabled_live2d_storage_and_prerequisite(monkeypatch) -> None:
     monkeypatch.setattr(
-        main.shutil, "which", lambda program: None if program == "missing" else "/bin/true"
+        configuration.shutil, "which", lambda program: None if program == "missing" else "/bin/true"
     )
     config = _valid_config(
         ENABLE_LIVE2D_POSTPROCESS=True,
@@ -55,18 +55,18 @@ def test_validate_config_checks_enabled_live2d_storage_and_prerequisite(monkeypa
     )
 
     with pytest.raises(ValueError) as caught:
-        main.validate_config(config)  # type: ignore[arg-type]
+        configuration.validate_config(config)  # type: ignore[arg-type]
 
     assert "live2d upload storage 0 executable not found: missing" in str(caught.value)
     assert "LIVE2D post-processing requires UNITY_VERSION" in str(caught.value)
 
 
 def test_validate_config_checks_forced_charts_storage_and_source_prerequisite(monkeypatch) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: None)
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: None)
     config = _valid_config(ASSET_REMOTE_STORAGE=[{"type": "charts", "program": "missing"}])
 
     with pytest.raises(ValueError) as caught:
-        main.validate_config(config, mode="charts")  # type: ignore[arg-type]
+        configuration.validate_config(config, mode="charts")  # type: ignore[arg-type]
 
     assert "charts upload storage 0 executable not found: missing" in str(caught.value)
     assert "Charts post-processing requires ASSET_LOCAL_EXTRACTED_DIR or a normal" in str(
@@ -77,14 +77,14 @@ def test_validate_config_checks_forced_charts_storage_and_source_prerequisite(mo
 def test_validate_config_allows_charts_with_configured_extraction_directory(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
     config = _valid_config(ASSET_LOCAL_EXTRACTED_DIR=tmp_path)
 
-    main.validate_config(config, mode="charts")  # type: ignore[arg-type]
+    configuration.validate_config(config, mode="charts")  # type: ignore[arg-type]
 
 
 def test_example_config_satisfies_runtime_validation(monkeypatch) -> None:
-    monkeypatch.setattr(main.shutil, "which", lambda _program: "/usr/bin/fake")
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
     config_path = Path(__file__).parent.parent / "config.example.py"
     spec = importlib.util.spec_from_file_location("config_example_validation", config_path)
     assert spec is not None
@@ -92,4 +92,4 @@ def test_example_config_satisfies_runtime_validation(monkeypatch) -> None:
     config = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config)
 
-    main.validate_config(config)  # type: ignore[arg-type]
+    configuration.validate_config(config)  # type: ignore[arg-type]

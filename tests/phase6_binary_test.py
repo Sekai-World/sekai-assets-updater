@@ -2,7 +2,7 @@ from io import BytesIO
 
 import pytest
 
-from utils.binary import BinaryStream
+from updater.media.binary import BinaryStream
 
 
 def test_read_string_to_null_returns_bytes_before_terminator() -> None:

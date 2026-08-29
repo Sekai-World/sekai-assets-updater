@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-import state
-from asset_bundle_info import normalize_asset_bundle_info, normalize_game_version
+from updater import state
+from updater.net.metadata import normalize_asset_bundle_info, normalize_game_version
 
 
 def _queue():
@@ -727,7 +727,9 @@ def test_lock_release_allows_reacquire(tmp_path: Path) -> None:
 def test_lock_contention_is_real_across_processes(tmp_path: Path) -> None:
     lock_path = tmp_path / "updater.lock"
     holder = state.StateLock(lock_path).acquire()
-    script = "import state, sys; lock=state.StateLock(sys.argv[1]); lock.acquire()"
+    script = (
+        "import sys; from updater import state; lock=state.StateLock(sys.argv[1]); lock.acquire()"
+    )
     try:
         result = subprocess.run(
             [sys.executable, "-c", script, str(lock_path)],

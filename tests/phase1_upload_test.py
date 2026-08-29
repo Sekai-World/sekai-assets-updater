@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 
-import helpers
-from helpers import _derive_storage_remote_path, get_download_max_retries, upload_to_storage
-from security import SecurityError
+from updater.net.download import get_download_max_retries
+from updater.security import SecurityError
+from updater.storage import rclone as storage_rclone
+from updater.storage.rclone import upload_to_storage
+from updater.storage.remote import derive_storage_remote_path
 
 
 def test_upload_validates_sources_and_derives_posix_remote_keys(
@@ -58,11 +60,11 @@ def test_upload_validates_sources_and_derives_posix_remote_keys(
 def test_storage_remote_path_preserves_generic_rclone_target(
     remote_base: str, expected: str
 ) -> None:
-    assert _derive_storage_remote_path(remote_base, "nested/song.mp3") == expected
+    assert derive_storage_remote_path(remote_base, "nested/song.mp3") == expected
 
 
 def test_storage_remote_path_preserves_trailing_separator() -> None:
-    assert _derive_storage_remote_path("remote:bucket/prefix/", "song.mp3") == (
+    assert derive_storage_remote_path("remote:bucket/prefix/", "song.mp3") == (
         "remote:bucket/prefix/song.mp3"
     )
 
@@ -119,7 +121,7 @@ def test_storage_remote_path_rejects_malicious_local_relative_key(
     relative_key: str,
 ) -> None:
     with pytest.raises(SecurityError):
-        _derive_storage_remote_path("sftp:/absolute/path", relative_key)
+        derive_storage_remote_path("sftp:/absolute/path", relative_key)
 
 
 def test_upload_aggregates_failures_from_all_jobs(tmp_path: Path, fake_subprocess) -> None:
@@ -152,7 +154,7 @@ def test_upload_reraises_cancelled_error_from_gather(
     async def cancel_wait(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(helpers, "_wait_for_process", cancel_wait)
+    monkeypatch.setattr(storage_rclone, "_wait_for_process", cancel_wait)
 
     upload = upload_to_storage(
         [exported_path], tmp_path, "remote:bucket/prefix", "rclone", ["copyto", "src", "dst"]

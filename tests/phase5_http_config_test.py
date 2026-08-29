@@ -9,12 +9,13 @@ import pytest
 from aiohttp import ClientTimeout
 from anyio import Path as AnyioPath
 
-import asset_bundle_info
-import bundle
-import helpers
-import main
-import worker
-from model import SekaiServerRegion
+from updater import pipeline
+from updater.cli import lifecycle
+from updater.model import SekaiServerRegion
+from updater.net import cookies as net_cookies
+from updater.net import download as net_download
+from updater.net import http as net_http
+from updater.net import metadata as asset_bundle_info
 
 
 class _Response:
@@ -90,7 +91,7 @@ def _config(**overrides):
 
 
 def test_common_http_options_include_proxy_and_configured_timeout():
-    options = helpers.get_http_session_options(_config())
+    options = net_http.get_http_session_options(_config())
 
     assert options["proxy"] == "http://proxy.test:8080"
     assert isinstance(options["timeout"], ClientTimeout)
@@ -98,7 +99,7 @@ def test_common_http_options_include_proxy_and_configured_timeout():
 
 
 def test_download_http_options_omit_proxy_and_keep_configured_timeout():
-    options = helpers.get_download_http_session_options(_config())
+    options = net_http.get_download_http_session_options(_config())
 
     assert "proxy" not in options
     assert isinstance(options["timeout"], ClientTimeout)
@@ -107,7 +108,7 @@ def test_download_http_options_omit_proxy_and_keep_configured_timeout():
 
 def test_worker_cdn_session_omits_proxy(monkeypatch):
     _Session.instances.clear()
-    monkeypatch.setattr(worker.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(pipeline.aiohttp, "ClientSession", _Session)
     config = SimpleNamespace(
         PROXY_URL="http://proxy.test:8080",
         REQUEST_TIMEOUT=17,
@@ -117,7 +118,7 @@ def test_worker_cdn_session_omits_proxy(monkeypatch):
         PIPELINE_STAGE_QUEUE_SIZE=1,
     )
 
-    assert asyncio.run(worker.run_pipeline([], config, {})) == []
+    assert asyncio.run(pipeline.run_pipeline([], config, {})) == []
 
     session = _Session.instances[-1]
     assert "proxy" not in session.options
@@ -127,25 +128,25 @@ def test_worker_cdn_session_omits_proxy(monkeypatch):
 def test_public_headers_are_metadata_only_and_cookie_cdn_headers_are_separate():
     config = _config(GAME_COOKIE_URL=None)
 
-    assert helpers.build_metadata_headers(config) == {
+    assert net_http.build_metadata_headers(config) == {
         "Accept": "*/*",
         "X-Unity-Version": "2024.1",
         "User-Agent": "public-agent",
     }
-    assert helpers.build_cookie_request_headers() == {}
-    assert helpers.build_cdn_headers("CloudFront-Policy=private") == {
+    assert net_http.build_cookie_request_headers() == {}
+    assert net_http.build_cdn_headers("CloudFront-Policy=private") == {
         "Cookie": "CloudFront-Policy=private"
     }
-    assert "User-Agent" not in helpers.build_cdn_headers()
+    assert "User-Agent" not in net_http.build_cdn_headers()
 
 
 def test_cookie_request_uses_common_options_without_public_headers(monkeypatch):
     _Session.instances.clear()
     _Session.responses[:] = [_Response(headers={"Set-Cookie": "CloudFront-Policy=policy; Path=/"})]
-    monkeypatch.setattr(helpers.aiohttp, "ClientSession", _Session)
+    monkeypatch.setattr(net_cookies.aiohttp, "ClientSession", _Session)
 
     config = _config()
-    headers, cookie = asyncio.run(helpers.refresh_cookie(config, {}))
+    headers, cookie = asyncio.run(net_cookies.refresh_cookie(config, {}))
 
     session = _Session.instances[-1]
     assert session.options["proxy"] == config.PROXY_URL
@@ -168,7 +169,7 @@ def test_http_transport_errors_are_sanitized(monkeypatch, target):
             )
 
         def post(self, *_args, **_kwargs):
-            raise helpers.aiohttp.ClientConnectionError(
+            raise net_cookies.aiohttp.ClientConnectionError(
                 f"Cookie: a={secret}; Authorization: Bearer {secret}"
             )
 
@@ -185,8 +186,8 @@ def test_http_transport_errors_are_sanitized(monkeypatch, target):
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(request)
     else:
-        monkeypatch.setattr(helpers.aiohttp, "ClientSession", _FailingSession)
-        request = helpers.refresh_cookie(config, {})
+        monkeypatch.setattr(net_cookies.aiohttp, "ClientSession", _FailingSession)
+        request = net_cookies.refresh_cookie(config, {})
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(request)
 
@@ -201,12 +202,12 @@ def test_main_pipeline_boundary_does_not_log_raw_transport_exception(monkeypatch
     async def failing_pipeline(*_args, **_kwargs):
         raise RuntimeError(f"signed URL https://cdn.test/?token={secret} body={secret}")
 
-    monkeypatch.setattr(main, "run_pipeline", failing_pipeline)
+    monkeypatch.setattr(lifecycle, "run_pipeline", failing_pipeline)
     config = SimpleNamespace()
     paths = SimpleNamespace(queue="pending.json")
 
     with caplog.at_level(logging.ERROR):
-        download = main.do_download([], config, {}, None, paths)
+        download = lifecycle.do_download([], config, {}, None, paths)
         with pytest.raises(RuntimeError) as caught:
             asyncio.run(download)
 
@@ -228,7 +229,7 @@ def test_metadata_requests_use_common_options_and_public_headers(monkeypatch):
     asyncio.run(
         asset_bundle_info.fetch_asset_bundle_info(
             _config(),  # type: ignore[arg-type]
-            headers=helpers.build_metadata_headers(_config()),
+            headers=net_http.build_metadata_headers(_config()),
         )
     )
 
@@ -309,7 +310,7 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
 
     class _FailingSession:
         def get(self, *_args, **_kwargs):
-            raise bundle.aiohttp.ClientConnectionError(exception_url)
+            raise net_download.aiohttp.ClientConnectionError(exception_url)
 
     config = SimpleNamespace(
         DOWNLOAD_MAX_RETRIES=2,
@@ -317,13 +318,13 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
         DOWNLOAD_RETRY_MAX_DELAY=0,
         REQUEST_TIMEOUT=1,
     )
-    monkeypatch.setattr(bundle.random, "uniform", lambda *_args: 0)
+    monkeypatch.setattr(net_download.random, "uniform", lambda *_args: 0)
 
-    download = bundle.download_deobfuscate_bundle(
+    download = net_download.download_deobfuscate_bundle(
         signed_url, AnyioPath(tmp_path), "bundle", {}, config=config, session=_FailingSession()
     )
     with caplog.at_level(logging.WARNING, logger="live2d"):
-        with pytest.raises(bundle.RetryableDownloadError):
+        with pytest.raises(net_download.RetryableDownloadError):
             asyncio.run(download)
 
     records = "\n".join(record.getMessage() for record in caplog.records)
@@ -334,19 +335,16 @@ def test_download_retry_logs_redact_signed_url_and_exception_text(monkeypatch, t
 
 def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp_path):
     download_mock = AsyncMock()
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
-
-    refresh_mock = AsyncMock()
-    monkeypatch.setattr(worker, "refresh_cookie", refresh_mock, raising=False)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
 
     config = SimpleNamespace(ASSET_LOCAL_BUNDLE_CACHE_DIR=None)
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait(("https://cdn.test/bundle", {"bundleName": "music/example"}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -362,7 +360,6 @@ def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp
 
     asyncio.run(run())
 
-    refresh_mock.assert_not_awaited()
     download_kwargs = download_mock.await_args.kwargs
     assert download_kwargs["headers"] == {"Cookie": "old-cookie"}
 
@@ -370,7 +367,7 @@ def test_worker_download_reuses_pipeline_cookie_for_cdn_headers(monkeypatch, tmp
 def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
     monkeypatch, tmp_path, caplog
 ):
-    signed_url = "https://cdn.test/bundle?Signature=worker-url-secret"
+    signed_url = "https://cdn.test/bundle?Signature=pipeline-url-secret"
     network_error = (
         "request failed for "
         "https://origin.test/?token=exception-url-secret "
@@ -386,17 +383,17 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 
     class _FailingSession:
         def get(self, *_args, **_kwargs):
-            raise bundle.aiohttp.ClientConnectionError(network_error)
+            raise net_download.aiohttp.ClientConnectionError(network_error)
 
     async def exhausted_download(*args, **kwargs):
         kwargs["session"] = _FailingSession()
         try:
-            return await bundle.download_deobfuscate_bundle(*args, **kwargs)
+            return await net_download.download_deobfuscate_bundle(*args, **kwargs)
         except Exception as exc:
             final_exception.append(exc)
             raise
 
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", exhausted_download)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", exhausted_download)
     final_exception = []
     config = SimpleNamespace(
         ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
@@ -408,11 +405,11 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait((signed_url, {"bundleName": "music/example"}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
     failed_tasks = []
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,
@@ -431,7 +428,7 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 
     records = caplog.text
     for secret in (
-        "worker-url-secret",
+        "pipeline-url-secret",
         "exception-url-secret",
         "cookie-a-secret",
         "cookie-b-secret",
@@ -458,15 +455,15 @@ def test_worker_download_exhaustion_does_not_log_sensitive_network_exception(
 def test_worker_fallback_label_is_sanitized(monkeypatch, caplog):
     secret = "fallback-label-secret"
     download_mock = AsyncMock(side_effect=RuntimeError("download failed"))
-    monkeypatch.setattr(worker, "download_deobfuscate_bundle", download_mock)
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", download_mock)
     config = SimpleNamespace(ASSET_LOCAL_BUNDLE_CACHE_DIR=None)
     input_queue: asyncio.Queue = asyncio.Queue()
     extract_queue: asyncio.Queue = asyncio.Queue()
     input_queue.put_nowait((f"https://cdn.test/?token={secret}", {}))
-    input_queue.put_nowait(worker._QUEUE_SENTINEL)
+    input_queue.put_nowait(pipeline._QUEUE_SENTINEL)
 
     async def run() -> None:
-        await worker._download_stage(
+        await pipeline._download_stage(
             "test",
             "download",
             input_queue,

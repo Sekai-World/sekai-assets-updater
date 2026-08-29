@@ -23,6 +23,43 @@ On macOS and supported Linux/Windows environments, video conversion will try to 
 uv sync
 ```
 
+## Project Layout
+
+A run flows fetch → plan → pipeline (download / extract / upload) → post-process.
+The package layout follows that story:
+
+- `main.py` — two-line entry shim (`uv run python main.py -c config.py`)
+- `config.example.py` — configuration template (copy to `config.py`)
+- `updater/` — application package
+  - `cli/` — the run itself: `entry.py` (argparse + dynamic config loading),
+    `configuration.py` (the loaded-config cell and validation), `pending.py`
+    (download-queue caches), `lifecycle.py` (download/completion flows),
+    `runner.py` (journaled orchestration), `logging_setup.py`
+  - `net/` — fetch and plan: `metadata.py` (asset-bundle-info/game-version),
+    `plan.py` (download-list building), `download.py` (streaming download +
+    deobfuscation), `integrity.py`, `disk_space.py`, `http.py`, `cookies.py`,
+    `urls.py`
+  - `pipeline.py` — the async download → extract → upload stage pipeline
+  - `extract/` — Unity bundle extraction: `bundle.py` (per-bundle
+    orchestration), `sync_worker.py` (the ProcessPool CPU worker),
+    `unity_objects.py` (object export walk), `paths.py`, `acb_cache.py`,
+    `playable.py`
+  - `media/` — codec layer, each module a Rust-offload seam: `audio.py`
+    (HCA/ACB → wav → mp3/flac), `video.py` (USM demux + ffmpeg mp4),
+    `images.py` (texture export), `acb.py`, `hca.py`, `usm.py`, `binary.py`,
+    `process.py`
+  - `storage/` — upload backends: `rclone.py` (subprocess + batched),
+    `opendal.py` (in-process), `remote.py` (key derivation/validation)
+  - `live2d/` — Cubism motion restoration: `curves.py`, `motion3.py`,
+    `moc3.py`, `restore.py`
+  - `postprocess/` — Live2D and Charts post-processing: `dispatch.py`,
+    `charts.py`, `live2d_models.py`, `incremental_state.py`, `config.py`
+  - `modes.py`, `workspace.py`, `runtime.py`, `sanitize.py`, `state.py`,
+    `security.py`, `crypto.py`, `constants.py`, `model.py`,
+    `external_process.py`, `unity_rs_adapter.py` — cross-cutting support
+- `tests/` — automated regression suite
+- `docs/` — design documents
+
 ## Config
 
 Copy `config.example.py` to your own config file and fill in the values:
@@ -156,9 +193,8 @@ Run the test suite with uv, including the development dependencies:
 uv run --group dev pytest
 ```
 
-Tests are discovered from the project root using the `test_*.py` pattern. The
-single-bundle debugging script, `test_download_extract.py`, is excluded from
-the test run.
+Tests live in the `tests/` directory and are discovered with the `test_*.py`
+and `*_test.py` patterns.
 
 ## Resume Behavior
 
@@ -169,31 +205,6 @@ With `--force-full-download`, `main.py` skips that resume behavior, ignores cach
 When all tasks succeed, the cached download list is removed automatically.
 
 If some tasks fail, the remaining failed items are written back to `DL_LIST_CACHE_PATH`.
-
-## Single Bundle Debugging
-
-`test_download_extract.py` downloads and extracts bundles whose `bundleName` starts with a given prefix, using the cached:
-
-- `ASSET_BUNDLE_INFO_CACHE_PATH`
-- `GAME_VERSION_JSON_CACHE_PATH`
-
-Example:
-
-```bash
-uv run python test_download_extract.py -c config.py sound/menu/menu_bgm/login_bonus
-```
-
-Verbose mode:
-
-```bash
-uv run python test_download_extract.py -c config.py -v title_screen/bgm_title
-```
-
-This is useful when:
-
-- a specific bundle fails
-- you want to reproduce extraction issues
-- you want to test audio/video conversion on one bundle
 
 ## Current Extraction Behavior
 
@@ -207,8 +218,8 @@ Common outputs:
 
 Audio pipeline:
 
-- `acb` is decoded directly to `wav` by [`cridecoder.decode_acb_to_wav`](https://github.com/Team-Haruki/cridecoder) (wrapped in [`utils/acb.py`](./utils/acb.py))
-- standalone extracted `hca` files are decoded by `cridecoder` (wrapped in [`utils/hca.py`](./utils/hca.py)), with `vgmstream-cli` as the fallback in `auto` mode
+- `acb` is decoded directly to `wav` by [`cridecoder.decode_acb_to_wav`](https://github.com/Team-Haruki/cridecoder) (wrapped in [`updater/media/acb.py`](./updater/media/acb.py))
+- standalone extracted `hca` files are decoded by `cridecoder` (wrapped in [`updater/media/hca.py`](./updater/media/hca.py)), with `vgmstream-cli` as the fallback in `auto` mode
 - audio file concurrency, HCA decode concurrency, and `ffmpeg` audio encode concurrency are configured separately
 - the `cridecoder` HCA decoder runs in a process pool to use multiple CPU cores better
 

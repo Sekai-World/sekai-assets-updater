@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
-import bundle
-import security
+from updater import security
+from updater.media import images as media_images
 
 
 def test_resolve_secure_path_accepts_nested_relative_path(tmp_path: Path) -> None:
@@ -141,14 +143,14 @@ def test_save_image_formats_uses_closed_race_safe_tempfile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     save_path = tmp_path / "texture.asset"
-    original_mkstemp = bundle.tempfile.mkstemp
+    original_mkstemp = tempfile.mkstemp
     closed_descriptors: list[int] = []
 
     def record_mkstemp(*args, **kwargs):
         descriptor, temporary_name = original_mkstemp(*args, **kwargs)
         return descriptor, temporary_name
 
-    original_fdopen = bundle.os.fdopen
+    original_fdopen = os.fdopen
 
     @contextmanager
     def record_fdopen(*args, **kwargs):
@@ -157,16 +159,16 @@ def test_save_image_formats_uses_closed_race_safe_tempfile(
             yield temporary_file
         closed_descriptors.append(descriptor)
 
-    monkeypatch.setattr(bundle.tempfile, "mkstemp", record_mkstemp)
-    monkeypatch.setattr(bundle.os, "fdopen", record_fdopen)
+    monkeypatch.setattr(tempfile, "mkstemp", record_mkstemp)
+    monkeypatch.setattr(os, "fdopen", record_fdopen)
     monkeypatch.setattr(
-        bundle.tempfile,
+        tempfile,
         "mktemp",
         lambda *args, **kwargs: pytest.fail("insecure tempfile.mktemp was called"),
     )
 
     with Image.new("RGBA", (1, 1), (255, 0, 0, 255)) as image:
-        saved_paths = bundle._save_image_formats(image, save_path, ("PNG",))
+        saved_paths = media_images.save_image_formats(image, save_path, ("PNG",))
 
     assert saved_paths == [tmp_path / "texture.PNG"]
     assert len(closed_descriptors) == 1

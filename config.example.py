@@ -2,7 +2,7 @@ import os
 
 from anyio import Path
 
-from model import SekaiServerRegion
+from updater.model import SekaiServerRegion
 
 # Proxy for fetching restricted content
 PROXY_URL = None
@@ -40,6 +40,12 @@ MAX_CONCURRENCY = os.cpu_count() or 1
 # for download/extract while upload uses one bundle-level worker.
 MAX_CONCURRENCY_DOWNLOADS = MAX_CONCURRENCY
 MAX_CONCURRENCY_EXTRACTS = MAX_CONCURRENCY
+# Executor for bundle extraction: "process" (default) or "thread".
+# unity-rs 0.5+, cridecoder 0.3.5+ and PIL release the GIL during their heavy
+# work, so "thread" matches process throughput while sharing one interpreter
+# (saving one Python process per extract worker). "process" additionally
+# isolates a native decoder crash to a single worker.
+EXTRACT_EXECUTOR = "process"
 MAX_CONCURRENCY_UPLOAD_STAGE = 1
 # Maximum queued artifacts between stages.
 PIPELINE_STAGE_QUEUE_SIZE = MAX_CONCURRENCY
@@ -58,10 +64,20 @@ HCA_DECODE_BACKEND = "auto"
 MAX_CONCURRENCY_VIDEO_TRANSCODES = max(1, (os.cpu_count() or 1) // 2)
 # Maximum number of concurrent cridecoder USM demux tasks
 MAX_CONCURRENCY_USM_DEMUXES = MAX_CONCURRENCY_VIDEO_TRANSCODES
+# USMs up to this size are demuxed fully in memory during extraction (skipping
+# the merged .usm intermediate on disk); larger movies stream through disk.
+USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
+# libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than
+# the old default (4) at nearly identical size; 0 is ~3x faster but ~35% larger.
+TEXTURE_WEBP_METHOD = 2
+# PNG encoder profile used by the native unity-rs encoder: "fast" (default,
+# ~9x faster than PIL at ~9% larger output), "default", "best", or an explicit
+# zlib level 0-9 (unity-rs 0.5+).
+TEXTURE_PNG_COMPRESSION = "fast"
 
 # Crypto settings
 # Replace these with the game's AES material. AES keys must be 16, 24, or 32
@@ -102,6 +118,28 @@ LIVE2D_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "live2d-bundle")
 
 # Asset remote storage settings. Each target's type controls which pipeline
 # uploads to it: normal assets, Live2D post-processing, or charts.
+#
+# Two backends are supported for "normal" targets:
+# - subprocess (default): spawns `program` with `args`, replacing "src"/"dst".
+#   The rclone `["copy", "src", "dst"]` template is automatically batched into
+#   one process per artifact via --files-from-raw.
+# - opendal: uploads in-process through Apache OpenDAL (no subprocess, no
+#   external binary). `scheme` names the service ("s3", "fs", "azblob", ...),
+#   `options` carries its string-valued configuration, and the optional
+#   `prefix` is prepended to every object key. Example:
+#   {
+#       "type": "normal",
+#       "backend": "opendal",
+#       "scheme": "s3",
+#       "prefix": "",
+#       "options": {
+#           "bucket": "example-assets",
+#           "endpoint": "https://s3.example.com",
+#           "region": "auto",
+#           "access_key_id": os.environ.get("STORAGE_ACCESS_KEY_ID", ""),
+#           "secret_access_key": os.environ.get("STORAGE_SECRET_ACCESS_KEY", ""),
+#       },
+#   },
 ASSET_REMOTE_STORAGE = [
     {
         "type": "normal",

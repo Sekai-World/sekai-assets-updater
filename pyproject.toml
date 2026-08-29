@@ -7,15 +7,16 @@ requires-python = "==3.12.*"
 dependencies = [
     "aiohttp==3.14.3",
     "anyio==4.9.0",
-    "cridecoder>=0.3.0",
+    "cridecoder>=0.3.5",
     "idna==3.15",
     "olefile==0.47",
+    "opendal==0.47.6",
     "orjson==3.11.6",
     "pillow==12.3.0",
     "pjsekai-scores-rs-skia-image==0.5.0",
     "pycryptodome==3.22.0",
     "u-msgpack-python==2.8.0",
-    "unitypy==1.22.5",
+    "unity-rs==0.5.0",
 ]
 
 [dependency-groups]
@@ -26,9 +27,8 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
-addopts = ["--ignore=test_download_extract.py"]
 
 [tool.ruff]
 target-version = "py312"
@@ -48,9 +48,6 @@ select = [
     "B",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"utils/__init__.py" = ["F403"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
@@ -59,24 +56,39 @@ docstring-code-line-length = "dynamic"
 
 [tool.pyright]
 include = [
-    "bundle_audio.py",
-    "bundle_integrity.py",
-    "bundle_paths.py",
-    "bundle_runtime.py",
-    "bundle_video.py",
-    "constants.py",
-    "crypto.py",
-    "external_process.py",
     "main.py",
-    "model.py",
-    "security.py",
-    "state.py",
-    "utils/acb.py",
-    "utils/binary.py",
-    "utils/chart.py",
-    "utils/hca.py",
-    "utils/playable.py",
-    "utils/usm.py",
+    "updater/net/http.py",
+    "updater/net/integrity.py",
+    "updater/net/plan.py",
+    "updater/storage/remote.py",
+    "updater/net/disk_space.py",
+    "updater/net/urls.py",
+    "updater/postprocess/charts.py",
+    "updater/cli/configuration.py",
+    "updater/cli/entry.py",
+    "updater/cli/lifecycle.py",
+    "updater/cli/logging_setup.py",
+    "updater/cli/pending.py",
+    "updater/cli/runner.py",
+    "updater/media/audio.py",
+    "updater/media/binary.py",
+    "updater/media/hca.py",
+    "updater/media/process.py",
+    "updater/media/usm.py",
+    "updater/media/video.py",
+    "updater/modes.py",
+    "updater/runtime.py",
+    "updater/sanitize.py",
+    "updater/workspace.py",
+    "updater/extract/paths.py",
+    "updater/constants.py",
+    "updater/crypto.py",
+    "updater/external_process.py",
+    "updater/model.py",
+    "updater/security.py",
+    "updater/state.py",
+    "updater/media/acb.py",
+    "updater/extract/playable.py",
 ]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"

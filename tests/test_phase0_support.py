@@ -9,8 +9,9 @@ from pathlib import Path
 from aiohttp import web
 from anyio import Path as AnyioPath
 
-import bundle
-from helpers import upload_to_storage
+from updater.extract import paths as extract_paths
+from updater.net import download as net_download
+from updater.storage.rclone import upload_to_storage
 
 
 def test_download_fixture_serves_and_deobfuscates_a_bundle(
@@ -34,7 +35,7 @@ def test_download_fixture_serves_and_deobfuscates_a_bundle(
     output_path = AnyioPath(temp_dir / "bundle")
 
     asyncio.run(
-        bundle.download_deobfuscate_bundle(
+        net_download.download_deobfuscate_bundle(
             f"{server.url}/bundle",
             temp_dir,
             "bundle",
@@ -86,7 +87,7 @@ def test_synthetic_unityfs_paths_map_to_the_extraction_root(
     }
 
     for name, path in synthetic_unityfs_paths.items():
-        assert bundle._build_unityfs_save_path(path, temp_dir) == expected[name]
+        assert extract_paths.build_unityfs_save_path(path, temp_dir) == expected[name]
 
     assert (
         unityfs_path("characters", "unit.prefab")

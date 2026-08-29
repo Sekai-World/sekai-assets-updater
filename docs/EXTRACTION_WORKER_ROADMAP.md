@@ -17,7 +17,7 @@ IO-oriented pipelines.
 
 ## Current Problem
 
-`run_pipeline` in `worker.py` creates a fixed number of `extract_worker-*` coroutines
+`run_pipeline` in `updater/pipeline.py` creates a fixed number of `extract_worker-*` coroutines
 (`MAX_CONCURRENCY_EXTRACTS`, typically equal to `MAX_CONCURRENCY` / `os.cpu_count()`).
 Each worker pulls `PipelineArtifact` items from a bounded `asyncio.Queue` and runs
 `extract_asset_bundle` sequentially.
@@ -32,7 +32,7 @@ This design has two deficiencies:
 2. **CPU and process-pool contention is unobserved.** The process pool executor shared by
    `_extract_bundle_files_sync` runs at a fixed width (`MAX_CONCURRENCY`), but the pipeline
    has no visibility into whether audio/video sub-stages (`_audio_runtime`, `_video_runtime`,
-   `bundle_runtime`) are saturated. Back-pressure from subprocess limits does not flow back to
+   `updater.runtime`) are saturated. Back-pressure from subprocess limits does not flow back to
    the extraction scheduler.
 
 The result is under-utilised CPU when IO-bound bundles dominate, and degraded latency when
