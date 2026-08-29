@@ -20,7 +20,6 @@ async def upload_to_storage_opendal(
     extracted_save_path: Path,
     storage: Mapping,
     max_concurrent_uploads: int = 5,
-    config=None,
 ):
     """Upload extracted assets through an in-process OpenDAL operator.
 

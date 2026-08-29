@@ -213,26 +213,32 @@ class UnityRsEnvironment:
 
         read_asset_bundle = getattr(studio, "read_asset_bundle", None)
         if read_asset_bundle is not None:
-            for obj in self.objects:
-                if obj.class_id != 142:
-                    continue
-                for item in read_asset_bundle(obj.file_index, obj.path_id).container:
-                    if len(item) != 4:
-                        continue
-                    container_path, _preload_index, _preload_size, identity = item
-                    if not isinstance(container_path, str) or not isinstance(identity, tuple):
-                        continue
-                    target = self._by_identity.get(identity)
-                    if target is not None:
-                        self.container[container_path] = target
-                        self._container_paths[identity] = container_path
+            self._load_asset_bundle_containers(read_asset_bundle)
 
         # Some serialized files do not carry an AssetBundle container table.
         # Preserve the native ObjectInfo hint as a fallback for those inputs.
         if not self.container:
-            for obj in self.objects:
-                if obj.container is not None:
-                    self.container.setdefault(obj.container, obj)
+            self._load_object_containers()
+
+    def _load_asset_bundle_containers(self, read_asset_bundle: Callable) -> None:
+        for obj in self.objects:
+            if obj.class_id != 142:
+                continue
+            for item in read_asset_bundle(obj.file_index, obj.path_id).container:
+                if len(item) != 4:
+                    continue
+                container_path, _preload_index, _preload_size, identity = item
+                if not isinstance(container_path, str) or not isinstance(identity, tuple):
+                    continue
+                target = self._by_identity.get(identity)
+                if target is not None:
+                    self.container[container_path] = target
+                    self._container_paths[identity] = container_path
+
+    def _load_object_containers(self) -> None:
+        for obj in self.objects:
+            if obj.container is not None:
+                self.container.setdefault(obj.container, obj)
 
     @property
     def studio(self) -> unity_rs.UnityRs:
@@ -405,11 +411,11 @@ class _TextAsset:
     path_id: int
 
     @property
-    def m_Name(self) -> str:
+    def m_Name(self) -> str:  # NOSONAR - Unity serialized field compatibility
         return self.name
 
     @property
-    def m_Script(self) -> str:
+    def m_Script(self) -> str:  # NOSONAR - Unity serialized field compatibility
         return self.script.decode("utf-8", "surrogateescape")
 
 

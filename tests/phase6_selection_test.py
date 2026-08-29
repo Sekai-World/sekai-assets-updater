@@ -44,11 +44,9 @@ def test_priority_patterns_follow_declared_order_and_unmatched_tail() -> None:
         ("url-character-2", {"bundleName": "character/motion"}),
     ]
 
-    result = asyncio.run(
-        net_plan.sort_download_list(
-            candidates,
-            priority_list=[r"^music/", r"^character/"],
-        )
+    result = net_plan.sort_download_list(
+        candidates,
+        priority_list=[r"^music/", r"^character/"],
     )
 
     assert [bundle["bundleName"] for _, bundle in result] == [

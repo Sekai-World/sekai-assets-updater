@@ -3,16 +3,17 @@
 from typing import Dict, List, Tuple
 
 SPECIALIZED_MODES = ("live2d", "charts")
+LIVE2D_BUNDLE_PREFIX = "live2d/"
 SPECIALIZED_BUNDLE_PREFIXES = {
-    "live2d": ("live2d/",),
+    "live2d": (LIVE2D_BUNDLE_PREFIX,),
     "charts": (),
 }
-MODE_BUNDLE_PREFIXES = {"assets": (), "live2d": ("live2d/",), "charts": ()}
+MODE_BUNDLE_PREFIXES = {"assets": (), "live2d": (LIVE2D_BUNDLE_PREFIX,), "charts": ()}
 
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
     """Return whether this individual bundle belongs to the Live2D namespace."""
-    return (bundle.get("bundleName") or "").startswith("live2d/")
+    return (bundle.get("bundleName") or "").startswith(LIVE2D_BUNDLE_PREFIX)
 
 
 def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:

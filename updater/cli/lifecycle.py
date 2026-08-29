@@ -35,6 +35,7 @@ from updater.state import (
 )
 
 logger = logging.getLogger("asset_updater")
+_RUN_COMPLETED_LOG = "RUN | status=completed | duration_sec=%.2f"
 
 
 async def do_download(
@@ -167,7 +168,7 @@ async def _write_metadata_only_cache(
         cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
         len(current_bundles),
     )
-    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+    logger.info(_RUN_COMPLETED_LOG, time.monotonic() - start_time)
 
 
 async def _run_enabled_specialized_postprocess(
@@ -296,7 +297,7 @@ async def _complete_with_empty_download_list(
             await _run_enabled_specialized_postprocess(
                 mode, cfg, extracted_dir_is_temporary, live2d_bundles
             )
-    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+    logger.info(_RUN_COMPLETED_LOG, time.monotonic() - start_time)
 
 
 async def _complete_with_download_list(
@@ -337,4 +338,4 @@ async def _complete_with_download_list(
                 mode, cfg, extracted_dir_is_temporary, live2d_bundles
             )
 
-    logger.info("RUN | status=completed | duration_sec=%.2f", time.monotonic() - start_time)
+    logger.info(_RUN_COMPLETED_LOG, time.monotonic() - start_time)

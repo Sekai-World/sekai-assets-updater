@@ -645,6 +645,12 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(upload.await_args_list[1].args[1], AsyncPath("live-target/live2d"))
 
     async def test_live2d_listing_failure_does_not_publish_index(self):
+        storage = {
+            "base": "sekai-ts:",
+            "program": "rclone",
+            "args": ["copy", "src", "dst"],
+        }
+        config = SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=5)
         with patch.object(dispatch, "_upload_live2d_assets", new=AsyncMock()) as assets:
             with patch.object(dispatch, "_publish_live2d_model_list", new=AsyncMock()) as publish:
                 process = MagicMock(returncode=1)
@@ -655,14 +661,7 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                     new=AsyncMock(return_value=process),
                 ):
                     with self.assertRaises(RuntimeError):
-                        await live2d_models._remote_model_list(
-                            {
-                                "base": "sekai-ts:",
-                                "program": "rclone",
-                                "args": ["copy", "src", "dst"],
-                            },
-                            SimpleNamespace(EXTERNAL_PROCESS_TIMEOUT=5),
-                        )
+                        await live2d_models._remote_model_list(storage, config)
                 assets.assert_not_awaited()
                 publish.assert_not_awaited()
 
@@ -747,6 +746,12 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_listing_does_not_publish_index_and_uses_process_timeout(self):
         process = MagicMock(returncode=0)
         process.communicate = AsyncMock(return_value=(b"[]", b""))
+        storage = {
+            "base": "sekai-ts:",
+            "program": "rclone",
+            "args": ["copy", "src", "dst"],
+        }
+        config = SimpleNamespace()
         with patch.object(
             asyncio,
             "create_subprocess_exec",
@@ -757,8 +762,8 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
             ) as timeout:
                 with self.assertRaises(RuntimeError):
                     await live2d_models._remote_model_list(
-                        {"base": "sekai-ts:", "program": "rclone", "args": ["copy", "src", "dst"]},
-                        SimpleNamespace(),
+                        storage,
+                        config,
                     )
         timeout.assert_called_once()
         execute.assert_awaited_once_with(

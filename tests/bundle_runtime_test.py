@@ -86,5 +86,6 @@ def test_extract_executor_kind_selects_thread_pool(monkeypatch) -> None:
 
 
 def test_extract_executor_kind_rejects_unknown_value() -> None:
+    config = SimpleNamespace(EXTRACT_EXECUTOR="fork")
     with pytest.raises(ValueError, match="EXTRACT_EXECUTOR"):
-        bundle_runtime.get_extract_executor_kind(SimpleNamespace(EXTRACT_EXECUTOR="fork"))
+        bundle_runtime.get_extract_executor_kind(config)

@@ -63,6 +63,145 @@ def bundle_has_changed(bundle: Dict, cached_bundle: Dict | None) -> bool:
     return get_bundle_checksum(bundle) != get_bundle_checksum(cached_bundle)
 
 
+async def _load_cached_metadata(
+    config, force_full_download: bool
+) -> tuple[Dict | None, Dict | None]:
+    if force_full_download:
+        return None, None
+
+    cached_asset_bundle_info = None
+    cached_game_version_json = None
+    try:
+        cached_asset_bundle_info = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
+    except StateNotFoundError:
+        cached_asset_bundle_info = None
+    except StateValidationError:
+        logger.warning(
+            "Ignoring incompatible asset metadata cache: %s",
+            config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        )
+    try:
+        cached_game_version_json = load_game_version(config.GAME_VERSION_JSON_CACHE_PATH)
+    except StateNotFoundError:
+        cached_game_version_json = None
+    except StateValidationError:
+        logger.warning(
+            "Ignoring incompatible game version cache: %s",
+            config.GAME_VERSION_JSON_CACHE_PATH,
+        )
+    return cached_asset_bundle_info, cached_game_version_json
+
+
+async def _select_changed_bundles(
+    current_bundles: Dict[str, Dict],
+    cached_bundles: Dict[str, Dict],
+    bundle_cache_path_resolver,
+) -> list[Dict]:
+    changed_bundles = []
+    for bundle in current_bundles.values():
+        if bundle_has_changed(bundle, cached_bundles.get(bundle.get("bundleName", ""), {})):
+            changed_bundles.append(bundle)
+            continue
+        if bundle_cache_path_resolver is None:
+            continue
+        cache_path = bundle_cache_path_resolver(bundle)
+        if cache_path is None:
+            continue
+        exists = cache_path.exists()
+        if inspect.isawaitable(exists):
+            exists = await exists
+        if not exists:
+            changed_bundles.append(bundle)
+    return changed_bundles
+
+
+def _build_incremental_download_list(
+    config,
+    changed_bundles: list[Dict],
+    game_version_json: Dict,
+    asset_bundle_info: Dict,
+    assetver: str | None,
+    assetbundle_host_hash: str | None,
+    placeholders: set[str],
+) -> list[DownloadItem]:
+    if assetver:
+        app_version = (
+            getattr(config, "APP_VERSION_OVERRIDE", None)
+            or game_version_json.get("appVersion")
+            or ""
+        )
+        assert app_version, "App version must be set in game version json or config"
+        return [
+            (
+                format_url_template(
+                    config.ASSET_BUNDLE_URL,
+                    appVersion=app_version,
+                    bundleName=bundle.get("bundleName"),
+                    downloadPath=bundle.get("downloadPath"),
+                ),
+                bundle,
+            )
+            for bundle in changed_bundles
+        ]
+
+    asset_hash = game_version_json.get("assetHash", "")
+    url_args = {"assetbundleHostHash": assetbundle_host_hash}
+    if "version" in placeholders:
+        version = asset_bundle_info.get("version")
+        assert version, "Version must be set in asset bundle info"
+        url_args["version"] = version
+    if asset_hash:
+        url_args["assetHash"] = asset_hash
+    return [
+        (
+            format_url_template(
+                config.ASSET_BUNDLE_URL,
+                **url_args,
+                bundleName=bundle.get("bundleName"),
+            ),
+            bundle,
+        )
+        for bundle in changed_bundles
+    ]
+
+
+def _build_full_download_list(
+    config,
+    current_bundles: Dict[str, Dict],
+    game_version_json: Dict,
+    asset_bundle_info: Dict,
+    assetbundle_host_hash: str | None,
+    placeholders: set[str],
+) -> list[DownloadItem]:
+    asset_hash = game_version_json.get("assetHash", "")
+    app_version = (
+        getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion") or ""
+    )
+    assert app_version, "App version must be set in game version json or config"
+    url_args = {
+        "assetbundleHostHash": assetbundle_host_hash,
+        "appVersion": app_version,
+    }
+    if "version" in placeholders:
+        version = asset_bundle_info.get("version")
+        assert version, "Version must be set in asset bundle info"
+        url_args["version"] = version
+    if asset_hash:
+        url_args["assetHash"] = asset_hash
+    return [
+        (
+            format_url_template(
+                config.ASSET_BUNDLE_URL,
+                **url_args,
+                bundleName=bundle.get("bundleName"),
+                downloadPath=bundle.get("downloadPath"),
+            ),
+            bundle,
+        )
+        for bundle in current_bundles.values()
+    ]
+
+
 async def get_download_list(
     asset_bundle_info: Dict,
     game_version_json: Dict,
@@ -90,42 +229,17 @@ async def get_download_list(
         List[Tuple[str, Dict]]: download list of asset bundles
     """
 
-    cached_asset_bundle_info = None
-    cached_game_version_json = None
     assert config, "Config must be provided to get_download_list"
     assert config.ASSET_BUNDLE_INFO_CACHE_PATH, "ASSET_BUNDLE_INFO_CACHE_PATH must be set in config"
     assert config.GAME_VERSION_JSON_CACHE_PATH, "GAME_VERSION_JSON_CACHE_PATH must be set in config"
-    if not force_full_download:
-        try:
-            cached_asset_bundle_info = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
-        except StateNotFoundError:
-            pass
-        except StateValidationError:
-            # Cache formats are intentionally strict. An older or malformed
-            # metadata cache is not authoritative; refresh it from the already
-            # fetched network response by treating it as absent.
-            logger.warning(
-                "Ignoring incompatible asset metadata cache: %s",
-                config.ASSET_BUNDLE_INFO_CACHE_PATH,
-            )
-        try:
-            cached_game_version_json = load_game_version(config.GAME_VERSION_JSON_CACHE_PATH)
-        except StateNotFoundError:
-            pass
-        except StateValidationError:
-            # Only tolerate validation failures while reading a prior cache.
-            # Validation of the current fetched response still happens when it
-            # is committed below the lifecycle layer.
-            logger.warning(
-                "Ignoring incompatible game version cache: %s",
-                config.GAME_VERSION_JSON_CACHE_PATH,
-            )
+    cached_asset_bundle_info, cached_game_version_json = await _load_cached_metadata(
+        config, force_full_download
+    )
 
     if assetver is not None:
         game_version_json = dict(game_version_json)
         game_version_json["assetver"] = assetver
 
-    download_list = []
     current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
     asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
@@ -138,112 +252,33 @@ async def get_download_list(
     if not current_bundles:
         raise ValueError("No bundles found after filtering")
 
-    async def select_changed_bundles(cached_bundles: Dict[str, Dict]) -> list[Dict]:
-        changed_bundles = []
-        for bundle in current_bundles.values():
-            if bundle_has_changed(bundle, cached_bundles.get(bundle.get("bundleName", ""), {})):
-                changed_bundles.append(bundle)
-                continue
-            if bundle_cache_path_resolver is None:
-                continue
-            cache_path = bundle_cache_path_resolver(bundle)
-            if cache_path is None:
-                continue
-            exists = cache_path.exists()
-            if inspect.isawaitable(exists):
-                exists = await exists
-            if not exists:
-                changed_bundles.append(bundle)
-        return changed_bundles
-
     if cached_asset_bundle_info and cached_game_version_json:
         cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
-        changed_bundles = await select_changed_bundles(cached_bundles)
-
-        if assetver:
-            # Generate the download list from changed bundles
-            app_version: str = (
-                getattr(config, "APP_VERSION_OVERRIDE", None)
-                or game_version_json.get("appVersion")
-                or ""
-            )
-            assert app_version, "App version must be set in game version json or config"
-            download_list = [
-                (
-                    format_url_template(
-                        config.ASSET_BUNDLE_URL,
-                        appVersion=app_version,
-                        bundleName=bundle.get("bundleName"),
-                        downloadPath=bundle.get("downloadPath"),
-                    ),
-                    bundle,
-                )
-                for bundle in changed_bundles
-            ]
-        else:
-            # Colorful Palette servers. changed_bundles was already computed via
-            # select_changed_bundles above, which performs the same checksum
-            # comparison and additionally selects unchanged bundles whose
-            # configured cache file is missing (matching the assetver branch).
-
-            # Generate the download list from changed bundles
-            asset_hash: str = game_version_json.get("assetHash", "")
-            asset_bundle_url_args = {
-                "assetbundleHostHash": assetbundle_host_hash,
-            }
-            if "version" in asset_bundle_url_placeholders:
-                version = asset_bundle_info.get("version")
-                assert version, "Version must be set in asset bundle info"
-                asset_bundle_url_args["version"] = version
-            if asset_hash:
-                asset_bundle_url_args["assetHash"] = asset_hash
-            download_list = [
-                (
-                    format_url_template(
-                        config.ASSET_BUNDLE_URL,
-                        **asset_bundle_url_args,
-                        bundleName=bundle.get("bundleName"),
-                    ),
-                    bundle,
-                )
-                for bundle in changed_bundles
-            ]
+        changed_bundles = await _select_changed_bundles(
+            current_bundles, cached_bundles, bundle_cache_path_resolver
+        )
+        download_list = _build_incremental_download_list(
+            config,
+            changed_bundles,
+            game_version_json,
+            asset_bundle_info,
+            assetver,
+            assetbundle_host_hash,
+            asset_bundle_url_placeholders,
+        )
 
     else:
-        # Get the download list for a full download
-        asset_hash: str = game_version_json.get("assetHash", "")
-        app_version: str = (
-            getattr(config, "APP_VERSION_OVERRIDE", None)
-            or game_version_json.get("appVersion")
-            or ""
+        download_list = _build_full_download_list(
+            config,
+            current_bundles,
+            game_version_json,
+            asset_bundle_info,
+            assetbundle_host_hash,
+            asset_bundle_url_placeholders,
         )
-        assert app_version, "App version must be set in game version json or config"
-        asset_bundle_url_args = {
-            "assetbundleHostHash": assetbundle_host_hash,
-            "appVersion": app_version,
-        }
-        if "version" in asset_bundle_url_placeholders:
-            version = asset_bundle_info.get("version")
-            assert version, "Version must be set in asset bundle info"
-            asset_bundle_url_args["version"] = version
-        if asset_hash:
-            asset_bundle_url_args["assetHash"] = asset_hash
-
-        download_list = [
-            (
-                format_url_template(
-                    config.ASSET_BUNDLE_URL,
-                    **asset_bundle_url_args,
-                    bundleName=bundle.get("bundleName"),
-                    downloadPath=bundle.get("downloadPath"),
-                ),
-                bundle,
-            )
-            for bundle in current_bundles.values()
-        ]
 
     if download_list:
-        download_list = await sort_download_list(
+        download_list = sort_download_list(
             download_list,
             priority_list=priority_list,
         )
@@ -291,7 +326,7 @@ def dedupe_download_items(items: List[Tuple[str, Dict]]) -> List[Tuple[str, Dict
     return result
 
 
-async def sort_download_list(
+def sort_download_list(
     download_list: List[Tuple[str, Dict]],
     priority_list: List[str] | None = None,
 ) -> List[Tuple[str, Dict]]:

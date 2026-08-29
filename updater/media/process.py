@@ -20,20 +20,20 @@ async def _terminate_process(process) -> None:
     await terminate_process(process, EXTERNAL_PROCESS_TERMINATE_GRACE)
 
 
-async def _wait_for_process(process, timeout: float) -> int:
+async def _wait_for_process(process, time_budget: float) -> int:
     return await wait_for_process(
         process,
-        timeout,
+        time_budget,
         _terminate_process,
         task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,
     )
 
 
-async def _communicate_with_process(process, timeout: float) -> tuple[bytes, bytes]:
+async def _communicate_with_process(process, time_budget: float) -> tuple[bytes, bytes]:
     return await wait_for_process(
         process,
-        timeout,
+        time_budget,
         _terminate_process,
         task_attribute=TERMINATE_TASK_ATTRIBUTE,
         logger=logger,

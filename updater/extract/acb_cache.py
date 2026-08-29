@@ -5,12 +5,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 
-from updater.security import (
-    SecurityError,
-    atomic_write_bytes,
-    validate_contained_file,
-    validate_output_target,
-)
+from updater.security import atomic_write_bytes, validate_contained_file, validate_output_target
 from updater.unity_rs_adapter import load_bundle, read_text_bytes
 
 logger = logging.getLogger("live2d")
@@ -72,6 +67,35 @@ def _candidate_priority(candidate: Path, bundle_path: Path, expected_stem: str):
     return (not name_matches, -shared_parts)
 
 
+def _collect_candidates(
+    bundle_cache_root: Path,
+    output_root: Path,
+    bundle_path: Path,
+) -> list[Path]:
+    candidates = []
+    for cached_bundle_path in bundle_cache_root.rglob("*"):
+        if cached_bundle_path.is_dir():
+            continue
+        try:
+            output_relative_path = cached_bundle_path.resolve().relative_to(output_root)
+        except ValueError:
+            output_relative_path = None
+        if output_relative_path is not None:
+            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
+            continue
+        try:
+            cached_bundle_path = validate_contained_file(
+                bundle_cache_root,
+                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
+            )
+        except (OSError, ValueError):
+            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
+            continue
+        if cached_bundle_path.resolve() != bundle_path:
+            candidates.append(cached_bundle_path)
+    return candidates
+
+
 def extract_acb_from_cached_bundles(
     bundle_save_path: Path,
     acb_textasset_filename: str,
@@ -109,29 +133,7 @@ def extract_acb_from_cached_bundles(
         with _FOUND_BUNDLE_CACHE_LOCK:
             _FOUND_BUNDLE_CACHE.pop(cache_key, None)
 
-    candidates = []
-    for cached_bundle_path in bundle_cache_root.rglob("*"):
-        if cached_bundle_path.is_dir():
-            continue
-        try:
-            cached_bundle_path.resolve().relative_to(output_root)
-        except ValueError:
-            pass
-        else:
-            logger.debug("Skipping artifact output while scanning cache: %s", cached_bundle_path)
-            continue
-        try:
-            cached_bundle_path = validate_contained_file(
-                bundle_cache_root,
-                cached_bundle_path.relative_to(bundle_cache_root).as_posix(),
-            )
-        except (OSError, ValueError, SecurityError):
-            logger.warning("Ignoring unsafe cached bundle path %s", cached_bundle_path)
-            continue
-        if cached_bundle_path.resolve() == bundle_path:
-            continue
-        candidates.append(cached_bundle_path)
-
+    candidates = _collect_candidates(bundle_cache_root, output_root, bundle_path)
     candidates.sort(key=lambda path: _candidate_priority(path, bundle_path, expected_stem))
 
     for cached_bundle_path in candidates:

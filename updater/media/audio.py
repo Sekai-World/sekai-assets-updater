@@ -25,7 +25,6 @@ from updater.media.process import (
 )
 from updater.runtime import runtime as _shared_runtime
 from updater.security import (
-    SecurityError,
     atomic_write_bytes,
     resolve_secure_path,
     secure_existing_output,
@@ -116,7 +115,7 @@ async def run_hca_with_vgmstream(
     executable: str | None,
     report_decoder: Callable[[str], None],
     communicate: Communicate,
-    timeout: float,
+    time_budget: float,
     set_output_paths: SetOutputPaths,
 ) -> bool:
     if executable is None:
@@ -143,7 +142,7 @@ async def run_hca_with_vgmstream(
             shutil.rmtree(staging_dir, ignore_errors=True)
             raise
         set_output_paths(process, staged_output, staging_dir)
-        stdout, stderr = await communicate(process, timeout)
+        stdout, stderr = await communicate(process, time_budget)
     except (asyncio.CancelledError, asyncio.TimeoutError):
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
@@ -178,7 +177,7 @@ async def run_ffmpeg_audio_encode(
     *,
     semaphore: asyncio.Semaphore,
     wait: Wait,
-    timeout: float,
+    time_budget: float,
     set_output_paths: SetOutputPaths,
     cleanup_output: CleanupOutput,
 ) -> bool:
@@ -201,12 +200,12 @@ async def run_ffmpeg_audio_encode(
             raise
         set_output_paths(process, staged_output, staging_dir)
         try:
-            if await wait(process, timeout) != 0:
+            if await wait(process, time_budget) != 0:
                 return False
             secure_existing_output(staging_dir, staged_output)
             validate_output_target(output_path.parent, output_path)
             os.replace(staged_output, output_path)
-        except (FileNotFoundError, ValueError, SecurityError):
+        except (FileNotFoundError, ValueError):
             return False
         finally:
             cleanup_output(process)
@@ -236,7 +235,7 @@ def _report_hca_decoder(message: str) -> None:
 async def _run_hca_to_wav_with_cridecoder(
     input_path: Path,
     output_path: Path,
-    config,
+    _config,
 ) -> bool:
     return await run_hca_with_cridecoder(
         input_path,
@@ -257,7 +256,7 @@ async def _run_hca_to_wav_with_vgmstream(
         executable=_get_vgmstream_cli(),
         report_decoder=_report_hca_decoder,
         communicate=_communicate_with_process,
-        timeout=_get_external_process_timeout(config),
+        time_budget=_get_external_process_timeout(config),
         set_output_paths=_set_process_output_paths,
     )
 
@@ -292,11 +291,7 @@ async def _run_hca_to_wav(
                     "Falling back to cridecoder for %s after vgmstream-cli failure",
                     input_path,
                 )
-                return await _run_hca_to_wav_with_cridecoder(
-                    input_path,
-                    output_path,
-                    config,
-                )
+                return await _run_hca_to_wav_with_cridecoder(input_path, output_path, config)
             case unreachable:
                 assert_never(unreachable)
 
@@ -311,7 +306,7 @@ async def _run_ffmpeg_audio_encode(
         output_path,
         semaphore=_get_shared_audio_encoder_semaphore(config),
         wait=_wait_for_process,
-        timeout=_get_external_process_timeout(config),
+        time_budget=_get_external_process_timeout(config),
         set_output_paths=_set_process_output_paths,
         cleanup_output=_cleanup_process_output,
     )

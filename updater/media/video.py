@@ -23,8 +23,8 @@ from updater.media.process import (
     _wait_for_process,
 )
 from updater.runtime import runtime as _shared_runtime
+from updater.security import SecurityError as SecurityError  # noqa: F401
 from updater.security import (
-    SecurityError,
     atomic_write_bytes,
     resolve_secure_path,
     secure_existing_output,
@@ -49,10 +49,9 @@ class VideoRuntime:
 
     async def get_encoder(
         self,
-        config,
         *,
         communicate: Communicate,
-        timeout: float,
+        time_budget: float,
     ) -> tuple[str | None, list[str]]:
         """Detect a usable hardware H.264 encoder for the current platform."""
         if self._encoder is not None:
@@ -70,7 +69,7 @@ class VideoRuntime:
             self._encoder = (None, [])
             return self._encoder
 
-        stdout, stderr = await communicate(process, timeout)
+        stdout, stderr = await communicate(process, time_budget)
         if process.returncode != 0:
             logger.warning(
                 "Failed to inspect ffmpeg encoders, falling back to software encoding: %s",
@@ -148,7 +147,7 @@ async def demux_usm_to_m2v(
                     staging_dir,
                     StdPath(output).resolve().relative_to(staging_dir.resolve()).as_posix(),
                 )
-            except (ValueError, FileNotFoundError, SecurityError):
+            except (ValueError, FileNotFoundError):
                 logger.warning("Ignoring unsafe decoder output %s", output)
                 continue
             if str(output).lower().endswith(".m2v"):
@@ -213,9 +212,8 @@ _get_shared_video_transcode_semaphore = _shared_runtime.video_transcode_semaphor
 
 async def _get_ffmpeg_video_encoder(config) -> tuple[str | None, list[str]]:
     return await _video_runtime.get_encoder(
-        config,
         communicate=_communicate_with_process,
-        timeout=_get_external_process_timeout(config),
+        time_budget=_get_external_process_timeout(config),
     )
 
 
@@ -252,6 +250,73 @@ async def _run_ffmpeg_video_to_mp4(
     )
 
 
+async def _transcode_video(
+    m2v_path: Path,
+    video_output_path: Path,
+    source_path: Path,
+    config,
+    video_transcode_semaphore: asyncio.Semaphore,
+) -> bool:
+    async with video_transcode_semaphore:
+        ffmpeg_process, encoder_name = await _run_ffmpeg_video_to_mp4(
+            m2v_path,
+            video_output_path,
+            config,
+        )
+        await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
+
+        if ffmpeg_process.returncode != 0 and encoder_name:
+            _cleanup_process_output(ffmpeg_process)
+            logger.warning(
+                "Failed to convert %s to mp4 with %s, falling back to software encoding",
+                source_path,
+                encoder_name,
+            )
+            _disable_ffmpeg_video_encoder()
+            ffmpeg_process, _ = await _run_ffmpeg_video_to_mp4(
+                m2v_path,
+                video_output_path,
+                config,
+            )
+            await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
+
+        if ffmpeg_process.returncode != 0:
+            _cleanup_process_output(ffmpeg_process)
+            logger.warning("Failed to convert %s to mp4", source_path)
+            return False
+
+        try:
+            staged_output = getattr(ffmpeg_process, "_bundle_output_path", None)
+            if staged_output is not None:
+                secure_existing_output(staged_output.parent, staged_output)
+                validate_output_target(video_output_path.parent, video_output_path)
+                os.replace(staged_output, video_output_path)
+                staging_dir = getattr(ffmpeg_process, "_bundle_staging_dir", None)
+                if staging_dir is not None:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+        except BaseException:
+            _cleanup_process_output(ffmpeg_process)
+            raise
+        logger.debug("Converted %s to mp4", source_path)
+        return True
+
+
+async def _cleanup_video_intermediates(
+    intermediates: tuple[Path | None, ...],
+    discarded_video_files: list[Path],
+) -> None:
+    for discarded_file in intermediates:
+        if discarded_file is None:
+            continue
+        try:
+            if await discarded_file.exists():
+                await discarded_file.unlink()
+                logger.debug("Removed %s", discarded_file)
+                discarded_video_files.append(discarded_file)
+        except OSError:
+            logger.exception("Failed to remove video intermediate %s", discarded_file)
+
+
 async def _process_video_job(
     usm_output_path_text: str,
     config,
@@ -279,61 +344,23 @@ async def _process_video_job(
         if m2v_path is None:
             logger.warning("Failed to demux %s", usm_output_path)
         else:
-            async with video_transcode_semaphore:
-                ffmpeg_process, encoder_name = await _run_ffmpeg_video_to_mp4(
-                    m2v_path,
-                    video_output_path,
-                    config,
-                )
-                await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
-
-                if ffmpeg_process.returncode != 0 and encoder_name:
-                    _cleanup_process_output(ffmpeg_process)
-                    logger.warning(
-                        "Failed to convert %s to mp4 with %s, falling back to software encoding",
-                        usm_output_path,
-                        encoder_name,
-                    )
-                    _disable_ffmpeg_video_encoder()
-                    ffmpeg_process, _ = await _run_ffmpeg_video_to_mp4(
-                        m2v_path,
-                        video_output_path,
-                        config,
-                    )
-                    await _wait_for_process(ffmpeg_process, _get_external_process_timeout(config))
-
-                if ffmpeg_process.returncode != 0:
-                    _cleanup_process_output(ffmpeg_process)
-                    logger.warning("Failed to convert %s to mp4", usm_output_path)
-                else:
-                    staged_output = getattr(ffmpeg_process, "_bundle_output_path", None)
-                    if staged_output is not None:
-                        secure_existing_output(staged_output.parent, staged_output)
-                        validate_output_target(video_output_path.parent, video_output_path)
-                        os.replace(staged_output, video_output_path)
-                        staging_dir = getattr(ffmpeg_process, "_bundle_staging_dir", None)
-                        if staging_dir is not None:
-                            shutil.rmtree(staging_dir, ignore_errors=True)
-                    logger.debug("Converted %s to mp4", usm_output_path)
-                    exported_video_files.append(video_output_path)
-    except (OSError, SecurityError, ValueError):
+            if await _transcode_video(
+                m2v_path,
+                video_output_path,
+                usm_output_path,
+                config,
+                video_transcode_semaphore,
+            ):
+                exported_video_files.append(video_output_path)
+    except (OSError, ValueError):
         if ffmpeg_process is not None:
             _cleanup_process_output(ffmpeg_process)
         logger.exception("Failed to process video %s", usm_output_path)
     finally:
-        for discarded_file in (m2v_path, usm_source):
-            if discarded_file is None:
-                continue
-            try:
-                if await discarded_file.exists():
-                    await discarded_file.unlink()
-                    logger.debug("Removed %s", discarded_file)
-                    discarded_video_files.append(discarded_file)
-            except OSError:
-                logger.exception(
-                    "Failed to remove video intermediate %s",
-                    discarded_file,
-                )
+        await _cleanup_video_intermediates(
+            (m2v_path, usm_source),
+            discarded_video_files,
+        )
 
     return exported_video_files, discarded_video_files
 

@@ -22,14 +22,15 @@ from updater.workspace import configured_path as _configured_path
 from updater.workspace import get_bundle_cache_path
 
 logger = logging.getLogger("asset_updater")
+_MODEL_FILE_SUFFIX = ".model3.json"
 
 
 def _model_list(model_dir: StdPath) -> list[dict[str, str]]:
     models = []
-    for model_file in sorted(model_dir.rglob("*.model3.json")):
+    for model_file in sorted(model_dir.rglob(f"*{_MODEL_FILE_SUFFIX}")):
         models.append(
             {
-                "modelName": model_file.name.removesuffix(".model3.json"),
+                "modelName": model_file.name.removesuffix(_MODEL_FILE_SUFFIX),
                 "modelBase": model_file.parent.name,
                 "modelPath": str(model_file.parent.relative_to(model_dir)),
                 "modelFile": model_file.name,
@@ -48,11 +49,11 @@ def _models_from_remote_entries(entries) -> list[dict[str, str]]:
         path = StdPath(relative_path)
         if not relative_path or relative_path.startswith("/") or path.drive or ".." in path.parts:
             raise ValueError(f"unsafe remote Live2D model path: {relative_path!r}")
-        if not relative_path.endswith(".model3.json"):
+        if not relative_path.endswith(_MODEL_FILE_SUFFIX):
             continue
         models.append(
             {
-                "modelName": path.name.removesuffix(".model3.json"),
+                "modelName": path.name.removesuffix(_MODEL_FILE_SUFFIX),
                 "modelBase": path.parent.name,
                 "modelPath": path.parent.as_posix() if path.parent != StdPath(".") else "",
                 "modelFile": path.name,
@@ -148,6 +149,80 @@ async def _upload_live2d_assets(source_dir: StdPath, storage: dict, config) -> N
         )
 
 
+def _select_model_bundles(bundles: Dict[str, Dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        bundle
+        for bundle in bundles.values()
+        if isinstance(bundle, dict) and (bundle.get("bundleName") or "").startswith("live2d/model/")
+    ]
+
+
+async def _validate_cached_model_bundles(
+    config,
+    model_bundles: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], Path]]:
+    cached_model_bundles = []
+    for bundle in model_bundles:
+        bundle_path = get_bundle_cache_path(config, bundle)
+        if bundle_path is None or not await Path(str(bundle_path)).is_file():
+            raise RuntimeError(
+                "Live2D recovery unavailable: cached model bundle file is missing: "
+                f"{bundle.get('bundleName', '<unknown>')}"
+            )
+        cached_model_bundles.append((bundle, Path(str(bundle_path))))
+    return cached_model_bundles
+
+
+async def _extract_cached_model_bundles(
+    config,
+    cached_model_bundles: list[tuple[dict[str, Any], Path]],
+    staging_root: Path,
+    cache_root: Path,
+) -> None:
+    for bundle, bundle_path in cached_model_bundles:
+        try:
+            exported = await extract_asset_bundle(
+                bundle_path,
+                bundle,
+                staging_root,
+                unity_version=config.UNITY_VERSION,
+                config=config,
+                bundle_cache_root=cache_root,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Live2D recovery failed extracting cached model bundle "
+                f"{bundle.get('bundleName', '<unknown>')}: {exc}"
+            ) from exc
+        if not exported:
+            raise RuntimeError(
+                "Live2D recovery failed: cached model bundle produced no outputs: "
+                f"{bundle.get('bundleName', '<unknown>')}"
+            )
+
+
+def _promote_recovered_models(extracted_root: StdPath, staging_root: StdPath) -> None:
+    staged_model = staging_root / "live2d" / "model"
+    if not staged_model.is_dir() or not any(staged_model.rglob(f"*{_MODEL_FILE_SUFFIX}")):
+        raise RuntimeError("Live2D recovery failed: cached model bundles produced no model files")
+
+    target_model = extracted_root / "live2d" / "model"
+    target_model.parent.mkdir(parents=True, exist_ok=True)
+    backup_model = target_model.with_name(f".model-backup-{uuid.uuid4().hex}")
+    had_existing_target = target_model.exists()
+    try:
+        if had_existing_target:
+            os.replace(target_model, backup_model)
+        os.replace(staged_model, target_model)
+    except Exception as exc:
+        if had_existing_target and backup_model.exists() and not target_model.exists():
+            os.replace(backup_model, target_model)
+        raise RuntimeError(f"Live2D recovery failed promoting model outputs: {exc}") from exc
+    finally:
+        if backup_model.exists():
+            shutil.rmtree(backup_model)
+
+
 async def recover_live2d_model_outputs(config, bundles: Dict[str, Dict[str, Any]]) -> None:
     """Transactionally rebuild the aggregate Live2D model tree from raw cache.
 
@@ -170,11 +245,7 @@ async def recover_live2d_model_outputs(config, bundles: Dict[str, Dict[str, Any]
             f"Live2D recovery unavailable: cached motion source is missing: {motion_source}"
         )
 
-    model_bundles = [
-        bundle
-        for bundle in bundles.values()
-        if isinstance(bundle, dict) and (bundle.get("bundleName") or "").startswith("live2d/model/")
-    ]
+    model_bundles = _select_model_bundles(bundles)
     if not model_bundles:
         raise RuntimeError(
             "Live2D recovery unavailable: current metadata contains no Live2D model bundles"
@@ -182,15 +253,7 @@ async def recover_live2d_model_outputs(config, bundles: Dict[str, Dict[str, Any]
 
     # Validate the whole current manifest cache before touching output. A
     # missing later bundle must not leave a partial aggregate model tree.
-    cached_model_bundles = []
-    for bundle in model_bundles:
-        bundle_path = get_bundle_cache_path(config, bundle)
-        if bundle_path is None or not await Path(str(bundle_path)).is_file():
-            raise RuntimeError(
-                "Live2D recovery unavailable: cached model bundle file is missing: "
-                f"{bundle.get('bundleName', '<unknown>')}"
-            )
-        cached_model_bundles.append((bundle, Path(str(bundle_path))))
+    cached_model_bundles = await _validate_cached_model_bundles(config, model_bundles)
 
     extracted_root_std = __import__("pathlib").Path(extracted_root.as_posix())
     staging_root_std = __import__("pathlib").Path(
@@ -198,47 +261,7 @@ async def recover_live2d_model_outputs(config, bundles: Dict[str, Dict[str, Any]
     )
     staging_root = Path(staging_root_std.as_posix())
     try:
-        for bundle, bundle_path in cached_model_bundles:
-            try:
-                exported = await extract_asset_bundle(
-                    bundle_path,
-                    bundle,
-                    staging_root,
-                    unity_version=config.UNITY_VERSION,
-                    config=config,
-                    bundle_cache_root=cache_root,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "Live2D recovery failed extracting cached model bundle "
-                    f"{bundle.get('bundleName', '<unknown>')}: {exc}"
-                ) from exc
-            if not exported:
-                raise RuntimeError(
-                    "Live2D recovery failed: cached model bundle produced no outputs: "
-                    f"{bundle.get('bundleName', '<unknown>')}"
-                )
-
-        staged_model_std = staging_root_std / "live2d" / "model"
-        if not staged_model_std.is_dir() or not any(staged_model_std.rglob("*.model3.json")):
-            raise RuntimeError(
-                "Live2D recovery failed: cached model bundles produced no model files"
-            )
-
-        target_model_std = extracted_root_std / "live2d" / "model"
-        target_model_std.parent.mkdir(parents=True, exist_ok=True)
-        backup_model_std = target_model_std.with_name(f".model-backup-{uuid.uuid4().hex}")
-        had_existing_target = target_model_std.exists()
-        try:
-            if had_existing_target:
-                os.replace(target_model_std, backup_model_std)
-            os.replace(staged_model_std, target_model_std)
-        except Exception as exc:
-            if had_existing_target and backup_model_std.exists() and not target_model_std.exists():
-                os.replace(backup_model_std, target_model_std)
-            raise RuntimeError(f"Live2D recovery failed promoting model outputs: {exc}") from exc
-        finally:
-            if backup_model_std.exists():
-                shutil.rmtree(backup_model_std)
+        await _extract_cached_model_bundles(config, cached_model_bundles, staging_root, cache_root)
+        _promote_recovered_models(extracted_root_std, staging_root_std)
     finally:
         shutil.rmtree(staging_root_std, ignore_errors=True)

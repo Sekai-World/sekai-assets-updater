@@ -92,7 +92,8 @@ def test_pptr_values_remain_mapping_compatible_and_resolvable() -> None:
     pointer = value["m_Asset"]
     assert pointer["m_FileID"] == 0
     assert pointer.m_PathID == 7
-    assert pointer.deref() is None
+    dereferenced = pointer.deref()
+    assert dereferenced is None
 
 
 def test_nonzero_pptr_does_not_silently_resolve_to_a_wrong_file() -> None:
@@ -103,13 +104,15 @@ def test_nonzero_pptr_does_not_silently_resolve_to_a_wrong_file() -> None:
             return json.dumps({"m_Asset": {"m_FileID": 2, "m_PathID": 7}})
 
     obj = unity_rs_adapter.UnityRsEnvironment(_CrossFileStudio([info])).objects[0]
+    pointer = obj.read()["m_Asset"]
     with pytest.raises(unity_rs_adapter.UnsupportedReferenceError):
-        obj.read()["m_Asset"].deref()
+        pointer.deref()
 
 
 def test_image_contract_rejects_malformed_native_image() -> None:
+    malformed = SimpleNamespace(width=2, height=2, rgba=b"short")
     with pytest.raises(unity_rs_adapter.UnsupportedUnityObjectError):
-        unity_rs_adapter._rgba_image(SimpleNamespace(width=2, height=2, rgba=b"short"))
+        unity_rs_adapter._rgba_image(malformed)
 
 
 def test_load_bundle_requires_explicit_unity_version(monkeypatch: pytest.MonkeyPatch) -> None:

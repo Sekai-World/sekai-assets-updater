@@ -84,8 +84,9 @@ def test_opendal_upload_rejects_outside_source_before_writing(tmp_path: Path) ->
     remote_root = tmp_path / "remote"
     remote_root.mkdir()
 
+    operation = upload_to_storage_opendal([outside], source_root, _fs_storage(remote_root))
     with pytest.raises(SecurityError):
-        asyncio.run(upload_to_storage_opendal([outside], source_root, _fs_storage(remote_root)))
+        asyncio.run(operation)
     assert list(remote_root.iterdir()) == []
 
 
@@ -94,22 +95,20 @@ def test_opendal_upload_requires_valid_scheme_and_options(tmp_path: Path) -> Non
     source_root.mkdir()
     (source_root / "asset.png").write_bytes(b"pixels")
 
+    invalid_scheme = upload_to_storage_opendal(
+        [source_root / "asset.png"],
+        source_root,
+        {"backend": "opendal", "options": {}},
+    )
     with pytest.raises(ValueError, match="scheme"):
-        asyncio.run(
-            upload_to_storage_opendal(
-                [source_root / "asset.png"],
-                source_root,
-                {"backend": "opendal", "options": {}},
-            )
-        )
+        asyncio.run(invalid_scheme)
+    invalid_options = upload_to_storage_opendal(
+        [source_root / "asset.png"],
+        source_root,
+        {"backend": "opendal", "scheme": "fs", "options": {"root": 5}},
+    )
     with pytest.raises(ValueError, match="options"):
-        asyncio.run(
-            upload_to_storage_opendal(
-                [source_root / "asset.png"],
-                source_root,
-                {"backend": "opendal", "scheme": "fs", "options": {"root": 5}},
-            )
-        )
+        asyncio.run(invalid_options)
 
 
 def test_opendal_upload_aggregates_failures(tmp_path: Path, monkeypatch) -> None:
@@ -129,11 +128,10 @@ def test_opendal_upload_aggregates_failures(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(opendal, "AsyncOperator", lambda *_a, **_k: _FailingOperator())
 
+    operation = upload_to_storage_opendal(
+        [source_root / "a.bin", source_root / "b.bin"],
+        source_root,
+        _fs_storage(tmp_path / "remote"),
+    )
     with pytest.raises(RuntimeError, match=r"2 upload\(s\) failed"):
-        asyncio.run(
-            upload_to_storage_opendal(
-                [source_root / "a.bin", source_root / "b.bin"],
-                source_root,
-                _fs_storage(tmp_path / "remote"),
-            )
-        )
+        asyncio.run(operation)

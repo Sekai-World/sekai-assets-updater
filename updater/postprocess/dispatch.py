@@ -171,6 +171,73 @@ async def _process_charts(
     atomic_write_json(state_file, payload, validate_chart_state)
 
 
+def _validate_postprocess_config(mode: str, config) -> None:
+    if config.ASSET_LOCAL_EXTRACTED_DIR is None:
+        raise ValueError("Specialized modes require ASSET_LOCAL_EXTRACTED_DIR")
+    if mode == "live2d" and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None:
+        raise ValueError("live2d mode requires LIVE2D_BUNDLE_CACHE_DIR")
+
+
+async def _fetch_chart_sources_or_skip(
+    config,
+    target_dir: StdPath,
+    score_include_list: list[str] | None,
+    skip_missing_sources: bool,
+) -> bool:
+    try:
+        await fetch_chart_sources_from_storage(config, target_dir, score_include_list)
+    except Exception as exc:
+        if skip_missing_sources:
+            logger.warning("Skipping optional Charts post-processing: %s", exc)
+            return False
+        raise
+    return True
+
+
+async def _run_charts_postprocess(
+    config,
+    extracted_dir: StdPath,
+    extracted_dir_is_temporary: bool,
+    skip_missing_sources: bool,
+    score_include_list: list[str] | None,
+) -> None:
+    configured_extracted_dir = (
+        None if extracted_dir_is_temporary else config.ASSET_LOCAL_EXTRACTED_DIR
+    )
+    temporary_source = needs_temporary_chart_source(
+        extracted_dir, configured_extracted_dir, score_include_list
+    )
+    if temporary_source:
+        with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
+            chart_source_dir = StdPath(temp_dir)
+            if await _fetch_chart_sources_or_skip(
+                config, chart_source_dir, score_include_list, skip_missing_sources
+            ):
+                await _process_charts(config, chart_source_dir, score_include_list)
+        return
+
+    if not has_local_chart_sources(extracted_dir, score_include_list):
+        if not await _fetch_chart_sources_or_skip(
+            config, extracted_dir, score_include_list, skip_missing_sources
+        ):
+            return
+    await _process_charts(config, extracted_dir, score_include_list)
+
+
+async def _run_live2d_postprocess(
+    config,
+    extracted_dir: StdPath,
+    motion_source: StdPath,
+    skip_missing_sources: bool,
+) -> None:
+    await _process_live2d(
+        config,
+        motion_source,
+        extracted_dir,
+        skip_missing_sources=skip_missing_sources,
+    )
+
+
 async def run_specialized_postprocess(
     mode: str,
     config,
@@ -180,56 +247,27 @@ async def run_specialized_postprocess(
     score_include_list: list[str] | None = None,
 ) -> None:
     """Run mode-specific work only after every bundle has succeeded."""
-    if config.ASSET_LOCAL_EXTRACTED_DIR is None:
-        raise ValueError("Specialized modes require ASSET_LOCAL_EXTRACTED_DIR")
-    if mode == "live2d" and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None:
-        raise ValueError("live2d mode requires LIVE2D_BUNDLE_CACHE_DIR")
+    _validate_postprocess_config(mode, config)
     extracted_dir = StdPath(str(config.ASSET_LOCAL_EXTRACTED_DIR))
     if mode == "live2d":
         motion_source = StdPath(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion"
-        await _process_live2d(
+        await _run_live2d_postprocess(
             config,
-            motion_source,
             extracted_dir,
+            motion_source,
             skip_missing_sources=skip_missing_sources,
         )
-    elif mode == "charts":
-        # A run-scoped extracted directory is already safe to populate. When
-        # the user supplied a persistent directory, use a separate workspace
-        # for the remote fallback so downloaded scores never pollute it.
-        configured_extracted_dir = (
-            None if extracted_dir_is_temporary else config.ASSET_LOCAL_EXTRACTED_DIR
+        return
+    if mode == "charts":
+        await _run_charts_postprocess(
+            config,
+            extracted_dir,
+            extracted_dir_is_temporary,
+            skip_missing_sources,
+            score_include_list,
         )
-        temporary_source = needs_temporary_chart_source(
-            extracted_dir, configured_extracted_dir, score_include_list
-        )
-        if temporary_source:
-            with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
-                chart_source_dir = StdPath(temp_dir)
-                try:
-                    await fetch_chart_sources_from_storage(
-                        config, chart_source_dir, score_include_list
-                    )
-                except Exception as exc:
-                    if skip_missing_sources:
-                        logger.warning("Skipping optional Charts post-processing: %s", exc)
-                        return
-                    raise
-                await _process_charts(config, chart_source_dir, score_include_list)
-        else:
-            if not has_local_chart_sources(extracted_dir, score_include_list):
-                try:
-                    await fetch_chart_sources_from_storage(
-                        config, extracted_dir, score_include_list
-                    )
-                except Exception as exc:
-                    if skip_missing_sources:
-                        logger.warning("Skipping optional Charts post-processing: %s", exc)
-                        return
-                    raise
-            await _process_charts(config, extracted_dir, score_include_list)
-    else:
-        raise ValueError(f"Unsupported specialized mode: {mode}")
+        return
+    raise ValueError(f"Unsupported specialized mode: {mode}")
 
 
 async def _upload_specialized_directory(mode: str, source_dir: Path, config) -> None:
