@@ -76,7 +76,7 @@ def build_character_map(all_objects: dict, script_map: dict) -> dict:
             d = obj["data"]
             cls = get_class_name(d, script_map)
             if cls == "GroupTrack":
-                group_names[pid] = d.get("m_Name", "")
+                group_names[_pid] = d.get("m_Name", "")
 
     # Extract from spawn tracks
     char_id_map = {}
