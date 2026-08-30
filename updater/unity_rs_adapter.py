@@ -87,6 +87,39 @@ class AudioPayload:
     data: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class ModelFilePayload:
+    file_name: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class FbxPayload:
+    fbx: bytes
+    textures: tuple[ModelFilePayload, ...]
+    skipped: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fbx, bytes) or not self.fbx:
+            raise UnsupportedUnityObjectError("FBX payload must be non-empty bytes")
+        seen: set[str] = set()
+        for texture in self.textures:
+            if (
+                not isinstance(texture.file_name, str)
+                or not texture.file_name
+                or texture.file_name in {".", ".."}
+                or any(char in texture.file_name for char in "\x00/\\")
+                or not isinstance(texture.data, bytes)
+            ):
+                raise UnsupportedUnityObjectError("invalid FBX texture payload")
+            key = texture.file_name.casefold()
+            if key in seen:
+                raise UnsupportedUnityObjectError("duplicate FBX texture filename")
+            seen.add(key)
+        if any(not isinstance(item, str) for item in self.skipped):
+            raise UnsupportedUnityObjectError("invalid skipped FBX texture entry")
+
+
 class _TypeInfo:
     __slots__ = ("name",)
 
@@ -500,8 +533,24 @@ def read_audio_clip(entry: UnityRsObject) -> AudioPayload:
     return entry.read_audio_payload()
 
 
+def has_mesh_scene(environment: UnityRsEnvironment) -> bool:
+    """Return whether the loaded bundle contains a scene node with a mesh."""
+    return any(getattr(node, "mesh", None) is not None for node in environment.studio.scene())
+
+
+def read_fbx_with_textures(
+    environment: UnityRsEnvironment, texture_format: str = "png"
+) -> FbxPayload:
+    native = environment.studio.read_fbx_with_textures(texture_format=texture_format)
+    textures = tuple(ModelFilePayload(item.file_name, item.data) for item in native.textures)
+    skipped = tuple(native.skipped)
+    return FbxPayload(native.fbx, textures, skipped)
+
+
 __all__ = [
     "AudioPayload",
+    "ModelFilePayload",
+    "FbxPayload",
     "CLASS_ID_NAMES",
     "MissingContainerError",
     "RenderedImage",
@@ -514,6 +563,8 @@ __all__ = [
     "UnityRsObject",
     "iter_container_items",
     "load_bundle",
+    "has_mesh_scene",
+    "read_fbx_with_textures",
     "read_audio_clip",
     "read_image",
     "read_text_bytes",

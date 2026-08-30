@@ -147,6 +147,10 @@ def _validate_specialized_settings(
 def validate_config(cfg: ConfigLike, mode: str = "assets") -> None:
     """Reject unsafe or unusable runtime settings before starting the pipeline."""
     errors: list[str] = []
+    if hasattr(cfg, "ENABLE_MODEL3D_FBX_EXPORT") and not isinstance(
+        cfg.ENABLE_MODEL3D_FBX_EXPORT, bool
+    ):
+        errors.append("ENABLE_MODEL3D_FBX_EXPORT must be a bool")
     _validate_positive_settings(cfg, errors)
     _validate_external_process_timeout(cfg, errors)
     _validate_encryption_settings(cfg, errors)
