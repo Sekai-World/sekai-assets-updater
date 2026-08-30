@@ -12,6 +12,8 @@ REGION = SekaiServerRegion.JP
 
 # Single entry point processing mode. CLI --mode overrides this at runtime.
 UPDATER_MODE = "assets"
+# Optional additional export for bundles containing 3D scene meshes.
+ENABLE_MODEL3D_FBX_EXPORT = False
 
 # Fallback unity version, replace with the correct version if needed
 UNITY_VERSION = "2022.3.21f1"
