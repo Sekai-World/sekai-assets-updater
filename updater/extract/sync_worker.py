@@ -6,7 +6,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path as StdPath
-from typing import Dict
+from typing import Any, Dict
 
 from updater.extract.acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
@@ -44,14 +44,54 @@ from updater.media.video import (
 from updater.security import (
     atomic_write_bytes,
     atomic_write_stream,
+    resolve_secure_path,
     secure_existing_output,
     validate_contained_file,
     validate_output_target,
 )
-from updater.unity_rs_adapter import load_bundle as _load_unity_bundle
+from updater.unity_rs_adapter import (
+    has_mesh_scene as _has_mesh_scene,
+)
+from updater.unity_rs_adapter import (
+    load_bundle as _load_unity_bundle,
+)
+from updater.unity_rs_adapter import (
+    read_fbx_with_textures as _read_fbx_with_textures,
+)
 
 logger = logging.getLogger("live2d")
 _BYTES_SUFFIX = ".bytes"
+
+
+def _export_model_fbx(
+    unity_file, output_root: StdPath, bundle_name: str, exported_files: list[StdPath]
+) -> None:
+    if (
+        not isinstance(bundle_name, str)
+        or not bundle_name
+        or "\\" in bundle_name
+        or "\x00" in bundle_name
+    ):
+        raise ValueError("invalid bundleName for FBX export")
+    components = bundle_name.split("/")
+    if any(component in ("", ".", "..") for component in components):
+        raise ValueError("invalid bundleName for FBX export")
+    # resolve_secure_path permits legitimate nested POSIX paths while
+    # rejecting absolute/traversal paths; validate_output_target additionally
+    # rejects a pre-existing symlink at the bundle directory itself.
+    bundle_dir = validate_output_target(output_root, resolve_secure_path(output_root, bundle_name))
+    fbx_dir = bundle_dir / "fbx"
+    fbx_dir.mkdir(parents=True, exist_ok=True)
+    payload = _read_fbx_with_textures(unity_file, texture_format="png")
+    fbx_path = fbx_dir / "model.fbx"
+    atomic_write_bytes(fbx_path, payload.fbx)
+    exported_files.append(fbx_path)
+    for texture in payload.textures:
+        texture_path = fbx_dir / texture.file_name
+        atomic_write_bytes(texture_path, texture.data)
+        exported_files.append(texture_path)
+    for skipped in payload.skipped:
+        logger.warning("Skipped FBX texture %s in %s", skipped, bundle_name)
 
 
 def _copy_shared_audio_outputs(
@@ -403,7 +443,7 @@ def _process_movie_groups(
 
 def _extract_bundle_files_sync(
     bundle_save_path: str,
-    bundle: Dict[str, str],
+    bundle: Dict[str, Any],
     extracted_save_path: str,
     unity_version: str | None,
     texture_output_formats: tuple[str, ...],
@@ -433,6 +473,8 @@ def _extract_bundle_files_sync(
         webp_method=DEFAULT_WEBP_METHOD if webp_method is None else webp_method,
         png_compression=DEFAULT_PNG_COMPRESSION if png_compression is None else png_compression,
     )
+    if bundle.get("_enable_model3d_fbx_export", False) and _has_mesh_scene(unity_file):
+        _export_model_fbx(unity_file, output_root, bundle["bundleName"], exported_files)
     audio_jobs: list[tuple[str, list[str]]] = []
     video_jobs: list[str] = []
 
@@ -459,13 +501,13 @@ def _extract_bundle_files_sync(
         video_jobs,
     )
 
-    validated_exported_files = [
-        validate_contained_file(
-            output_root,
-            path.relative_to(output_root).as_posix(),
-        )
-        for path in exported_files
-    ]
+    validated_exported_files = []
+    seen_paths: set[StdPath] = set()
+    for path in exported_files:
+        validated = validate_contained_file(output_root, path.relative_to(output_root).as_posix())
+        if validated not in seen_paths:
+            seen_paths.add(validated)
+            validated_exported_files.append(validated)
     return (
         [path.as_posix() for path in validated_exported_files],
         audio_jobs,

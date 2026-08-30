@@ -2,6 +2,15 @@
 
 Update and extract Project Sekai asset bundles.
 
+## Optional 3D FBX export
+
+Set `ENABLE_MODEL3D_FBX_EXPORT = True` to enable optional additional FBX output
+(disabled by default). Normal download filtering is unchanged. Bundles that
+have entered ordinary extraction are judged by content; bundles with a scene
+mesh produce `fbx/model.fbx` and textures in the same per-bundle directory.
+This is per-bundle model export only: it does not assemble complete characters
+and does not produce GLB.
+
 ## Requirements
 
 - Python `3.12`

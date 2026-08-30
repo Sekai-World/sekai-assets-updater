@@ -126,12 +126,16 @@ async def extract_asset_bundle(
     ).startswith("live2d/motion/"):
         return []
     loop = asyncio.get_running_loop()
+    worker_bundle = dict(bundle)
+    worker_bundle["_enable_model3d_fbx_export"] = bool(  # type: ignore[index]
+        getattr(config, "ENABLE_MODEL3D_FBX_EXPORT", False)
+    )
     exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
         _get_shared_extract_process_pool(config),
         partial(
             _extract_bundle_files_sync,
             bundle_save_path.as_posix(),
-            bundle,
+            worker_bundle,
             extracted_save_path.as_posix(),
             unity_version,
             get_texture_output_formats(config),
