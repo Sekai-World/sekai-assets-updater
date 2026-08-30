@@ -91,5 +91,6 @@ def test_validate_config_rejects_non_boolean_fbx_flag(monkeypatch):
 
     monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/bin/true")
     config = _valid_config(ENABLE_MODEL3D_FBX_EXPORT="yes")  # type: ignore[arg-type]
+    typed_config = cast(ConfigLike, config)
     with pytest.raises(ValueError, match="ENABLE_MODEL3D_FBX_EXPORT"):
-        configuration.validate_config(cast(ConfigLike, config))
+        configuration.validate_config(typed_config)
