@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from updater.cli import configuration
 from updater.extract import sync_worker
+from updater.model import ConfigLike
 from updater.unity_rs_adapter import FbxPayload, ModelFilePayload, UnsupportedUnityObjectError
 
 
@@ -34,8 +36,10 @@ def test_export_fbx_rejects_unsafe_bundle_name(monkeypatch, tmp_path, name):
     monkeypatch.setattr(
         sync_worker, "_read_fbx_with_textures", lambda *_args, **_kwargs: _payload()
     )
+    unity_file = SimpleNamespace()
+    exported = []
     with pytest.raises((ValueError, OSError)):
-        sync_worker._export_model_fbx(SimpleNamespace(), tmp_path, name, [])
+        sync_worker._export_model_fbx(unity_file, tmp_path, name, exported)
 
 
 @pytest.mark.parametrize(
@@ -86,5 +90,6 @@ def test_validate_config_rejects_non_boolean_fbx_flag(monkeypatch):
     from tests.phase5_specialized_validation_test import _valid_config
 
     monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/bin/true")
+    config = _valid_config(ENABLE_MODEL3D_FBX_EXPORT="yes")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="ENABLE_MODEL3D_FBX_EXPORT"):
-        configuration.validate_config(_valid_config(ENABLE_MODEL3D_FBX_EXPORT="yes"))  # type: ignore[arg-type]
+        configuration.validate_config(cast(ConfigLike, config))
