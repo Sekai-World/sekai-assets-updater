@@ -36,9 +36,7 @@ def test_font_textasset_keeps_binary_bytes_and_detects_extension(
     output: list[Path] = []
     monkeypatch.setattr(unity_objects, "read_text_bytes", lambda _obj: payload)
 
-    unity_objects._extract_text_asset(
-        _TextObject(), tmp_path / name, False, {}, output
-    )
+    unity_objects._extract_text_asset(_TextObject(), tmp_path / name, False, {}, output)
 
     expected = tmp_path / f"font{suffix}"
     assert expected.read_bytes() == payload
@@ -68,7 +66,9 @@ def test_font_object_uses_native_bytes_and_skips_empty(
     assert not (tmp_path / "empty.otf").exists()
 
 
-def test_empty_texture_is_warned_and_skipped(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog) -> None:
+def test_empty_texture_is_warned_and_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog
+) -> None:
     obj = SimpleNamespace(type=SimpleNamespace(name="Texture2D"))
     monkeypatch.setattr(
         unity_objects,
@@ -79,8 +79,19 @@ def test_empty_texture_is_warned_and_skipped(monkeypatch: pytest.MonkeyPatch, tm
 
     with caplog.at_level("WARNING"):
         unity_objects._extract_one_object(
-            SimpleNamespace(), "font/empty.texture", obj, tmp_path / "empty.png", ("png",),
-            False, 2, "fast", [], {}, [], [], exported
+            SimpleNamespace(),
+            "font/empty.texture",
+            obj,
+            tmp_path / "empty.png",
+            ("png",),
+            False,
+            2,
+            "fast",
+            [],
+            {},
+            [],
+            [],
+            exported,
         )
 
     assert exported == []
@@ -113,8 +124,19 @@ def test_malformed_playable_is_skipped_at_object_scope(
 
     with caplog.at_level("WARNING"):
         unity_objects._extract_one_object(
-            SimpleNamespace(), "effect_asset/gacha/anim_02.playable", obj,
-            tmp_path / "anim_02.playable.json", ("png",), False, 2, "fast", [], {}, [], [], exported
+            SimpleNamespace(),
+            "effect_asset/gacha/anim_02.playable",
+            obj,
+            tmp_path / "anim_02.playable.json",
+            ("png",),
+            False,
+            2,
+            "fast",
+            [],
+            {},
+            [],
+            [],
+            exported,
         )
 
     assert exported == []

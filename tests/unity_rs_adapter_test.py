@@ -93,16 +93,16 @@ def test_type_tree_and_text_asset_keep_json_and_raw_bytes() -> None:
     assert obj.read().m_Script.encode("utf-8", "surrogateescape") == b"fixture\xff"
 
 
-@pytest.mark.parametrize("font", [b"OTTOfont-data", SimpleNamespace(data=b"\x00\x01\x00\x00font-data")])
+@pytest.mark.parametrize(
+    "font", [b"OTTOfont-data", SimpleNamespace(data=b"\x00\x01\x00\x00font-data")]
+)
 def test_font_bytes_use_native_reader_without_typetree(font) -> None:
     info = _Info(file_index=0, object_index=0, path_id=8, class_id=128, name="font.otf")
     studio = _FontStudio([info], font)
     environment = unity_rs_adapter.UnityRsEnvironment(studio)
     obj = environment.objects[0]
 
-    assert unity_rs_adapter.read_font_bytes(obj) == (
-        font if isinstance(font, bytes) else font.data
-    )
+    assert unity_rs_adapter.read_font_bytes(obj) == (font if isinstance(font, bytes) else font.data)
 
 
 def test_pptr_values_remain_mapping_compatible_and_resolvable() -> None:

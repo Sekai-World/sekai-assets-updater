@@ -186,9 +186,7 @@ def _rgba_image(value: Any) -> Image.Image:
     if not isinstance(width, int) or not isinstance(height, int):
         raise UnsupportedUnityObjectError("unity-rs image reader did not return width and height")
     if width <= 0 or height <= 0:
-        raise InvalidImageDimensions(
-            f"unity-rs image has invalid dimensions {width}x{height}"
-        )
+        raise InvalidImageDimensions(f"unity-rs image has invalid dimensions {width}x{height}")
     if not isinstance(pixels, bytes):
         raise UnsupportedUnityObjectError(
             "unity-rs image reader did not return width, height and RGBA bytes"
@@ -246,9 +244,8 @@ def _rendered_image(value: Any) -> RenderedImage:
 
 def _is_empty_image_error(exc: NotImplementedError) -> bool:
     message = str(exc).lower()
-    return (
-        ("texture2d 0x0 carries no image data" in message)
-        or ("sprite 0x0 carries no image data" in message)
+    return ("texture2d 0x0 carries no image data" in message) or (
+        "sprite 0x0 carries no image data" in message
     )
 
 

@@ -86,7 +86,9 @@ def test_extract_fbx_is_content_and_flag_gated(monkeypatch, tmp_path, enabled, m
     assert bool(export_calls) is called
 
 
-@pytest.mark.parametrize("error", [NotImplementedError("skinned weights"), ValueError("sample rate")])
+@pytest.mark.parametrize(
+    "error", [NotImplementedError("skinned weights"), ValueError("sample rate")]
+)
 def test_unsupported_fbx_export_does_not_fail_normal_extraction(monkeypatch, tmp_path, error):
     normal_file = tmp_path / "normal.txt"
     normal_file.write_bytes(b"normal")
@@ -105,7 +107,11 @@ def test_unsupported_fbx_export_does_not_fail_normal_extraction(monkeypatch, tmp
 
     monkeypatch.setattr(sync_worker, "_read_fbx_with_textures", fail_fbx)
     result, _audio, _video = sync_worker._extract_bundle_files_sync(
-        "input", {"bundleName": "bundle", "_enable_model3d_fbx_export": True}, str(tmp_path), "2022", ("png",)
+        "input",
+        {"bundleName": "bundle", "_enable_model3d_fbx_export": True},
+        str(tmp_path),
+        "2022",
+        ("png",),
     )
 
     assert result == [normal_file.as_posix()]
@@ -114,9 +120,9 @@ def test_unsupported_fbx_export_does_not_fail_normal_extraction(monkeypatch, tmp
 
 def test_unrelated_fbx_reader_oserror_is_not_swallowed(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        sync_worker, "_read_fbx_with_textures", lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("permission denied")
-        )
+        sync_worker,
+        "_read_fbx_with_textures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("permission denied")),
     )
 
     with pytest.raises(OSError, match="permission denied"):
@@ -152,12 +158,25 @@ def test_image_pixel_mismatch_is_not_downgraded(monkeypatch, tmp_path):
 
     obj = SimpleNamespace(type=SimpleNamespace(name="Texture2D"))
     error = UnsupportedUnityObjectError("unity-rs image returned invalid pixel length")
-    monkeypatch.setattr(unity_objects, "render_image_asset", lambda _obj: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        unity_objects, "render_image_asset", lambda _obj: (_ for _ in ()).throw(error)
+    )
 
     with pytest.raises(UnsupportedUnityObjectError, match="pixel length"):
         unity_objects._extract_one_object(
-            SimpleNamespace(), "texture.asset", obj, tmp_path / "texture", ("png",),
-            False, 2, "fast", [], {}, [], [], []
+            SimpleNamespace(),
+            "texture.asset",
+            obj,
+            tmp_path / "texture",
+            ("png",),
+            False,
+            2,
+            "fast",
+            [],
+            {},
+            [],
+            [],
+            [],
         )
 
 
