@@ -42,6 +42,7 @@ from updater.media.video import (
     demux_usm_sources_in_memory,
 )
 from updater.security import (
+    SecurityError,
     atomic_write_bytes,
     atomic_write_stream,
     resolve_secure_path,
@@ -49,18 +50,21 @@ from updater.security import (
     validate_contained_file,
     validate_output_target,
 )
-from updater.unity_rs_adapter import (
-    has_mesh_scene as _has_mesh_scene,
-)
-from updater.unity_rs_adapter import (
-    load_bundle as _load_unity_bundle,
-)
-from updater.unity_rs_adapter import (
-    read_fbx_with_textures as _read_fbx_with_textures,
-)
+from updater.unity_rs_adapter import UnsupportedUnityObjectError
+from updater.unity_rs_adapter import has_mesh_scene as _has_mesh_scene
+from updater.unity_rs_adapter import load_bundle as _load_unity_bundle
+from updater.unity_rs_adapter import read_fbx_with_textures as _read_fbx_with_textures
 
 logger = logging.getLogger("live2d")
 _BYTES_SUFFIX = ".bytes"
+
+
+def _is_known_fbx_read_error(exc: Exception) -> bool:
+    """Limit swallowed reader errors to diagnostics known to be FBX parsing failures."""
+    if not isinstance(exc, OSError):
+        return True
+    message = str(exc).lower()
+    return "failed to fill whole buffer" in message or "fbx" in message
 
 
 def _export_model_fbx(
@@ -80,16 +84,44 @@ def _export_model_fbx(
     # rejecting absolute/traversal paths; validate_output_target additionally
     # rejects a pre-existing symlink at the bundle directory itself.
     bundle_dir = validate_output_target(output_root, resolve_secure_path(output_root, bundle_name))
+    try:
+        payload = _read_fbx_with_textures(unity_file, texture_format="png")
+    except SecurityError:
+        raise
+    except (NotImplementedError, UnsupportedUnityObjectError, ValueError, OSError) as exc:
+        if not _is_known_fbx_read_error(exc):
+            raise
+        logger.warning("FBX export unsupported for %s, skipping FBX: %s", bundle_name, exc)
+        return
     fbx_dir = bundle_dir / "fbx"
     fbx_dir.mkdir(parents=True, exist_ok=True)
-    payload = _read_fbx_with_textures(unity_file, texture_format="png")
-    fbx_path = fbx_dir / "model.fbx"
-    atomic_write_bytes(fbx_path, payload.fbx)
-    exported_files.append(fbx_path)
-    for texture in payload.textures:
-        texture_path = fbx_dir / texture.file_name
-        atomic_write_bytes(texture_path, texture.data)
-        exported_files.append(texture_path)
+    fbx_written: list[tuple[StdPath, bytes | None]] = []
+    try:
+        fbx_path = fbx_dir / "model.fbx"
+        fbx_written.append((fbx_path, fbx_path.read_bytes() if fbx_path.exists() else None))
+        atomic_write_bytes(fbx_path, payload.fbx)
+        for texture in payload.textures:
+            texture_path = fbx_dir / texture.file_name
+            fbx_written.append(
+                (texture_path, texture_path.read_bytes() if texture_path.exists() else None)
+            )
+            atomic_write_bytes(texture_path, texture.data)
+    except Exception:
+        for path, previous_data in reversed(fbx_written):
+            try:
+                if previous_data is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write_bytes(path, previous_data)
+            except OSError:
+                logger.warning("Failed to roll back FBX output %s", path, exc_info=True)
+        # Do not remove a bundle directory that may contain ordinary exports.
+        try:
+            fbx_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    exported_files.extend([path for path, _previous_data in fbx_written])
     for skipped in payload.skipped:
         logger.warning("Skipped FBX texture %s in %s", skipped, bundle_name)
 

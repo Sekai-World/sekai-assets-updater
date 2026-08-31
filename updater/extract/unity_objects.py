@@ -17,7 +17,7 @@ from updater.media.images import (
     save_image_formats,
 )
 from updater.security import atomic_write_bytes
-from updater.unity_rs_adapter import read_text_bytes
+from updater.unity_rs_adapter import InvalidImageDimensions, read_font_bytes, read_text_bytes
 
 logger = logging.getLogger("live2d")
 
@@ -34,15 +34,19 @@ def _extract_mono_behaviour(
     exported_files: list[Path],
 ) -> None:
     tree = None
-    try:
-        if unityfs_obj.serialized_type.node:
-            tree = unityfs_obj.read_typetree()
-    except AttributeError:
-        tree = unityfs_obj.read_typetree()
-    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
-
     if unityfs_path.endswith(".playable"):
-        tree = extract_playable(unity_file, unityfs_path)
+        try:
+            tree = extract_playable(unity_file, unityfs_path)
+        except (AttributeError, NotImplementedError, OSError, TypeError, ValueError) as exc:
+            logger.warning("Failed to extract playable %s, skipping: %s", unityfs_path, exc)
+            return
+    else:
+        try:
+            if unityfs_obj.serialized_type.node:
+                tree = unityfs_obj.read_typetree()
+        except AttributeError:
+            tree = unityfs_obj.read_typetree()
+    logger.debug("Saving MonoBehaviour %s to %s", unityfs_path, save_path)
 
     atomic_write_bytes(save_path, json.dumps(tree, option=json.OPT_INDENT_2))
     exported_files.append(save_path)
@@ -73,9 +77,24 @@ def _extract_text_asset(
     if save_path.suffix == ".bytes":
         save_path = save_path.with_suffix("")
     data_bytes = read_text_bytes(unityfs_obj)
+    font_extension = _detect_font_extension(data_bytes)
+    if font_extension is not None:
+        save_path = save_path.with_suffix(font_extension)
     atomic_write_bytes(save_path, data_bytes)
     if live2d_bundle and save_path.suffix == ".moc3":
         param_id_map.update(extract_params_ids_from_moc3(data_bytes))
+    exported_files.append(save_path)
+
+
+def _extract_font_object(unityfs_obj, save_path: Path, exported_files: list[Path]) -> None:
+    data_bytes = read_font_bytes(unityfs_obj)
+    if not data_bytes:
+        logger.warning("Empty Font %s, skipping", save_path)
+        return
+    font_extension = _detect_font_extension(data_bytes)
+    if font_extension is not None:
+        save_path = save_path.with_suffix(font_extension)
+    atomic_write_bytes(save_path, data_bytes)
     exported_files.append(save_path)
 
 
@@ -96,6 +115,23 @@ def _extract_image_object(
             png_compression=png_compression,
         )
     )
+
+
+def _detect_font_extension(data: bytes) -> str | None:
+    """Return a canonical extension for recognized font binary signatures."""
+    signatures = {
+        b"\x00\x01\x00\x00": ".ttf",
+        b"OTTO": ".otf",
+        b"true": ".ttf",
+        b"typ1": ".ttf",
+        b"ttcf": ".ttc",
+        b"wOFF": ".woff",
+        b"wOF2": ".woff2",
+    }
+    for signature, extension in signatures.items():
+        if data.startswith(signature):
+            return extension
+    return None
 
 
 def _extract_texture_array(
@@ -175,15 +211,20 @@ def _extract_one_object(
         )
     elif object_type == "TextAsset":
         _extract_text_asset(unityfs_obj, save_path, live2d_bundle, param_id_map, exported_files)
+    elif object_type == "Font":
+        _extract_font_object(unityfs_obj, save_path, exported_files)
     elif object_type in {"Texture2D", "Sprite"}:
-        _extract_image_object(
-            unityfs_obj,
-            save_path,
-            texture_output_formats,
-            webp_method,
-            png_compression,
-            exported_files,
-        )
+        try:
+            _extract_image_object(
+                unityfs_obj,
+                save_path,
+                texture_output_formats,
+                webp_method,
+                png_compression,
+                exported_files,
+            )
+        except InvalidImageDimensions as exc:
+            logger.warning("Unsupported image %s, skipping: %s", unityfs_path, exc)
     elif object_type == "Texture2DArray":
         _extract_texture_array(
             unityfs_obj,

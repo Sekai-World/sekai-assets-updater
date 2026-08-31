@@ -86,6 +86,81 @@ def test_extract_fbx_is_content_and_flag_gated(monkeypatch, tmp_path, enabled, m
     assert bool(export_calls) is called
 
 
+@pytest.mark.parametrize("error", [NotImplementedError("skinned weights"), ValueError("sample rate")])
+def test_unsupported_fbx_export_does_not_fail_normal_extraction(monkeypatch, tmp_path, error):
+    normal_file = tmp_path / "normal.txt"
+    normal_file.write_bytes(b"normal")
+
+    monkeypatch.setattr(sync_worker, "_load_unity_bundle", lambda *_args: SimpleNamespace())
+
+    def extract_normal(*_args, **_kwargs):
+        normal_file.write_bytes(b"normal")
+        return ([normal_file], [], [])
+
+    monkeypatch.setattr(sync_worker, "extract_unity_objects", extract_normal)
+    monkeypatch.setattr(sync_worker, "_has_mesh_scene", lambda *_args: True)
+
+    def fail_fbx(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(sync_worker, "_read_fbx_with_textures", fail_fbx)
+    result, _audio, _video = sync_worker._extract_bundle_files_sync(
+        "input", {"bundleName": "bundle", "_enable_model3d_fbx_export": True}, str(tmp_path), "2022", ("png",)
+    )
+
+    assert result == [normal_file.as_posix()]
+    assert not (tmp_path / "bundle" / "fbx" / "model.fbx").exists()
+
+
+def test_unrelated_fbx_reader_oserror_is_not_swallowed(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        sync_worker, "_read_fbx_with_textures", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("permission denied")
+        )
+    )
+
+    with pytest.raises(OSError, match="permission denied"):
+        sync_worker._export_model_fbx(SimpleNamespace(), tmp_path, "bundle", [])
+
+
+def test_fbx_write_failure_rolls_back_this_export(monkeypatch, tmp_path):
+    payload = FbxPayload(
+        b"fbx",
+        (ModelFilePayload("first.png", b"first"), ModelFilePayload("second.png", b"second")),
+        (),
+    )
+    monkeypatch.setattr(sync_worker, "_read_fbx_with_textures", lambda *_args, **_kwargs: payload)
+    original_write = sync_worker.atomic_write_bytes
+
+    def fail_on_second_texture(path, data):
+        original_write(path, data)
+        if path.name == "second.png":
+            raise OSError("disk full")
+
+    monkeypatch.setattr(sync_worker, "atomic_write_bytes", fail_on_second_texture)
+    exported = []
+
+    with pytest.raises(OSError, match="disk full"):
+        sync_worker._export_model_fbx(SimpleNamespace(), tmp_path, "bundle", exported)
+
+    assert exported == []
+    assert not (tmp_path / "bundle" / "fbx").exists()
+
+
+def test_image_pixel_mismatch_is_not_downgraded(monkeypatch, tmp_path):
+    from updater.extract import unity_objects
+
+    obj = SimpleNamespace(type=SimpleNamespace(name="Texture2D"))
+    error = UnsupportedUnityObjectError("unity-rs image returned invalid pixel length")
+    monkeypatch.setattr(unity_objects, "render_image_asset", lambda _obj: (_ for _ in ()).throw(error))
+
+    with pytest.raises(UnsupportedUnityObjectError, match="pixel length"):
+        unity_objects._extract_one_object(
+            SimpleNamespace(), "texture.asset", obj, tmp_path / "texture", ("png",),
+            False, 2, "fast", [], {}, [], [], []
+        )
+
+
 def test_validate_config_rejects_non_boolean_fbx_flag(monkeypatch):
     from tests.phase5_specialized_validation_test import _valid_config
 

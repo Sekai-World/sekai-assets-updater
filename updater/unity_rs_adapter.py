@@ -27,6 +27,7 @@ CLASS_ID_NAMES = {
     43: "Mesh",
     48: "Shader",
     49: "TextAsset",
+    128: "Font",
     74: "AnimationClip",
     83: "AudioClip",
     89: "Cubemap",
@@ -54,6 +55,10 @@ class UnityRsLoadError(UnityRsAdapterError):
 
 class UnsupportedUnityObjectError(UnityRsAdapterError):
     """The application requested an object shape not covered by the adapter."""
+
+
+class InvalidImageDimensions(UnsupportedUnityObjectError):
+    """An image reports dimensions that cannot produce a valid output file."""
 
 
 class MissingContainerError(UnityRsAdapterError):
@@ -178,7 +183,13 @@ def _rgba_image(value: Any) -> Image.Image:
     width = getattr(value, "width", None)
     height = getattr(value, "height", None)
     pixels = getattr(value, "rgba", None)
-    if not isinstance(width, int) or not isinstance(height, int) or not isinstance(pixels, bytes):
+    if not isinstance(width, int) or not isinstance(height, int):
+        raise UnsupportedUnityObjectError("unity-rs image reader did not return width and height")
+    if width <= 0 or height <= 0:
+        raise InvalidImageDimensions(
+            f"unity-rs image has invalid dimensions {width}x{height}"
+        )
+    if not isinstance(pixels, bytes):
         raise UnsupportedUnityObjectError(
             "unity-rs image reader did not return width, height and RGBA bytes"
         )
@@ -224,11 +235,30 @@ def _rendered_image(value: Any) -> RenderedImage:
     height = getattr(value, "height", None)
     if not isinstance(width, int) or not isinstance(height, int):
         raise UnsupportedUnityObjectError("unity-rs image reader did not return width and height")
+    if width <= 0 or height <= 0:
+        raise InvalidImageDimensions(f"unity-rs image has invalid dimensions {width}x{height}")
     # Pixel-buffer validation is deferred: pulling ``value.rgba`` here would
     # copy the whole frame across the FFI boundary even when the image is
     # encoded natively and the bytes are never needed on the Python side.
     # ``to_pil`` still validates through ``_rgba_image``.
     return RenderedImage(native=value, width=width, height=height)
+
+
+def _is_empty_image_error(exc: NotImplementedError) -> bool:
+    message = str(exc).lower()
+    return (
+        ("texture2d 0x0 carries no image data" in message)
+        or ("sprite 0x0 carries no image data" in message)
+    )
+
+
+def _read_native_image(reader: Callable[[], Any]) -> RenderedImage:
+    try:
+        return _rendered_image(reader())
+    except NotImplementedError as exc:
+        if _is_empty_image_error(exc):
+            raise InvalidImageDimensions(str(exc)) from exc
+        raise
 
 
 class UnityRsEnvironment:
@@ -375,10 +405,12 @@ class UnityRsObject:
             )
         elif self.class_id == 28:
             value = _TextureAsset(
-                _rendered_image(studio.read_texture(self.file_index, self.path_id))
+                _read_native_image(lambda: studio.read_texture(self.file_index, self.path_id))
             )
         elif self.class_id == 213:
-            value = _SpriteAsset(_rendered_image(studio.read_sprite(self.file_index, self.path_id)))
+            value = _SpriteAsset(
+                _read_native_image(lambda: studio.read_sprite(self.file_index, self.path_id))
+            )
         elif self.class_id == 187:
             native_images = studio.read_texture_array(self.file_index, self.path_id)
             value = _TextureArrayAsset([_rendered_image(image) for image in native_images])
@@ -402,12 +434,12 @@ class UnityRsObject:
 
     def read_image(self) -> RenderedImage:
         if self.class_id == 28:
-            return _rendered_image(
-                self._environment.studio.read_texture(self.file_index, self.path_id)
+            return _read_native_image(
+                lambda: self._environment.studio.read_texture(self.file_index, self.path_id)
             )
         if self.class_id == 213:
-            return _rendered_image(
-                self._environment.studio.read_sprite(self.file_index, self.path_id)
+            return _read_native_image(
+                lambda: self._environment.studio.read_sprite(self.file_index, self.path_id)
             )
         raise UnsupportedUnityObjectError(
             f"object class {self.type.name} does not provide a single image"
@@ -521,6 +553,17 @@ def read_text_bytes(entry: UnityRsObject) -> bytes:
     return entry._environment.studio.read_text(entry.file_index, entry.path_id)
 
 
+def read_font_bytes(entry: UnityRsObject) -> bytes:
+    """Read embedded Font bytes without consulting its serialized TypeTree."""
+    if entry.class_id != 128:
+        raise UnsupportedUnityObjectError(f"object class {entry.type.name} is not a Font")
+    native = entry._environment.studio.read_font(entry.file_index, entry.path_id)
+    data = native if isinstance(native, bytes) else getattr(native, "data", None)
+    if not isinstance(data, bytes):
+        raise UnsupportedUnityObjectError("unity-rs font reader did not return binary data")
+    return data
+
+
 def read_image(entry: UnityRsObject) -> RenderedImage:
     return entry.read_image()
 
@@ -552,6 +595,7 @@ __all__ = [
     "ModelFilePayload",
     "FbxPayload",
     "CLASS_ID_NAMES",
+    "InvalidImageDimensions",
     "MissingContainerError",
     "RenderedImage",
     "UnsupportedReferenceError",
@@ -568,6 +612,7 @@ __all__ = [
     "read_audio_clip",
     "read_image",
     "read_text_bytes",
+    "read_font_bytes",
     "read_texture_array_images",
     "read_type_tree",
 ]
