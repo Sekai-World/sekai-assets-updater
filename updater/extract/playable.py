@@ -455,6 +455,20 @@ def extract_streaming_live_clip(
     return event
 
 
+def _iter_path_ids(value: Any):
+    """Yield Unity PPtr path IDs nested in a typetree value."""
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            path_id = node.get("m_PathID")
+            if isinstance(path_id, int):
+                yield path_id
+            stack.extend(child for child in node.values() if isinstance(child, (dict, list)))
+        elif isinstance(node, list):
+            stack.extend(child for child in node if isinstance(child, (dict, list)))
+
+
 def gather_referenced_pids(all_objects: dict, start_pid: int) -> set[int]:
     """Collect objects reachable from a TimelineAsset through Unity PPtrs."""
     visited: set[int] = set()
@@ -466,23 +480,8 @@ def gather_referenced_pids(all_objects: dict, start_pid: int) -> set[int]:
             continue
         visited.add(pid)
         obj = all_objects.get(pid)
-        if not obj:
-            continue
-
-        stack = [obj.get("data")]
-        while stack:
-            node = stack.pop()
-            if isinstance(node, dict):
-                path_ref = node.get("m_PathID")
-                if isinstance(path_ref, int) and path_ref not in visited:
-                    to_visit.append(path_ref)
-                for value in node.values():
-                    if isinstance(value, (dict, list)):
-                        stack.append(value)
-            elif isinstance(node, list):
-                for item in node:
-                    if isinstance(item, (dict, list)):
-                        stack.append(item)
+        if obj:
+            to_visit.extend(_iter_path_ids(obj.get("data")))
 
     return visited
 
@@ -493,6 +492,58 @@ def _get_object_class(obj: dict | None, script_map: dict) -> str:
     if obj["type"] == "MonoBehaviour":
         return get_class_name(obj["data"], script_map)
     return obj["type"]
+
+
+def _extract_track_events(
+    pid: int,
+    obj: dict | None,
+    all_objects: dict,
+    script_map: dict,
+    data_by_pid: dict,
+    char_map: dict,
+) -> tuple[str, list[dict]] | None:
+    if not obj or obj["type"] != "MonoBehaviour":
+        return None
+
+    track_data = obj["data"]
+    track_class = get_class_name(track_data, script_map)
+    clips = track_data.get("m_Clips")
+    if not isinstance(clips, list) or not clips:
+        return None
+
+    extractor_info = TRACK_EXTRACTORS.get(track_class)
+    track_name = track_data.get("m_Name", "")
+    character_id = track_data.get("CharacterId", 0)
+    character_name = ""
+    if extractor_info and extractor_info[1]:
+        character_name = char_map.get(character_id, track_name)
+
+    events = []
+    for clip in clips:
+        asset_path_id = _path_id(clip.get("m_Asset"))
+        asset_data = data_by_pid.get(asset_path_id, {})
+        if not isinstance(asset_data, dict):
+            asset_data = {}
+
+        if extractor_info:
+            extractor, _needs_character = extractor_info
+            events.append(extractor(clip, asset_data, character_name))
+            continue
+
+        events.append(
+            extract_streaming_live_clip(
+                clip,
+                asset_data,
+                track_class=track_class,
+                track_name=track_name,
+                track_path_id=pid,
+                track_data=track_data,
+                asset_class=_get_object_class(all_objects.get(asset_path_id), script_map),
+                asset_path_id=asset_path_id,
+            )
+        )
+
+    return track_class, events
 
 
 def extract_timeline_events(
@@ -507,47 +558,14 @@ def extract_timeline_events(
     char_map = build_character_map(all_objects, script_map)
 
     for pid in referenced_pids:
-        obj = all_objects.get(pid)
-        if not obj or obj["type"] != "MonoBehaviour":
-            continue
-
-        track_data = obj["data"]
-        track_class = get_class_name(track_data, script_map)
-        clips = track_data.get("m_Clips")
-        if not isinstance(clips, list) or not clips:
-            continue
-
-        extractor_info = TRACK_EXTRACTORS.get(track_class)
-
-        track_name = track_data.get("m_Name", "")
-        character_id = track_data.get("CharacterId", 0)
-        character_name = (
-            char_map.get(character_id, track_name) if extractor_info and extractor_info[1] else ""
+        extracted = _extract_track_events(
+            pid, all_objects.get(pid), all_objects, script_map, data_by_pid, char_map
         )
-        track_counts[track_class] = track_counts.get(track_class, 0) + len(clips)
-
-        for clip in clips:
-            asset_path_id = _path_id(clip.get("m_Asset"))
-            asset_data = data_by_pid.get(asset_path_id, {})
-            if not isinstance(asset_data, dict):
-                asset_data = {}
-
-            if extractor_info:
-                extractor, _needs_character = extractor_info
-                events.append(extractor(clip, asset_data, character_name))
-            else:
-                events.append(
-                    extract_streaming_live_clip(
-                        clip,
-                        asset_data,
-                        track_class=track_class,
-                        track_name=track_name,
-                        track_path_id=pid,
-                        track_data=track_data,
-                        asset_class=_get_object_class(all_objects.get(asset_path_id), script_map),
-                        asset_path_id=asset_path_id,
-                    )
-                )
+        if extracted is None:
+            continue
+        track_class, track_events = extracted
+        track_counts[track_class] = track_counts.get(track_class, 0) + len(track_events)
+        events.extend(track_events)
 
     events.sort(key=lambda event: (event["start"], event.get("trackName", ""), event["type"]))
     return events, track_counts
