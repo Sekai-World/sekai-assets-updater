@@ -6,8 +6,9 @@ from typing import Any
 
 from updater.unity_rs_adapter import load_bundle
 
-# Track class names (tracks that contain m_Clips)
-TRACK_CLASSES = {
+# Master-of-Ceremony tracks used by virtual_live/mc. These are valid current
+# content and are intentionally kept separate from streaming_live tracks.
+MC_TRACK_CLASSES = {
     "MCTimelineCharacterTalkTrack",
     "MCTimelineCharacterMotionTrack",
     "MCTimelineCharacterLookAtTrack",
@@ -22,12 +23,10 @@ TRACK_CLASSES = {
     "MCTimelineCommentTrack",
     "MCTimelineStageObjectTrack",
     "MCTimelineGlobalSpotLightTrack",
-    "GroupTrack",
-    "TimelineAsset",
 }
 
-# Clip class names (clip assets referenced by m_Asset)
-CLIP_CLASSES = {
+# Master-of-Ceremony clip classes used by virtual_live/mc.
+MC_CLIP_CLASSES = {
     "CharacterTalkClip",
     "CharacterMotionClip",
     "CharacterLookAtClip",
@@ -42,6 +41,76 @@ CLIP_CLASSES = {
     "GlobalSpotLightClip",
     "StageObjectClip",
 }
+
+# Streaming Live uses ordinary Unity Timeline tracks plus custom tracks from
+# Sekai.LivePerformance and Sekai.Timeline.Streaming. The fallback extractor
+# below also accepts unknown tracks with m_Clips so new game-side track types do
+# not silently produce an empty timeline.
+STREAMING_LIVE_TRACK_CLASSES = {
+    "AnimationTrack",
+    "CharacterMonitorTrack",
+    "EffectTrack",
+    "IntensityTrack",
+    "MetaColorTrack",
+    "MetaIntensityTrack",
+    "MobAvatarColorTrack",
+    "MobAvatarMotionTrack",
+    "MobAvatarStampTrack",
+    "RenderAmbientLightTrack",
+    "RenderCharacterAmbientLightTrack",
+    "RenderCharacterRimLightTrack",
+    "RenderColorLUTTrack",
+    "RenderFlareLightTrack",
+    "RenderGlobalScreenFadeTrack",
+    "RenderGlobalSettingsTrack",
+    "RenderStagePointLightTrack",
+    "ScreenChangeEffectTrack",
+    "SekaiAtomTrack",
+    "SekaiManaBlackoutTrack",
+    "SekaiManaTrack",
+    "ShoutTimeTrack",
+    "StageSwitchTrack",
+}
+
+STREAMING_LIVE_CLIP_CLASSES = {
+    "AnimationPlayableAsset",
+    "CharacterMonitorClip",
+    "ColorClip",
+    "ColorSequenceClip",
+    "EffectClip",
+    "IntensityClip",
+    "IntensitySequenceClip",
+    "MobAvatarColorClip",
+    "MobAvatarMotionClip",
+    "MobAvatarStampClip",
+    "RenderAmbientLightClip",
+    "RenderCharacterAmbientLightClip",
+    "RenderCharacterRimLightClip",
+    "RenderColorLUTClip",
+    "RenderFlareLightClip",
+    "RenderGlobalScreenFadeClip",
+    "RenderGlobalSettingsClip",
+    "RenderStagePointLightClip",
+    "ScreenChangeEffectClip",
+    "SekaiAtomClip",
+    "SekaiManaBlackoutClip",
+    "SekaiManaClip",
+    "ShoutTimeClip",
+    "StageSwitchClip",
+}
+
+# Kept as a public compatibility alias for callers that imported the old
+# constants. MC tracks are not legacy; they belong to virtual_live/mc.
+TRACK_CLASSES = (
+    MC_TRACK_CLASSES
+    | STREAMING_LIVE_TRACK_CLASSES
+    | {
+        "GroupTrack",
+        "TimelineAsset",
+    }
+)
+
+CLIP_CLASSES = MC_CLIP_CLASSES | STREAMING_LIVE_CLIP_CLASSES
 
 
 def build_script_map(all_objects: dict) -> dict:
@@ -308,6 +377,182 @@ TRACK_EXTRACTORS = {
 }
 
 
+_UNITY_OBJECT_FIELDS = {"m_GameObject", "m_Enabled", "m_Script", "m_Name"}
+_TIMELINE_TRACK_FIELDS = {
+    "m_AnimClip",
+    "m_Children",
+    "m_Clips",
+    "m_Curves",
+    "m_CustomPlayableFullTypename",
+    "m_Enabled",
+    "m_GameObject",
+    "m_Locked",
+    "m_Markers",
+    "m_Name",
+    "m_Parent",
+    "m_Script",
+    "m_Version",
+}
+
+
+def _path_id(value: Any) -> int:
+    """Return a local Unity PPtr path ID, or zero for a null reference."""
+    if isinstance(value, dict):
+        path_id = value.get("m_PathID", 0)
+        if isinstance(path_id, int):
+            return path_id
+    return 0
+
+
+def _without_fields(data: dict, fields: set[str]) -> dict:
+    """Remove Unity serialization boilerplate while preserving custom fields."""
+    return {key: value for key, value in data.items() if key not in fields}
+
+
+def extract_streaming_live_clip(
+    clip_timing: dict,
+    asset_data: dict,
+    *,
+    track_class: str,
+    track_name: str,
+    track_path_id: int,
+    track_data: dict,
+    asset_class: str,
+    asset_path_id: int,
+) -> dict:
+    """Extract a Streaming Live Timeline clip without losing custom data.
+
+    Streaming Live clips are mostly custom PlayableAssets. Their behaviour is
+    stored in fields such as ``template``, ``behaviour``, ``data`` or
+    ``sequence`` rather than in one common schema, so retaining the asset
+    typetree is more useful than guessing a small set of event fields.
+    """
+    start = clip_timing.get("m_Start", 0.0)
+    duration = clip_timing.get("m_Duration", 0.0)
+    if not isinstance(start, (int, float)):
+        start = 0.0
+    if not isinstance(duration, (int, float)):
+        duration = 0.0
+
+    event = {
+        "type": "streamingLiveClip",
+        "trackType": track_class,
+        "trackName": track_name,
+        "trackPathId": track_path_id,
+        "clipType": asset_class,
+        "assetPathId": asset_path_id,
+        "start": start,
+        "clipIn": clip_timing.get("m_ClipIn", 0.0),
+        "duration": duration,
+        "end": start + duration,
+        "timeScale": clip_timing.get("m_TimeScale", 1.0),
+        "displayName": clip_timing.get("m_DisplayName", ""),
+        "clipData": _without_fields(clip_timing, {"m_Asset"}),
+        "trackData": _without_fields(track_data, _TIMELINE_TRACK_FIELDS),
+        "assetData": _without_fields(asset_data, _UNITY_OBJECT_FIELDS),
+    }
+
+    return event
+
+
+def gather_referenced_pids(all_objects: dict, start_pid: int) -> set[int]:
+    """Collect objects reachable from a TimelineAsset through Unity PPtrs."""
+    visited: set[int] = set()
+    to_visit = [start_pid]
+
+    while to_visit:
+        pid = to_visit.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        obj = all_objects.get(pid)
+        if not obj:
+            continue
+
+        stack = [obj.get("data")]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                path_ref = node.get("m_PathID")
+                if isinstance(path_ref, int) and path_ref not in visited:
+                    to_visit.append(path_ref)
+                for value in node.values():
+                    if isinstance(value, (dict, list)):
+                        stack.append(value)
+            elif isinstance(node, list):
+                for item in node:
+                    if isinstance(item, (dict, list)):
+                        stack.append(item)
+
+    return visited
+
+
+def _get_object_class(obj: dict | None, script_map: dict) -> str:
+    if not obj:
+        return "unknown"
+    if obj["type"] == "MonoBehaviour":
+        return get_class_name(obj["data"], script_map)
+    return obj["type"]
+
+
+def extract_timeline_events(
+    all_objects: dict,
+    script_map: dict,
+    data_by_pid: dict,
+    referenced_pids: set[int],
+) -> tuple[list[dict], dict[str, int]]:
+    """Extract both virtual_live/mc and Streaming Live Timeline clips."""
+    events = []
+    track_counts: dict[str, int] = {}
+    char_map = build_character_map(all_objects, script_map)
+
+    for pid in referenced_pids:
+        obj = all_objects.get(pid)
+        if not obj or obj["type"] != "MonoBehaviour":
+            continue
+
+        track_data = obj["data"]
+        track_class = get_class_name(track_data, script_map)
+        clips = track_data.get("m_Clips")
+        if not isinstance(clips, list) or not clips:
+            continue
+
+        extractor_info = TRACK_EXTRACTORS.get(track_class)
+
+        track_name = track_data.get("m_Name", "")
+        character_id = track_data.get("CharacterId", 0)
+        character_name = (
+            char_map.get(character_id, track_name) if extractor_info and extractor_info[1] else ""
+        )
+        track_counts[track_class] = track_counts.get(track_class, 0) + len(clips)
+
+        for clip in clips:
+            asset_path_id = _path_id(clip.get("m_Asset"))
+            asset_data = data_by_pid.get(asset_path_id, {})
+            if not isinstance(asset_data, dict):
+                asset_data = {}
+
+            if extractor_info:
+                extractor, _needs_character = extractor_info
+                events.append(extractor(clip, asset_data, character_name))
+            else:
+                events.append(
+                    extract_streaming_live_clip(
+                        clip,
+                        asset_data,
+                        track_class=track_class,
+                        track_name=track_name,
+                        track_path_id=pid,
+                        track_data=track_data,
+                        asset_class=_get_object_class(all_objects.get(asset_path_id), script_map),
+                        asset_path_id=asset_path_id,
+                    )
+                )
+
+    events.sort(key=lambda event: (event["start"], event.get("trackName", ""), event["type"]))
+    return events, track_counts
+
+
 logger = logging.getLogger("live2d")
 
 
@@ -342,79 +587,15 @@ def extract_playable(env: Any, container_path: str) -> dict:
     root_pid = script_obj.path_id
     logger.debug(f"Processing: {container_path}, root object path_id: {root_pid}")
 
-    # Build a set of all path_ids reachable from the playable root. This scopes
-    # extraction to only objects actually referenced by the selected .playable,
-    # preventing cross-contamination when multiple playables exist in one bundle.
-    def gather_referenced_pids(start_pid: int) -> set:
-        visited = set()
-        to_visit = [start_pid]
-
-        while to_visit:
-            pid = to_visit.pop()
-            if pid in visited:
-                continue
-            visited.add(pid)
-            obj = all_objects.get(pid)
-            if not obj:
-                continue
-            data = obj.get("data")
-
-            stack = [data]
-            while stack:
-                node = stack.pop()
-                if isinstance(node, dict):
-                    # direct path reference
-                    path_ref = node.get("m_PathID")
-                    if isinstance(path_ref, int) and path_ref not in visited:
-                        to_visit.append(path_ref)
-
-                    # clip asset references often live under m_Asset
-                    m_asset = node.get("m_Asset")
-                    if isinstance(m_asset, dict):
-                        aid = m_asset.get("m_PathID")
-                        if isinstance(aid, int) and aid not in visited:
-                            to_visit.append(aid)
-
-                    # enqueue nested containers
-                    for v in node.values():
-                        if isinstance(v, (dict, list)):
-                            stack.append(v)
-                elif isinstance(node, list):
-                    for item in node:
-                        if isinstance(item, (dict, list)):
-                            stack.append(item)
-
-        return visited
-
-    referenced_pids = gather_referenced_pids(root_pid)
+    # Scope extraction to objects referenced by this .playable, preventing
+    # cross-contamination when multiple playables exist in one bundle.
+    referenced_pids = gather_referenced_pids(all_objects, root_pid)
     # ensure root is included
     referenced_pids.add(root_pid)
 
-    # Collect events for this playable (only from referenced objects)
-    events = []
-    track_counts = {}
-    for pid in referenced_pids:
-        obj = all_objects.get(pid)
-        if not obj or obj["type"] != "MonoBehaviour":
-            continue
-        d = obj["data"]
-        cls = get_class_name(d, script_map)
-        if cls not in TRACK_EXTRACTORS:
-            continue
-        extractor, needs_character = TRACK_EXTRACTORS[cls]
-        character_id = d.get("CharacterId", 0)
-        track_name = d.get("m_Name", "")
-        character_name = char_map.get(character_id, track_name) if needs_character else ""
-        clips = d.get("m_Clips", [])
-        if not clips:
-            continue
-        track_counts[cls] = track_counts.get(cls, 0) + len(clips)
-        for clip in clips:
-            asset_pid = clip.get("m_Asset", {}).get("m_PathID", 0)
-            asset_data = data_by_pid.get(asset_pid, {})
-            events.append(extractor(clip, asset_data, character_name))
-
-    events.sort(key=lambda e: (e["start"], e.get("character", ""), e["type"]))
+    events, track_counts = extract_timeline_events(
+        all_objects, script_map, data_by_pid, referenced_pids
+    )
 
     # Timeline name lookup
     timeline_name = ""
@@ -507,70 +688,12 @@ if __name__ == "__main__":
         print(f"\n[>] Processing: {container_path}")
         print(f"    root object path_id: {root_pid}")
 
-        # Collect events for this playable (scope by references from the playable root)
-        def gather_referenced_pids(start_pid: int) -> set:
-            visited = set()
-            to_visit = [start_pid]
-
-            while to_visit:
-                pid = to_visit.pop()
-                if pid in visited:
-                    continue
-                visited.add(pid)
-                obj2 = all_objects.get(pid)
-                if not obj2:
-                    continue
-                data2 = obj2.get("data")
-
-                stack = [data2]
-                while stack:
-                    node = stack.pop()
-                    if isinstance(node, dict):
-                        path_ref = node.get("m_PathID")
-                        if isinstance(path_ref, int) and path_ref not in visited:
-                            to_visit.append(path_ref)
-                        m_asset = node.get("m_Asset")
-                        if isinstance(m_asset, dict):
-                            aid = m_asset.get("m_PathID")
-                            if isinstance(aid, int) and aid not in visited:
-                                to_visit.append(aid)
-                        for v in node.values():
-                            if isinstance(v, (dict, list)):
-                                stack.append(v)
-                    elif isinstance(node, list):
-                        for item in node:
-                            if isinstance(item, (dict, list)):
-                                stack.append(item)
-
-            return visited
-
-        referenced_pids = gather_referenced_pids(root_pid)
+        referenced_pids = gather_referenced_pids(all_objects, root_pid)
         referenced_pids.add(root_pid)
 
-        events = []
-        track_counts = {}
-        for pid in referenced_pids:
-            obj = all_objects.get(pid)
-            if not obj or obj["type"] != "MonoBehaviour":
-                continue
-            d = obj["data"]
-            cls = get_class_name(d, script_map)
-            if cls not in TRACK_EXTRACTORS:
-                continue
-            extractor, needs_character = TRACK_EXTRACTORS[cls]
-            character_id = d.get("CharacterId", 0)
-            track_name = d.get("m_Name", "")
-            character_name = char_map.get(character_id, track_name) if needs_character else ""
-            clips = d.get("m_Clips", [])
-            if not clips:
-                continue
-            track_counts[cls] = track_counts.get(cls, 0) + len(clips)
-            for clip in clips:
-                asset_pid = clip.get("m_Asset", {}).get("m_PathID", 0)
-                asset_data = data_by_pid.get(asset_pid, {})
-                events.append(extractor(clip, asset_data, character_name))
-
-        events.sort(key=lambda e: (e["start"], e.get("character", ""), e["type"]))
+        events, track_counts = extract_timeline_events(
+            all_objects, script_map, data_by_pid, referenced_pids
+        )
 
         # Timeline name lookup
         timeline_name = ""
