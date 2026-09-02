@@ -1,4 +1,4 @@
-# Streaming Live GLB Preprocessing Roadmap
+# Streaming Live GLB and Live2D Preprocessing Roadmap
 
 Status: proposed implementation plan
 Date: 2026-09-01
@@ -6,9 +6,13 @@ Date: 2026-09-01
 This roadmap turns the findings in
 [`streaming-live-glb-preprocessing-research.md`](streaming-live-glb-preprocessing-research.md)
 into an incremental, testable implementation plan. It is deliberately scoped to
-offline preprocessing in this repository. A browser runtime is a consumer of the
-outputs described here and is a follow-up project; it is not promised or
-implemented by this roadmap.
+offline preprocessing in this repository. The GLB track covers metadata closure,
+multi-Bundle Unity collections, root-scoped export, and Timeline manifests. The
+Live2D work is a separate lightweight track for shared motion sets and an
+association index; it does not turn Live2D into a GLB-style collection or
+physical package. A browser runtime is a consumer of the GLB outputs described
+here and is a follow-up project; it is not promised or implemented by this
+roadmap.
 
 ## 1. Goals and invariants
 
@@ -29,7 +33,7 @@ closure required to load and export those roots. Therefore, a stage, character,
 or Timeline must not be extracted as an isolated Bundle merely because its root
 object happens to be stored there.
 
-Formally, for a purpose `p` and roots `R`, the extractor receives:
+Formally, for a GLB purpose `p` and roots `R`, the extractor receives:
 
 ```text
 package(p, R) = roots R + closure(metadata_dependencies(R), p)
@@ -44,7 +48,49 @@ The same Bundle may be:
 - omitted from a package when it is excluded by profile policy, with an
   explicit diagnostic rather than an implicit best-effort guess.
 
-### 1.2 Extraction purposes
+This package and collection definition is for the GLB purposes below. Live2D
+model outputs and character-level motion sets deliberately remain separate
+Bundle/output records and are joined by a lightweight index instead of a
+multi-Bundle Unity collection.
+
+### 1.2 Live2D boundary: shared motion sets and a lightweight index
+
+Live2D has a separate, explicit boundary from the GLB collection pipeline:
+
+- Live2D-only handling is gated by the explicit `live2d/` Bundle
+  scope/namespace (or an equivalent explicit ownership classification) used by
+  the extractor. A path containing `motion` is not sufficient to classify a
+  Bundle as Live2D.
+- The obsolete `sekai-master-db-diff/assetList.json` is excluded from Live2D
+  evidence and association inputs. Use current JP Bundle metadata and the
+  explicitly named master business tables instead.
+- Model Bundles produce model-facing outputs (`Moc`, `Textures`, and `Physics`
+  references in `model3.json`); character-level motion Bundles produce shared
+  `Motions` and `Facials` outputs. These remain separate physical outputs in
+  shared storage.
+- `model3.json` is not extended by inference: its observed `FileReferences`
+  contains `Moc`, `Textures`, and `Physics`, not `Motions` or `Expressions`.
+- `Facials` are facial Motion clips and remain
+  `facial/*.motion3.json`. Constant curves do not justify converting them to
+  Cubism `.exp3.json`; dynamic Facials must also remain Motion3. The master DB
+  `expression` field is a business facial-clip name, not a Cubism Expressions
+  file reference.
+- The additive index/manifest records
+  `model -> Character2D -> motion-set candidate -> known clips`, with source
+  evidence and a `derived`/`verified`/`ambiguous` status. It does not claim a
+  direct specific-model-variant-to-motion-Bundle field where the master data
+  has none.
+- A shared motion set is never copied into every model output. Live2D does not
+  use the GLB multi-Bundle collection dependency, and it does not create a
+  physical logical package merely to associate model and motion outputs.
+- Existing atomic JSON outputs and the remote `model_list` remain authoritative.
+  The association index is an additive, independently versioned output and is
+  written atomically after its referenced outputs validate.
+
+The current JP `6.8.0.10` evidence and its naming/join caveats are recorded in
+the [research note](streaming-live-glb-preprocessing-research.md).
+
+### 1.3 Extraction purposes
 
 Every extraction request has exactly one declared purpose. Purpose is not
 inferred from a path containing a word such as `motion`.
@@ -52,20 +98,25 @@ inferred from a path containing a word such as `motion`.
 | Purpose | Roots and result | Collection behavior |
 | --- | --- | --- |
 | `standard` | Existing per-Bundle asset extraction and media outputs | One Bundle at a time; preserves current behavior and output conventions |
-| `live2d` | Live2D model, moc3, motion, parameter, and related outputs | May aggregate only the Live2D bundles required by the selected model/profile |
+| `live2d` | Live2D model outputs, shared character motion sets, and a lightweight association index | Processes explicit model/motion inputs separately; no multi-Bundle collection and no physical model package |
 | `scene3d` | A static scene/stage root exported to a root-scoped GLB | Aggregates stage, shared stage, shader, material, and texture dependencies |
 | `timeline3d` | A Timeline plus all referenced scene, character, animation, monitor, and media assets, with a timeline manifest | Aggregates the complete logical package; roots remain separately addressable |
 | `composite` | A declared set of roots and purpose-specific outputs, for example scene + characters + timeline | Aggregates the union of closures, while retaining per-purpose root and diagnostic records |
 
-One physical Bundle can consequently have multiple extraction records. The
-records must be keyed by `(package_id, purpose, root_id)` rather than by
-`bundleName`, while the download/cache record remains keyed by `bundleName`.
+For GLB purposes, one physical Bundle can consequently have multiple extraction
+records. Those records must be keyed by `(package_id, purpose, root_id)` rather
+than by `bundleName`, while the download/cache record remains keyed by
+`bundleName`. Live2D does not create a collection record: model outputs,
+shared motion-set outputs, and index entries have independent stable keys and
+are linked by references.
 
-## 2. Proposed data model: `ExtractionPlan`
+## 2. Proposed data model: `ExtractionPlan` (GLB)
 
-The plan is a serializable, deterministic description of work. It should be
-constructed before extraction and passed through the pipeline rather than
-reconstructing intent from filesystem names.
+The GLB plan is a serializable, deterministic description of collection work. It
+should be constructed before extraction and passed through the pipeline rather
+than reconstructing intent from filesystem names. A `purpose="live2d"` value
+must not be interpreted as permission to build a Unity collection; Live2D uses
+the separate contract below.
 
 ```python
 ExtractionPlan(
@@ -101,7 +152,52 @@ Planning must be deterministic: sort roots and bundle names, preserve stable
 edge reasons, and use a stable traversal order. A plan can be persisted beside
 the package to make retries and output comparison reproducible.
 
-## 3. Dependency closure and reference validation
+### 2.1 Live2D association index contract
+
+The Live2D track uses a small association document rather than an
+`ExtractionPlan` collection. A representative logical shape is:
+
+```python
+Live2DIndex(
+    index_version=1,
+    metadata_version="6.8.0.10",
+    master_db_version=...,
+    models=[
+        {
+            "model_output_id": ...,
+            "model_bundle": {"name": ..., "checksum": ...},
+            "character2d_id": ...,
+            "character_id": ...,
+            "motion_sets": [
+                {
+                    "motion_bundle": {"name": ..., "checksum": ...},
+                    "status": "verified|derived|ambiguous",
+                    "evidence": [...],
+                    "known_clips": {
+                        "motions": [...],
+                        "facials": [...],
+                    },
+                },
+            ],
+        },
+    ],
+    diagnostics=[...],
+)
+```
+
+The exact serialization may differ, but the contract must preserve the
+`costume2ds.character2dId -> character2ds` join, the source business rows, the
+Bundle names/checksums, candidate status, known Motion/Facial clip names, and
+the evidence used for a naming-derived association. It must not invent a
+`model3.json` `Motions`/`Expressions` section, treat the business `expression`
+field as `.exp3.json`, or copy shared motion files into model outputs.
+
+## 3. GLB dependency closure and reference validation
+
+This section is exclusively for `scene3d`, `timeline3d`, and `composite` GLB
+work. Live2D model/motion association is intentionally not a metadata closure
+or a multi-Bundle collection dependency; it follows the independent track in
+Section 6.
 
 ### 3.1 L0: metadata dependency graph
 
@@ -194,6 +290,17 @@ download pipeline:
   classification, deterministic `ExtractionPlan` construction, and plan
   validation. Keep it mostly pure so graph behavior can be unit-tested without
   network or Unity native libraries.
+- **Existing Live2D seams** (`updater/extract/bundle.py`,
+  `updater/live2d/restore.py`, and `updater/postprocess/live2d_models.py`):
+  preserve explicit Live2D scope gating, separate model/motion processing,
+  `BuildMotionData` handling, aggregate-workspace recovery, atomic JSON output,
+  and authoritative `model_list` publication. Add the lightweight association
+  index without routing Live2D through the GLB collection loader.
+- **Suggested Live2D join/index module:** own the exact master-table joins,
+  Bundle-name evidence, candidate status, known-clip references, incremental
+  keys, and atomic index publication. It may reuse Bundle cache files, but it
+  must not create a logical Unity collection or copy a shared motion set into a
+  model output.
 
 ## 5. Phased execution plan
 
@@ -233,9 +340,10 @@ metadata sample.
 
 **Work:**
 
-1. Implement profiles for `standard`, `live2d`, `scene3d`, `timeline3d`, and
+1. Implement GLB profiles for `standard`, `scene3d`, `timeline3d`, and
    `composite`, including root selectors, required/optional dependency classes,
-   exclusions, and failure policy.
+   exclusions, and failure policy. Keep the specialized `live2d` mode outside
+   this closure planner; it uses the independent Live2D track below.
 2. Implement iterative BFS/DFS over the metadata dependency index with stable
    ordering and parent edge reasons.
 3. Implement missing, cycle, excluded, and filtered classifications and a
@@ -254,6 +362,8 @@ metadata sample.
   logical root records.
 - Include/exclude filters cannot remove an automatically required dependency
   without an explicit excluded-dependency diagnostic.
+- Live2D model and motion outputs do not become closure members or a Phase 3
+  collection prerequisite merely because a business record references them.
 
 ### Phase 2 — Bundle download and cache integration
 
@@ -285,7 +395,7 @@ metadata sample.
 - A failed Bundle download prevents dependent package publication and leaves a
   retryable diagnostic rather than a partial success marker.
 
-### Phase 3 — Multi-Bundle collection loading and PPtr validation
+### Phase 3 — Multi-Bundle collection loading and PPtr validation (GLB only)
 
 **Dependencies:** Phase 2 cache-ready package work items; adapter fixtures or a
 supported `unity_rs` collection API.
@@ -313,7 +423,8 @@ supported `unity_rs` collection API.
   the combined fixture resolves the expected material/texture references.
 - Required L2 failures make the package non-publishable and identify source and
   target identities; optional failures do not disappear into a generic warning.
-- Existing Live2D and standard extraction tests still use the one-Bundle API.
+- Existing Live2D and standard extraction tests still use the one-Bundle API;
+  Live2D is not a prerequisite for this collection phase.
 
 ### Phase 4 — Static root-scoped GLB export
 
@@ -413,7 +524,185 @@ controlled GLB writer/converter implementation.
 - An independent offline schema/reference validator can reject a deliberately
   corrupted manifest and accept a complete fixture package.
 
-## 6. Compatibility and feature flags
+## 6. Independent Live2D implementation track
+
+This is an executable, lightweight track for the existing Live2D extraction and
+post-processing path. It can reuse the ordinary Bundle cache and sanitized
+metadata fixtures, but it has no dependency on GLB Phase 3 (or on any other GLB
+collection phase). Its result is shared model/motion-set storage plus an
+association index; it is not a Live2D multi-Bundle collection or a physical
+model package.
+
+The track is ordered as `L2D-0 → L2D-1 → L2D-2 → L2D-3 → L2D-4`. Each step is
+independently reviewable and must preserve the existing atomic JSON output and
+remote `model_list` authority.
+
+### L2D-0 — Scope, evidence fixtures, and contracts
+
+**Dependencies:** none.
+
+**Work:**
+
+1. Add a sanitized current-JP metadata fixture for the verified sample at
+   version `6.8.0.10`:
+
+   - `model/v2_01ichika_unit`
+   - `model/v2_01ichika_april2025`
+   - `motion/v2_01ichika_motion_base`
+   - `model/v2_20mizuki_unit`
+   - `motion/v2_20mizuki_motion_base`
+
+2. Define the explicit Live2D Bundle scope check. A generic `motion` path,
+   unrelated Bundle, or filename substring must not trigger Live2D-only
+   extraction.
+3. Define versioned schemas for model-output records, shared motion-set
+   records, candidate evidence/status, known clips, diagnostics, and the
+   association index. Keep model and motion outputs physically separate.
+4. Record only sanitized metadata/master-table rows and output identities; do
+   not put credentials, signed URLs, or raw Bundle payloads in fixtures.
+   Do not use the obsolete `sekai-master-db-diff/assetList.json` as fixture or
+   association evidence.
+
+**Acceptance criteria:**
+
+- The fixture contains the five verified Bundle names above without asserting a
+  direct model-variant-to-motion-Bundle field that is not present in metadata.
+- Scope tests prove that only the explicit Live2D scope receives Live2D-only
+  handling.
+- The contract represents observed `model3.json` `FileReferences` (`Moc`,
+  `Textures`, and `Physics`) and does not add `Motions` or `Expressions`.
+- Two serializations of the same evidence produce the same canonical index
+  input, with no sensitive transport data.
+
+### L2D-1 — Master-table joins and Bundle naming verification
+
+**Dependencies:** L2D-0.
+
+**Work:**
+
+1. Load the current business tables `character2ds`, `costume2ds`,
+   `systemLive2ds`, `bondsLive2ds`, `bondsRankUpLive2ds`, and
+   `loginBonusLive2ds`.
+2. Build the model/character relation with the exact
+   `costume2ds.character2dId -> character2ds` join. Preserve the resulting
+   Character2D and character identifiers rather than replacing the join with
+   name matching.
+3. Treat `characterId + motion + expression` in applicable business rows as
+   actual role-use records. Store `expression` as the business facial-clip
+   name; it is not evidence of a Cubism `.exp3.json` file.
+4. Compare master character `assetName` values with the verified `v2_*`
+   Bundle names to produce auditable `derived` or `verified` motion-set
+   candidates. Store the source fields and reason for every candidate.
+5. Leave `*_back_motion_base` and `*_still_*_motion_base` candidates unresolved
+   or explicitly ambiguous unless separate evidence verifies their ownership;
+   never assign them from `characterId` alone.
+
+**Acceptance criteria:**
+
+- The exact `costume2ds -> character2ds` join yields the expected direct model
+  and character relation, and missing keys are diagnostic rather than silently
+  matched.
+- Every candidate has provenance and status; no specific model variant is
+  marked verified solely because its `characterId` matches a motion record.
+- Special `back`/`still` motion-base names remain protected from automatic
+  attribution.
+- Business facial names and Cubism Expressions are distinct fields in the
+  serialized evidence.
+
+### L2D-2 — `BuildMotionData` validation and facial Motion3 policy
+
+**Dependencies:** L2D-0 and the sanitized motion-output fixture from L2D-1.
+
+**Work:**
+
+1. Validate the extracted `BuildMotionData` structure, including its `Facials`
+   and `Motions` groups, clip names, output paths, and referential diagnostics.
+2. Assert the current character-level motion-base counts: Ichika has 73
+   Facials and 271 Motions; Mizuki has 76 Facials and 278 Motions.
+3. Include the observed constant-curve samples (Ichika 60/73 Facials and
+   Mizuki 62/76 Facials) in validation, but keep every Facial at
+   `facial/*.motion3.json`. Do not force a conversion to Cubism `.exp3.json`,
+   including for constant curves; dynamic Facial clips must remain Motion3 as
+   well.
+4. Validate Motion3 curve/output integrity separately from any future Cubism
+   Expressions support. A master `expression` value may identify a facial clip
+   but cannot change its output type.
+
+**Acceptance criteria:**
+
+- The Ichika and Mizuki fixtures pass the stated Facials/Motions counts and
+  retain all known clip names.
+- The Ichika 60/73 and Mizuki 62/76 constant-curve samples, together with
+  dynamic Facial samples, remain under `facial/` as `.motion3.json`; no default
+  `.exp3.json` is emitted.
+- Missing, malformed, or duplicate `BuildMotionData` entries produce stable
+  diagnostics and cannot make an invalid motion set look complete.
+
+### L2D-3 — Separate outputs, lightweight index, and atomic publication
+
+**Dependencies:** L2D-1 and L2D-2.
+
+**Work:**
+
+1. Publish model outputs and shared character-level motion-set outputs as
+   separate storage records. A model record references a shared motion set; it
+   does not contain a copied Motion/Facial directory.
+2. Emit the lightweight index described in Section 2.1 with the chain
+   `model -> Character2D -> motion-set candidate -> known clips`, Bundle
+   identities/checksums, evidence, candidate status, and diagnostics.
+3. Keep existing atomic JSON outputs and the remote `model_list` as the
+   authoritative model-output contract. The new index is additive and must not
+   replace or reinterpret `model_list`.
+4. Write the index and any updated JSON through a temporary sibling followed by
+   an atomic rename; publish index references only after all referenced outputs
+   validate.
+
+**Acceptance criteria:**
+
+- Multiple model records can reference one physical shared motion set without
+  duplicate Motion/Facial files.
+- The index has no dangling model, motion-set, or known-clip reference and
+  clearly distinguishes `derived`, `verified`, and `ambiguous` candidates.
+- A failed index validation leaves the existing authoritative `model_list` and
+  valid model/motion outputs intact; no partial index becomes current.
+- No Live2D output requires a GLB collection ID or a multi-Bundle Unity load.
+
+### L2D-4 — Incremental keys and rollout acceptance
+
+**Dependencies:** L2D-3.
+
+**Work:**
+
+1. Define stable incremental keys, for example:
+
+   - `model_key = hash(metadata_version, model_bundle_name, model_checksum,
+     model_schema_version)`;
+   - `motion_set_key = hash(metadata_version, motion_bundle_name,
+     motion_checksum, BuildMotionData_schema_version)`;
+   - `index_key = hash(metadata_version, master_db_version, index_version,
+     sorted joins, candidates, known clips, and referenced output keys)`.
+
+2. Rebuild only the affected physical output: a changed model invalidates its
+   model key, a changed shared motion Bundle invalidates that motion set and
+   dependent index entries, and a master-table/naming change can invalidate the
+   index without copying or rebuilding unchanged motion files.
+3. Make ambiguity and validation failure non-publishable for the affected
+   association while allowing independent valid outputs to remain reusable.
+4. Roll out the index behind its own flag/namespace and compare canonical JSON
+   and keys before changing any current pointer.
+
+**Acceptance criteria:**
+
+- Repeating an unchanged run reuses the same model and motion-set keys and
+  performs no physical duplication.
+- Changing one model does not rebuild an unrelated shared motion set; changing
+  one motion set updates only its dependents and the index.
+- A changed master DB join or naming candidate updates the index deterministically
+  without changing valid model/motion output bytes.
+- Publication is atomic and reversible by disabling the index track; the GLB
+  collection phases remain unaffected.
+
+## 7. Compatibility and feature flags
 
 The following flags are proposed names; final names should follow the existing
 configuration conventions:
@@ -426,6 +715,7 @@ ENABLE_STATIC_GLB_EXPORT = false
 ENABLE_GLB_MATERIALS = false
 ENABLE_GLB_ANIMATIONS = false
 ENABLE_TIMELINE_MANIFEST = false
+ENABLE_LIVE2D_ASSOCIATION_INDEX = false
 ALLOW_INCOMPLETE_EXTRACTION = false
 ```
 
@@ -433,27 +723,34 @@ Rules:
 
 - all flags default off until the corresponding phase is accepted;
 - `standard` remains the default purpose and continues to use per-Bundle
-  extraction, including the existing Live2D scope gating;
-- enabling a later flag automatically requires earlier flags or fails fast with
-  a configuration error;
+  extraction, including the existing explicit Live2D scope gating;
+- enabling a later GLB flag automatically requires earlier GLB phases or fails
+  fast with a configuration error; `ENABLE_LIVE2D_ASSOCIATION_INDEX` instead
+  requires `L2D-0` through `L2D-2` and never enables GLB collection loading;
 - `--mode live2d|charts` and existing specialized behavior are not redefined by
   this roadmap;
-- feature flags must be visible in the plan and output manifest so an artifact
-  cannot be mistaken for a fully processed package;
+- feature flags must be visible in the relevant plan, index, or output
+  manifest so an artifact cannot be mistaken for a fully processed package;
 - no silent fallback from collection extraction to single-Bundle GLB export is
   allowed for `scene3d` or `timeline3d`. A diagnostic fallback may be enabled
   only for local debugging and must be non-publishable.
 
-## 7. Data and output contracts
+## 8. Data and output contracts
 
-### 7.1 Inputs
+### 8.1 Inputs
 
-The planner consumes current asset metadata, game/version metadata, configured
-Bundle URL/cache rules, purpose/profile configuration, and explicit roots. It
-must not require browser state. Raw downloaded bundles remain private/cache
-inputs and are not copied into published packages.
+The GLB planner consumes current asset metadata, game/version metadata,
+configured Bundle URL/cache rules, purpose/profile configuration, and explicit
+roots. It must not require browser state. Raw downloaded Bundles remain
+private/cache inputs and are not copied into published GLB packages.
 
-### 7.2 Package layout
+The Live2D index consumes the verified current-JP Bundle metadata, the current
+master DB business tables, validated model/motion outputs, and explicit join
+and naming evidence. Its inputs are model Bundles and shared character-level
+motion Bundles, not a GLB dependency closure. The index must preserve candidate
+status and ambiguity instead of guessing a specific model-variant association.
+
+### 8.2 GLB package layout
 
 The exact path may be configured, but the logical contract is:
 
@@ -484,27 +781,64 @@ retained as opt-in local diagnostics, but consumers must not need them. The
 manifest is an output contract for a future browser runtime, not an assertion
 that this repository implements that runtime.
 
-## 8. Error handling and publication rules
+### 8.3 Live2D output and index contract
+
+The Live2D output namespace is shared storage, not a physical Unity package or
+collection:
+
+```text
+live2d/
+  model/<model-id>/                 # model3.json, moc3, textures, physics
+  motion/<motion-set-id>/           # shared Motions
+  facial/<motion-set-id>/           # shared Facial Motion3 clips
+  index.json                         # additive association index
+  model_list.json                    # existing authoritative model list
+```
+
+The exact prefixes may follow existing storage configuration, but the logical
+separation is contractual. A Live2D index entry must include the model output
+identity, `Character2D` relation, character-level motion-set candidate(s),
+candidate status/evidence, known Motion and Facial clip names, source Bundle
+names/checksums, metadata/master DB versions, and diagnostics. It must not
+pretend that `model3.json` contains `Motions` or `Expressions`, or that a master
+DB `expression` field is a Cubism `.exp3.json` reference.
+
+`model_list.json` and existing atomic JSON outputs remain authoritative for the
+model artifacts. The new index is additive, versioned, and committed only by
+atomic rename after referenced model and shared motion-set outputs validate.
+No Live2D index entry requires a GLB `collection_id` or causes a shared motion
+set to be copied into a model directory.
+
+## 9. Error handling and publication rules
 
 Use stable diagnostic codes and severity (`error`, `warning`, `info`) rather than
 parsing log messages. At minimum define codes for metadata missing, dependency
 cycle, dependency excluded, cache missing, Bundle download failure, collection
 load failure, unresolved PPtr, PPtr type mismatch, unsupported Unity object,
-unsupported shader/track, invalid GLB, and manifest integrity failure.
+unsupported shader/track, invalid GLB, manifest integrity failure,
+`live2d_scope_mismatch`, `live2d_join_missing`, `live2d_mapping_ambiguous`,
+`live2d_build_motion_invalid`, `live2d_facial_format_invalid`, and
+`live2d_index_integrity`.
 
 - Plan errors stop before download where possible.
-- Bundle errors fail only the packages that require that Bundle, while allowing
-  independent standard work to finish according to current pipeline behavior.
-- Required extraction/reference/export errors make the package non-publishable.
+- For GLB, Bundle errors fail only the packages that require that Bundle, while
+  allowing independent standard work to finish according to current pipeline
+  behavior.
+- For GLB, required extraction/reference/export errors make the package
+  non-publishable.
 - Optional unsupported features produce warnings and an incomplete feature list.
-- Every output file is written to a temporary sibling and renamed atomically;
-  manifests are written last and are the commit marker for a package.
-- Upload must be package-aware: upload `manifest.json` only after all referenced
-  artifacts validate, and never upload a partial package as current.
+- Every GLB package output file is written to a temporary sibling and renamed
+  atomically; manifests are written last and are the commit marker for a package.
+- GLB upload must be package-aware: upload `manifest.json` only after all
+  referenced artifacts validate, and never upload a partial package as current.
 - Retries are idempotent by package ID and artifact hash. A retry may reuse
   valid cache files and already completed local artifacts.
+- Live2D mapping ambiguity or invalid `BuildMotionData` blocks the affected
+  index association, but does not invalidate unrelated valid model or shared
+  motion-set outputs. The authoritative `model_list` is not replaced by an
+  incomplete index.
 
-## 9. Testing strategy
+## 10. Testing strategy
 
 Testing should be layered and runnable without network access whenever possible:
 
@@ -526,7 +860,14 @@ Testing should be layered and runnable without network access whenever possible:
 6. **Animation/Timeline tests:** curve variants, binding-path mapping, Timeline
    PPtrs, track-to-node/media mappings, unsupported diagnostics, and corrupted
    manifest rejection.
-7. **Regression tests:** existing standard, Live2D, charts, media, security,
+7. **Live2D track tests:** explicit Bundle-scope gating; the five verified
+   `6.8.0.10` Bundle names; exact `costume2ds.character2dId -> character2ds`
+   joins; business `characterId`/`motion`/`expression` records; derived versus
+   verified naming candidates; protected `back`/`still` cases;
+   `BuildMotionData` counts and integrity; constant and dynamic Facial Motion3
+   outputs; separate shared storage; index referential integrity; incremental
+   keys; and atomic publication without replacing `model_list`.
+8. **Regression tests:** existing standard, Live2D, charts, media, security,
    and pipeline tests with all new flags disabled and enabled at each accepted
    phase.
 
@@ -534,7 +875,7 @@ Fixtures must be small, sanitized, versioned, and documented. Tests should
 assert semantic equivalence where exporter encoding makes byte equality
 unreliable; byte-level golden files are appropriate only for canonical outputs.
 
-## 10. Rollback and migration strategy
+## 11. Rollback and migration strategy
 
 Rollback is a configuration operation first: disable the relevant flag and
 return to the existing Bundle-level pipeline. Do not change or invalidate the
@@ -553,8 +894,15 @@ existing Bundle cache layout while introducing package outputs.
   compares diagnostics and hashes before any alias/current pointer is changed.
 - A migration utility, if later needed, must be explicit, dry-run capable, and
   never reinterpret an old manifest as a new one automatically.
+- Disabling the Live2D association-index flag leaves existing model outputs,
+  shared motion-set outputs, atomic JSON files, and authoritative `model_list`
+  available. Remove only the versioned index namespace if necessary; do not
+  delete or duplicate shared motion files as part of rollback.
+- A Live2D index migration must be versioned and hash-compared before its
+  references become current. It must not alter the GLB collection or Timeline
+  package namespaces.
 
-## 11. Non-goals
+## 12. Non-goals
 
 - Implementing a browser renderer, Timeline player, WebGL handlers, or runtime
   streaming/cache policy in this repository.
@@ -564,35 +912,59 @@ existing Bundle cache layout while introducing package outputs.
 - Making every Unity shader, effect, Timeline track, video, audio format, or
   custom MonoBehaviour browser-compatible in the first implementation.
 - Treating FBX, `.mat`, or typetree JSON as the final browser format.
-- Rewriting existing standard extraction or unrelated Live2D/Charts behavior
-  merely to support the GLB roadmap.
+- Turning Live2D into a GLB-style multi-Bundle collection or physical package,
+  copying a shared motion set into each model output, or making Live2D a
+  prerequisite of GLB Phase 3.
+- Converting Facials to Cubism `.exp3.json` by default, treating the master DB
+  `expression` field as an Expressions file, or adding inferred `Motions`/
+  `Expressions` sections to `model3.json`.
+- Inferring a specific model-variant-to-motion-Bundle association from
+  `characterId` alone, especially for `*_back_motion_base` or
+  `*_still_*_motion_base` names.
+- Rewriting existing standard extraction or unrelated Charts behavior merely to
+  support the GLB roadmap; Live2D changes are confined to its independent
+  track.
 - Promising visual parity for unsupported Unity rendering features before a
   documented converter and fixture exist.
 
-## 12. Issue breakdown
+## 13. Issue breakdown
 
-The implementation is tracked by one parent Issue and one child Issue per
-roadmap phase. The child Issues contain the detailed implementation tasks and
-acceptance criteria for their phase.
+The GitHub issue mapping below keeps the GLB parent and its six GLB phases
+separate from the independent Live2D parent and its five phases. The Live2D
+sequence does not add a dependency to GLB Phase 3 or change the GLB issue
+hierarchy.
 
 | Issue | Phase | Scope | Depends on |
 | --- | --- | --- | --- |
-| [#33](https://github.com/Sekai-World/sekai-assets-updater/issues/33) | All | Dependency-aware Streaming Live GLB preprocessing (parent) | — |
-| [#34](https://github.com/Sekai-World/sekai-assets-updater/issues/34) | 0 | Define plan contracts, fixtures, diagnostics, and feature flags | — |
-| [#35](https://github.com/Sekai-World/sekai-assets-updater/issues/35) | 1 | Implement extraction profiles and metadata dependency closure | #34 |
-| [#36](https://github.com/Sekai-World/sekai-assets-updater/issues/36) | 2 | Integrate closures with Bundle download and cache planning | #35 |
-| [#37](https://github.com/Sekai-World/sekai-assets-updater/issues/37) | 3 | Load multi-Bundle Unity collections and resolve cross-file PPtrs | #36 |
-| [#38](https://github.com/Sekai-World/sekai-assets-updater/issues/38) | 4 | Export deterministic root-scoped static GLB scenes | #37 |
-| [#39](https://github.com/Sekai-World/sekai-assets-updater/issues/39) | 5 | Convert GLB materials and export character animation | #38 |
-| [#40](https://github.com/Sekai-World/sekai-assets-updater/issues/40) | 6 | Emit and validate Timeline packages and atomic publication | #37, #39 |
+| [#33](https://github.com/Sekai-World/sekai-assets-updater/issues/33) | GLB all | Dependency-aware Streaming Live GLB preprocessing (parent) | — |
+| [#34](https://github.com/Sekai-World/sekai-assets-updater/issues/34) | GLB 0 | Define plan contracts, fixtures, diagnostics, and feature flags | — |
+| [#35](https://github.com/Sekai-World/sekai-assets-updater/issues/35) | GLB 1 | Implement GLB extraction profiles and metadata dependency closure | #34 |
+| [#36](https://github.com/Sekai-World/sekai-assets-updater/issues/36) | GLB 2 | Integrate closures with Bundle download and cache planning | #35 |
+| [#37](https://github.com/Sekai-World/sekai-assets-updater/issues/37) | GLB 3 | Load multi-Bundle Unity collections and resolve cross-file PPtrs | #36 |
+| [#38](https://github.com/Sekai-World/sekai-assets-updater/issues/38) | GLB 4 | Export deterministic root-scoped static GLB scenes | #37 |
+| [#39](https://github.com/Sekai-World/sekai-assets-updater/issues/39) | GLB 5 | Convert GLB materials and export character animation | #38 |
+| [#40](https://github.com/Sekai-World/sekai-assets-updater/issues/40) | GLB 6 | Emit and validate Timeline packages and atomic publication | #37, #39 |
+| [#41](https://github.com/Sekai-World/sekai-assets-updater/issues/41) | Live2D all | Shared Live2D motion-set association index (parent) | — |
+| [#45](https://github.com/Sekai-World/sekai-assets-updater/issues/45) | L2D-0 | Define association-index contracts and fixtures | — |
+| [#42](https://github.com/Sekai-World/sekai-assets-updater/issues/42) | L2D-1 | Join model records with master-data evidence | #45 |
+| [#46](https://github.com/Sekai-World/sekai-assets-updater/issues/46) | L2D-2 | Validate shared motion sets and retain Facial Motion3 | #45, #42 |
+| [#43](https://github.com/Sekai-World/sekai-assets-updater/issues/43) | L2D-3 | Publish the separate association index atomically | #42, #46 |
+| [#44](https://github.com/Sekai-World/sekai-assets-updater/issues/44) | L2D-4 | Add incremental keys and rollout controls | #43 |
 
-Recommended execution order:
+Recommended GLB execution order:
 
 ```text
 #34 → #35 → #36 → #37 → #38 → #39 → #40
 ```
 
+Recommended independent Live2D execution order:
+
+```text
+#45 → #42 → #46 → #43 → #44
+```
+
 Completion of #40 provides a stable preprocessing/output contract. A future
 browser-runtime project may consume that contract and implement playback; that
 work is intentionally outside this repository and outside the acceptance scope
-of this roadmap.
+of this roadmap. Completion of L2D-4 provides a separate shared-motion/index
+contract and does not change the GLB contract.
