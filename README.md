@@ -135,6 +135,7 @@ Storage:
 - `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
 - `ENABLE_LIVE2D_POSTPROCESS` is deprecated but retained: it continues to own `live2d/model_list.json` and the legacy `live2d/` output. `ENABLE_LIVE2D_ASSOCIATED_PIPELINE` is independent and may be enabled at the same time.
 - `LIVE2D_ASSOCIATION_INDEX_PATH` optionally supplies a pre-built, validated `Live2DIndex` JSON document. The associated pipeline never invents an empty index when this is unset.
+- `LIVE2D_ASSOCIATION_SELECTIONS_PATH` optionally supplies an explicit association-selection manifest. The manifest identifies master-data input, stable model/motion IDs, exact current-run bundle keys, and output paths; it is used to build the index when no pre-built index is supplied.
 - Multiple targets of each `ASSET_REMOTE_STORAGE` type upload sequentially after successful processing.
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
@@ -169,8 +170,10 @@ The `live2d` mode constrains bundles to `live2d/`, ignores `DL_INCLUDE_LIST` and
 chart source fallback and then charts processing regardless of the enable flag.
 The `live2d-associated` mode uses the same explicit `live2d/` bundle scope and
 cache policy but publishes only the separate `live2d-associated/v1` rollout. It
-requires `LIVE2D_ASSOCIATION_INDEX_PATH` (or an explicit dispatcher API input)
-for publication and fails closed rather than building a fake index.
+requires `LIVE2D_ASSOCIATION_INDEX_PATH` or `LIVE2D_ASSOCIATION_SELECTIONS_PATH`
+(or an explicit dispatcher API input) for publication and fails closed rather
+than building a fake index. A directly supplied index takes precedence over an
+index path, which takes precedence over the selections manifest.
 
 ```bash
 uv run python main.py -c config.py --mode live2d
