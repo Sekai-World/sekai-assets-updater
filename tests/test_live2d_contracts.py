@@ -82,15 +82,13 @@ def test_fixture_loads_and_preserves_business_rows_and_versions() -> None:
     ]
     assert any(evidence.source_table == "systemLive2ds" for evidence in business_evidence)
     assert any(
-        evidence.source_row.get("expression") == "ichika_smile"
-        for evidence in business_evidence
+        evidence.source_row.get("expression") == "ichika_smile" for evidence in business_evidence
     )
     april = next(model for model in index.models if model.model_output_id == "ichika-april2025")
     assert april.character2d_id is None
     assert april.character_id is None
     assert any(
-        diagnostic.code == "live2d_join_missing"
-        and diagnostic.path == "models/ichika-april2025"
+        diagnostic.code == "live2d_join_missing" and diagnostic.path == "models/ichika-april2025"
         for diagnostic in index.diagnostics
     )
     assert any(
@@ -195,9 +193,7 @@ def test_model3_file_references_preserve_observed_and_future_fields() -> None:
 
 def test_statuses_and_diagnostic_vocabulary_are_validated() -> None:
     assert {
-        candidate.status
-        for model in load_fixture().models
-        for candidate in model.motion_sets
+        candidate.status for model in load_fixture().models for candidate in model.motion_sets
     } == {CandidateStatus.AMBIGUOUS.value}
     assert {
         DiagnosticCode.LIVE2D_SCOPE_MISMATCH.value,

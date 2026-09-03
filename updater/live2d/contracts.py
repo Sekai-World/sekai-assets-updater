@@ -173,9 +173,7 @@ def _require_mapping(value: object, field_name: str) -> Mapping[str, object]:
     return value
 
 
-def _reject_unknown_keys(
-    value: Mapping[str, object], allowed: set[str], field_name: str
-) -> None:
+def _reject_unknown_keys(value: Mapping[str, object], allowed: set[str], field_name: str) -> None:
     unknown = sorted(key for key in value if key not in allowed)
     if unknown:
         _fail(field_name, f"unsupported fields: {', '.join(unknown)}")
@@ -230,12 +228,7 @@ def _validate_version_label(value: object, field_name: str) -> str:
 
 def _validate_relative_path(value: object, field_name: str) -> str:
     path = _validate_safe_text(value, field_name, max_length=1024)
-    if (
-        path.startswith(("/", "\\", "~"))
-        or "\\" in path
-        or "://" in path
-        or ":" in path
-    ):
+    if path.startswith(("/", "\\", "~")) or "\\" in path or "://" in path or ":" in path:
         _fail(field_name, "must be a relative POSIX path")
     parts = path.split("/")
     if any(part in ("", ".", "..") for part in parts):
@@ -406,7 +399,11 @@ class BundleIdentity(_Contract):
     def from_dict(cls, value: Mapping[str, object]) -> BundleIdentity:
         mapping = _require_mapping(value, "bundle")
         _reject_unknown_keys(mapping, {"name", "bundleName", "checksum"}, "bundle")
-        if "name" in mapping and "bundleName" in mapping and mapping["name"] != mapping["bundleName"]:
+        if (
+            "name" in mapping
+            and "bundleName" in mapping
+            and mapping["name"] != mapping["bundleName"]
+        ):
             _fail("bundle", "name and bundleName disagree")
         name = mapping.get("name", mapping.get("bundleName"))
         if name is None:
@@ -531,7 +528,9 @@ class KnownClips(_Contract):
     schema_version: int = KNOWN_CLIPS_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "known_clips.schema_version", KNOWN_CLIPS_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "known_clips.schema_version", KNOWN_CLIPS_SCHEMA_VERSION
+        )
         motions = tuple(
             _validate_clip_name(name, f"known_clips.motions[{index}]")
             for index, name in enumerate(_sequence(self.motions, "known_clips.motions"))
@@ -577,7 +576,9 @@ class CandidateEvidence(_Contract):
     schema_version: int = CANDIDATE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "evidence.schema_version", CANDIDATE_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "evidence.schema_version", CANDIDATE_SCHEMA_VERSION
+        )
         _validate_token(self.source, "evidence.source")
         _validate_safe_text(self.rule, "evidence.rule", max_length=1024)
         if self.source_table is not None:
@@ -667,7 +668,9 @@ class Diagnostic(_Contract):
     schema_version: int = DIAGNOSTIC_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "diagnostic.schema_version", DIAGNOSTIC_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "diagnostic.schema_version", DIAGNOSTIC_SCHEMA_VERSION
+        )
         code = self.code.value if isinstance(self.code, DiagnosticCode) else self.code
         if not isinstance(code, str) or code not in DIAGNOSTIC_CODES:
             _fail("diagnostic.code", f"unsupported diagnostic code {code!r}")
@@ -677,7 +680,9 @@ class Diagnostic(_Contract):
         _validate_safe_text(self.message, "diagnostic.message", max_length=2048)
         if self.path is not None:
             _validate_relative_path(self.path, "diagnostic.path")
-        object.__setattr__(self, "details", _freeze_json_mapping(self.details, "diagnostic.details"))
+        object.__setattr__(
+            self, "details", _freeze_json_mapping(self.details, "diagnostic.details")
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> Diagnostic:
@@ -724,7 +729,9 @@ class ModelOutputRecord(_Contract):
     schema_version: int = MODEL_OUTPUT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "model_output.schema_version", MODEL_OUTPUT_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "model_output.schema_version", MODEL_OUTPUT_SCHEMA_VERSION
+        )
         _validate_identifier(self.model_output_id, "model_output.model_output_id")
         bundle = _coerce(self.model_bundle, BundleIdentity, "model_output.model_bundle")
         references = _coerce(
@@ -792,7 +799,9 @@ class SharedMotionSetRecord(_Contract):
     schema_version: int = MOTION_SET_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "motion_set.schema_version", MOTION_SET_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "motion_set.schema_version", MOTION_SET_SCHEMA_VERSION
+        )
         _validate_identifier(self.motion_set_id, "motion_set.motion_set_id")
         bundle = _coerce(self.motion_bundle, BundleIdentity, "motion_set.motion_bundle")
         clips = _coerce(self.known_clips, KnownClips, "motion_set.known_clips")
@@ -863,7 +872,9 @@ class MotionSetCandidate(_Contract):
     schema_version: int = CANDIDATE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        _validate_schema_version(self.schema_version, "candidate.schema_version", CANDIDATE_SCHEMA_VERSION)
+        _validate_schema_version(
+            self.schema_version, "candidate.schema_version", CANDIDATE_SCHEMA_VERSION
+        )
         _validate_identifier(self.motion_set_id, "candidate.motion_set_id")
         bundle = _coerce(self.motion_bundle, BundleIdentity, "candidate.motion_bundle")
         status = _enum_value(self.status, CandidateStatus, "candidate.status")
@@ -874,7 +885,9 @@ class MotionSetCandidate(_Contract):
         _validate_unique(evidence, "candidate.evidence", key=lambda item: item.evidence_id)
         object.__setattr__(self, "motion_bundle", bundle)
         object.__setattr__(self, "status", status)
-        object.__setattr__(self, "evidence", tuple(sorted(evidence, key=lambda item: item.evidence_id)))
+        object.__setattr__(
+            self, "evidence", tuple(sorted(evidence, key=lambda item: item.evidence_id))
+        )
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> MotionSetCandidate:
@@ -919,7 +932,9 @@ class Live2DModelAssociation(_Contract):
     model_bundle: BundleIdentity | Mapping[str, object]
     character2d_id: int | str | None
     character_id: int | str | None
-    motion_sets: tuple[MotionSetCandidate | Mapping[str, object], ...] = field(default_factory=tuple)
+    motion_sets: tuple[MotionSetCandidate | Mapping[str, object], ...] = field(
+        default_factory=tuple
+    )
     join_evidence: tuple[CandidateEvidence | Mapping[str, object], ...] = field(
         default_factory=tuple
     )
@@ -935,17 +950,33 @@ class Live2DModelAssociation(_Contract):
         bundle = _coerce(self.model_bundle, BundleIdentity, "model_association.model_bundle")
         candidates = tuple(
             _coerce(item, MotionSetCandidate, f"model_association.motion_sets[{index}]")
-            for index, item in enumerate(_sequence(self.motion_sets, "model_association.motion_sets"))
+            for index, item in enumerate(
+                _sequence(self.motion_sets, "model_association.motion_sets")
+            )
         )
-        _validate_unique(candidates, "model_association.motion_sets", key=lambda item: item.motion_set_id)
+        _validate_unique(
+            candidates, "model_association.motion_sets", key=lambda item: item.motion_set_id
+        )
         join_evidence = tuple(
             _coerce(item, CandidateEvidence, f"model_association.join_evidence[{index}]")
-            for index, item in enumerate(_sequence(self.join_evidence, "model_association.join_evidence"))
+            for index, item in enumerate(
+                _sequence(self.join_evidence, "model_association.join_evidence")
+            )
         )
-        _validate_unique(join_evidence, "model_association.join_evidence", key=lambda item: item.evidence_id)
+        _validate_unique(
+            join_evidence, "model_association.join_evidence", key=lambda item: item.evidence_id
+        )
         object.__setattr__(self, "model_bundle", bundle)
-        object.__setattr__(self, "character2d_id", _validate_optional_entity_id(self.character2d_id, "model_association.character2d_id"))
-        object.__setattr__(self, "character_id", _validate_optional_entity_id(self.character_id, "model_association.character_id"))
+        object.__setattr__(
+            self,
+            "character2d_id",
+            _validate_optional_entity_id(self.character2d_id, "model_association.character2d_id"),
+        )
+        object.__setattr__(
+            self,
+            "character_id",
+            _validate_optional_entity_id(self.character_id, "model_association.character_id"),
+        )
         object.__setattr__(
             self,
             "motion_sets",
@@ -1005,8 +1036,12 @@ class Live2DIndex(_Contract):
     index_version: int
     metadata_version: str
     master_db_version: str
-    model_outputs: tuple[ModelOutputRecord | Mapping[str, object], ...] = field(default_factory=tuple)
-    motion_sets: tuple[SharedMotionSetRecord | Mapping[str, object], ...] = field(default_factory=tuple)
+    model_outputs: tuple[ModelOutputRecord | Mapping[str, object], ...] = field(
+        default_factory=tuple
+    )
+    motion_sets: tuple[SharedMotionSetRecord | Mapping[str, object], ...] = field(
+        default_factory=tuple
+    )
     models: tuple[Live2DModelAssociation | Mapping[str, object], ...] = field(default_factory=tuple)
     diagnostics: tuple[Diagnostic | Mapping[str, object], ...] = field(default_factory=tuple)
 
@@ -1032,10 +1067,16 @@ class Live2DIndex(_Contract):
             for index, item in enumerate(_sequence(self.diagnostics, "index.diagnostics"))
         )
 
-        _validate_unique(model_outputs, "index.model_outputs", key=lambda item: item.model_output_id)
-        _validate_unique(model_outputs, "index.model_outputs bundles", key=lambda item: item.model_bundle.name)
+        _validate_unique(
+            model_outputs, "index.model_outputs", key=lambda item: item.model_output_id
+        )
+        _validate_unique(
+            model_outputs, "index.model_outputs bundles", key=lambda item: item.model_bundle.name
+        )
         _validate_unique(motion_sets, "index.motion_sets", key=lambda item: item.motion_set_id)
-        _validate_unique(motion_sets, "index.motion_sets bundles", key=lambda item: item.motion_bundle.name)
+        _validate_unique(
+            motion_sets, "index.motion_sets bundles", key=lambda item: item.motion_bundle.name
+        )
         _validate_unique(models, "index.models", key=lambda item: item.model_output_id)
         diagnostic_ids = tuple(
             (item.code, item.severity, item.message, item.path, _stable_object_bytes(item.details))
@@ -1048,9 +1089,7 @@ class Live2DIndex(_Contract):
         for association in models:
             referenced_model = model_by_id.get(association.model_output_id)
             if referenced_model is None:
-                _integrity_fail(
-                    f"dangling model output reference {association.model_output_id!r}"
-                )
+                _integrity_fail(f"dangling model output reference {association.model_output_id!r}")
             if association.model_bundle != referenced_model.model_bundle:
                 _integrity_fail(f"model bundle mismatch for {association.model_output_id!r}")
             if referenced_model.metadata_version != self.metadata_version:
@@ -1060,13 +1099,9 @@ class Live2DIndex(_Contract):
             for candidate in association.motion_sets:
                 referenced_motion = motion_by_id.get(candidate.motion_set_id)
                 if referenced_motion is None:
-                    _integrity_fail(
-                        f"dangling motion-set reference {candidate.motion_set_id!r}"
-                    )
+                    _integrity_fail(f"dangling motion-set reference {candidate.motion_set_id!r}")
                 if candidate.motion_bundle != referenced_motion.motion_bundle:
-                    _integrity_fail(
-                        f"motion Bundle mismatch for {candidate.motion_set_id!r}"
-                    )
+                    _integrity_fail(f"motion Bundle mismatch for {candidate.motion_set_id!r}")
 
         for record in model_outputs:
             if record.metadata_version != self.metadata_version:
@@ -1081,9 +1116,17 @@ class Live2DIndex(_Contract):
         )
         _validate_unique(all_bundle_names, "index Bundle identities")
 
-        object.__setattr__(self, "model_outputs", tuple(sorted(model_outputs, key=lambda item: item.model_output_id)))
-        object.__setattr__(self, "motion_sets", tuple(sorted(motion_sets, key=lambda item: item.motion_set_id)))
-        object.__setattr__(self, "models", tuple(sorted(models, key=lambda item: item.model_output_id)))
+        object.__setattr__(
+            self,
+            "model_outputs",
+            tuple(sorted(model_outputs, key=lambda item: item.model_output_id)),
+        )
+        object.__setattr__(
+            self, "motion_sets", tuple(sorted(motion_sets, key=lambda item: item.motion_set_id))
+        )
+        object.__setattr__(
+            self, "models", tuple(sorted(models, key=lambda item: item.model_output_id))
+        )
         object.__setattr__(
             self,
             "diagnostics",

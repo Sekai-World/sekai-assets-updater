@@ -191,9 +191,7 @@ def _prepare_tables(tables: Mapping[str, object]) -> _PreparedTables:
         valid_rows.sort(key=_stable_json)
         prepared[table_name] = tuple(valid_rows)
 
-    role_rows: dict[
-        tuple[str, int | str], list[tuple[str, Mapping[str, object]]]
-    ] = {}
+    role_rows: dict[tuple[str, int | str], list[tuple[str, Mapping[str, object]]]] = {}
     for table_name in LIVE2D_TABLE_NAMES:
         for row in prepared[table_name]:
             if "motion" not in row and "expression" not in row:
@@ -244,7 +242,16 @@ def _coerce_records(
                 raise ValueError(f"{field_name}[{index}] is not a valid contract record") from exc
         else:
             raise ValueError(f"{field_name}[{index}] must be a contract record or mapping")
-    return tuple(sorted(records, key=lambda record: record.model_output_id if isinstance(record, ModelOutputRecord) else record.motion_set_id))
+    return tuple(
+        sorted(
+            records,
+            key=lambda record: (
+                record.model_output_id
+                if isinstance(record, ModelOutputRecord)
+                else record.motion_set_id
+            ),
+        )
+    )
 
 
 def _entity_id(value: object) -> int | str | None:
@@ -445,13 +452,9 @@ def _model_contexts(
 
     join_ambiguous = len(matching_costumes) > 1
     if join_ambiguous:
-        row_character2d_ids = [
-            _entity_id(row.get("character2dId")) for row in matching_costumes
-        ]
+        row_character2d_ids = [_entity_id(row.get("character2dId")) for row in matching_costumes]
         valid_character2d_ids = [
-            character2d_id
-            for character2d_id in row_character2d_ids
-            if character2d_id is not None
+            character2d_id for character2d_id in row_character2d_ids if character2d_id is not None
         ]
         duplicate_reason = (
             "duplicate_character2d_id"
@@ -480,16 +483,10 @@ def _model_contexts(
             details={"bundle_leaf": model_leaf},
         )
 
-    row_character2d_ids = [
-        _entity_id(row.get("character2dId")) for row in matching_costumes
-    ]
-    invalid_character2d_rows = sum(
-        character2d_id is None for character2d_id in row_character2d_ids
-    )
+    row_character2d_ids = [_entity_id(row.get("character2dId")) for row in matching_costumes]
+    invalid_character2d_rows = sum(character2d_id is None for character2d_id in row_character2d_ids)
     costume_ids = [
-        character2d_id
-        for character2d_id in row_character2d_ids
-        if character2d_id is not None
+        character2d_id for character2d_id in row_character2d_ids if character2d_id is not None
     ]
     costume_ids = list(dict.fromkeys(costume_ids))
     if invalid_character2d_rows:
@@ -514,11 +511,7 @@ def _model_contexts(
     if len(matching_costumes) == 1 and len(costume_ids) == 1:
         association_character2d_id = costume_ids[0]
     for character2d_id in costume_ids:
-        matches = [
-            row
-            for row in character_rows
-            if _same_entity(row.get("id"), character2d_id)
-        ]
+        matches = [row for row in character_rows if _same_entity(row.get("id"), character2d_id)]
         matches.sort(key=_stable_json)
         joined_character_rows.extend(matches)
         if not matches:
@@ -715,10 +708,14 @@ def _build_model_candidates(
             and not group_contexts[0].join_ambiguous
         )
         status = CandidateStatus.DERIVED.value if exact_derived else CandidateStatus.AMBIGUOUS.value
-        if match_kind != "normal" or len(group_contexts) > 1 or any(
-            context.join_ambiguous for context in group_contexts
+        if (
+            match_kind != "normal"
+            or len(group_contexts) > 1
+            or any(context.join_ambiguous for context in group_contexts)
         ):
-            reason = "protected_motion_variant" if match_kind == "protected" else "ambiguous_mapping"
+            reason = (
+                "protected_motion_variant" if match_kind == "protected" else "ambiguous_mapping"
+            )
             _append_diagnostic(
                 diagnostics,
                 seen_diagnostics,

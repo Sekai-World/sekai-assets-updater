@@ -96,8 +96,7 @@ def test_exact_costume_character_join_and_normal_candidate_provenance() -> None:
     role_evidence = [
         evidence
         for evidence in candidate.evidence
-        if evidence.source_table in LIVE2D_TABLE_NAMES
-        and "motion" in evidence.source_row
+        if evidence.source_table in LIVE2D_TABLE_NAMES and "motion" in evidence.source_row
     ]
     assert {evidence.source_table for evidence in role_evidence} == set(LIVE2D_TABLE_NAMES)
     assert all(evidence.source_row["expression"] for evidence in role_evidence)
@@ -152,9 +151,7 @@ def test_missing_join_is_explicit_and_keeps_naming_candidate_ambiguous() -> None
 def test_missing_character2d_row_does_not_silently_complete_the_join() -> None:
     models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
     tables = business_tables()
-    tables["character2ds"] = [
-        row for row in tables["character2ds"] if row.get("id") != 101
-    ]
+    tables["character2ds"] = [row for row in tables["character2ds"] if row.get("id") != 101]
     index = build_live2d_index(
         metadata_version="6.8.0.10",
         master_db_version="6.8.0.10",
@@ -176,9 +173,7 @@ def test_missing_character2d_row_does_not_silently_complete_the_join() -> None:
 def test_duplicate_character2d_rows_are_not_resolved_by_input_order() -> None:
     models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
     tables = business_tables()
-    tables["character2ds"].append(
-        {"id": 101, "characterId": 1, "assetName": "ichika_duplicate"}
-    )
+    tables["character2ds"].append({"id": 101, "characterId": 1, "assetName": "ichika_duplicate"})
     index = build_live2d_index(
         metadata_version="6.8.0.10",
         master_db_version="6.8.0.10",
@@ -201,9 +196,7 @@ def test_duplicate_character2d_rows_are_not_resolved_by_input_order() -> None:
 def test_missing_joined_character_id_keeps_candidate_ambiguous() -> None:
     models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
     tables = business_tables()
-    tables["character2ds"] = [
-        row for row in tables["character2ds"] if row.get("id") != 101
-    ]
+    tables["character2ds"] = [row for row in tables["character2ds"] if row.get("id") != 101]
     tables["character2ds"].append({"id": 101, "assetName": "ichika"})
     index = build_live2d_index(
         metadata_version="6.8.0.10",
@@ -227,9 +220,7 @@ def test_missing_joined_character_id_keeps_candidate_ambiguous() -> None:
 def test_duplicate_costume_matches_are_ambiguous_without_choosing_a_row() -> None:
     models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
     tables = business_tables()
-    tables["costume2ds"].append(
-        {"id": 1002, "character2dId": 101, "assetName": "v2_01ichika_unit"}
-    )
+    tables["costume2ds"].append({"id": 1002, "character2dId": 101, "assetName": "v2_01ichika_unit"})
     index = build_live2d_index(
         metadata_version="6.8.0.10",
         master_db_version="6.8.0.10",
@@ -300,10 +291,13 @@ def test_back_and_still_candidates_remain_ambiguous_and_protected() -> None:
         if evidence.source == "naming"
     }
     assert any("back/still" in rule for rule in protected_rules)
-    assert sum(
-        diagnostic.code == DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS
-        for diagnostic in index.diagnostics
-    ) >= 2
+    assert (
+        sum(
+            diagnostic.code == DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS
+            for diagnostic in index.diagnostics
+        )
+        >= 2
+    )
 
 
 def test_joined_character_id_prefix_mismatch_is_auditable() -> None:
@@ -332,9 +326,7 @@ def test_joined_character_id_prefix_mismatch_is_auditable() -> None:
 
 def test_non_base_normal_variant_is_candidate_only() -> None:
     models, _ = fixture_records(("ichika-unit",), ())
-    variant_motion = synthetic_motion_set(
-        "ichika-event", "motion/v2_01ichika_event_motion_base"
-    )
+    variant_motion = synthetic_motion_set("ichika-event", "motion/v2_01ichika_event_motion_base")
     index = build_live2d_index(
         metadata_version="6.8.0.10",
         master_db_version="6.8.0.10",
@@ -345,15 +337,16 @@ def test_non_base_normal_variant_is_candidate_only() -> None:
 
     candidate = index.models[0].motion_sets[0]
     assert candidate.status == CandidateStatus.AMBIGUOUS.value
-    assert all(candidate.status != CandidateStatus.VERIFIED.value for candidate in index.models[0].motion_sets)
+    assert all(
+        candidate.status != CandidateStatus.VERIFIED.value
+        for candidate in index.models[0].motion_sets
+    )
 
 
 def test_malformed_role_rows_are_diagnosed_once_and_not_emitted_as_evidence() -> None:
     models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
     tables = business_tables()
-    tables["systemLive2ds"].append(
-        {"id": 9999, "characterId": 1, "motion": "missing_expression"}
-    )
+    tables["systemLive2ds"].append({"id": 9999, "characterId": 1, "motion": "missing_expression"})
     index = build_live2d_index(
         metadata_version="6.8.0.10",
         master_db_version="6.8.0.10",
@@ -380,7 +373,9 @@ def test_malformed_role_rows_are_diagnosed_once_and_not_emitted_as_evidence() ->
 
 
 def test_all_six_tables_and_reordered_inputs_build_identical_indexes() -> None:
-    models, motions = fixture_records(("ichika-unit", "mizuki-unit"), ("ichika-base", "mizuki-base"))
+    models, motions = fixture_records(
+        ("ichika-unit", "mizuki-unit"), ("ichika-base", "mizuki-base")
+    )
     tables = business_tables()
     tables["character2ds"].append(
         {"id": 1003, "characterId": 1, "motion": "extra_idle", "expression": "extra_face"}
@@ -401,8 +396,7 @@ def test_all_six_tables_and_reordered_inputs_build_identical_indexes() -> None:
     tables["loginBonusLive2ds"][0]["assetList"] = "obsolete"
 
     reordered_tables = {
-        name: list(reversed(rows))
-        for name, rows in reversed(tuple(tables.items()))
+        name: list(reversed(rows)) for name, rows in reversed(tuple(tables.items()))
     }
     first = build_live2d_index(
         metadata_version="6.8.0.10",
