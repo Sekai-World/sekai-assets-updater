@@ -544,7 +544,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 0,
             )
 
-        postprocess.assert_awaited_once_with("assets", config, True)
+        postprocess.assert_awaited_once_with(
+            "assets", config, True, None, asset_metadata_version=None
+        )
 
     async def test_assets_noop_live2d_recovers_models_from_cache_before_postprocessing(self):
         config = SimpleNamespace(
@@ -584,7 +586,9 @@ class SpecializedPostprocessTests(unittest.IsolatedAsyncioTestCase):
                 0,
             )
 
-        postprocess.assert_awaited_once_with("live2d", config, True)
+        postprocess.assert_awaited_once_with(
+            "live2d", config, True, None, asset_metadata_version=None
+        )
 
     async def test_live2d_postprocess_uses_live2d_sources_and_storage(self):
         import tempfile

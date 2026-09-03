@@ -161,6 +161,9 @@ ENABLE_CHARTS_POSTPROCESS = False
 # Optional path to a pre-built, validated Live2DIndex JSON document. The
 # associated mode refuses to invent an index when this is unset.
 LIVE2D_ASSOCIATION_INDEX_PATH = None
+# Optional path to an explicit Live2D association-selection manifest. When set,
+# it is used to build the index from the current run's Live2D bundle metadata.
+LIVE2D_ASSOCIATION_SELECTIONS_PATH = None
 # Master-data server used to load chart metadata. Defaults to REGION; set this
 # when its repository name differs from the asset/cache region (for example,
 # TC charts use "tc" while TC assets use the TW region).
