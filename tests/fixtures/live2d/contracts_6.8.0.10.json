@@ -1,0 +1,275 @@
+{
+  "index_version": 1,
+  "metadata_version": "6.8.0.10",
+  "master_db_version": "6.8.0.10",
+  "model_outputs": [
+    {
+      "schema_version": 1,
+      "model_output_id": "ichika-unit",
+      "model_bundle": {
+        "name": "model/v2_01ichika_unit",
+        "checksum": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "output_path": "model/ichika-unit",
+      "file_references": {
+        "Moc": "ichika.moc3",
+        "Textures": ["textures/ichika_00.png"],
+        "Physics": "ichika.physics3.json"
+      },
+      "metadata_version": "6.8.0.10"
+    },
+    {
+      "schema_version": 1,
+      "model_output_id": "ichika-april2025",
+      "model_bundle": {
+        "name": "model/v2_01ichika_april2025",
+        "checksum": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "output_path": "model/ichika-april2025",
+      "file_references": {
+        "Moc": "ichika_april2025.moc3",
+        "Textures": ["textures/ichika_april2025_00.png"],
+        "Physics": "ichika.physics3.json"
+      },
+      "metadata_version": "6.8.0.10"
+    },
+    {
+      "schema_version": 1,
+      "model_output_id": "mizuki-unit",
+      "model_bundle": {
+        "name": "model/v2_20mizuki_unit",
+        "checksum": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "output_path": "model/mizuki-unit",
+      "file_references": {
+        "Moc": "mizuki.moc3",
+        "Textures": ["textures/mizuki_00.png"],
+        "Physics": "mizuki.physics3.json"
+      },
+      "metadata_version": "6.8.0.10"
+    }
+  ],
+  "motion_sets": [
+    {
+      "schema_version": 1,
+      "motion_set_id": "ichika-base",
+      "motion_bundle": {
+        "name": "motion/v2_01ichika_motion_base",
+        "checksum": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "motion_output_path": "motion/ichika-base",
+      "facial_output_path": "facial/ichika-base",
+      "known_clips": {
+        "schema_version": 1,
+        "motions": ["ichika_idle", "ichika_wave"],
+        "facials": ["ichika_blink_constant", "ichika_smile"]
+      },
+      "metadata_version": "6.8.0.10"
+    },
+    {
+      "schema_version": 1,
+      "motion_set_id": "mizuki-base",
+      "motion_bundle": {
+        "name": "motion/v2_20mizuki_motion_base",
+        "checksum": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+      },
+      "motion_output_path": "motion/mizuki-base",
+      "facial_output_path": "facial/mizuki-base",
+      "known_clips": {
+        "schema_version": 1,
+        "motions": ["mizuki_idle", "mizuki_wave"],
+        "facials": ["mizuki_blink_constant", "mizuki_smile"]
+      },
+      "metadata_version": "6.8.0.10"
+    }
+  ],
+  "models": [
+    {
+      "schema_version": 1,
+      "model_output_id": "ichika-unit",
+      "model_bundle": {
+        "name": "model/v2_01ichika_unit",
+        "checksum": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "character2d_id": 101,
+      "character_id": 1,
+      "join_evidence": [
+        {
+          "schema_version": 1,
+          "evidence_id": "join-ichika-costume",
+          "source": "master_table",
+          "source_table": "costume2ds",
+          "source_row": {
+            "id": 1001,
+            "character2dId": 101,
+            "assetName": "v2_01ichika_unit"
+          },
+          "rule": "costume2ds.character2dId -> character2ds",
+          "observed": "101",
+          "expected": "101"
+        },
+        {
+          "schema_version": 1,
+          "evidence_id": "join-ichika-character",
+          "source": "master_table",
+          "source_table": "character2ds",
+          "source_row": {
+            "id": 101,
+            "characterId": 1,
+            "assetName": "ichika"
+          },
+          "rule": "costume2ds.character2dId -> character2ds",
+          "observed": "101",
+          "expected": "101"
+        }
+      ],
+      "motion_sets": [
+        {
+          "schema_version": 1,
+          "motion_set_id": "ichika-base",
+          "motion_bundle": {
+            "name": "motion/v2_01ichika_motion_base",
+            "checksum": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+          },
+          "status": "ambiguous",
+          "evidence": [
+            {
+              "schema_version": 1,
+              "evidence_id": "candidate-ichika-name",
+              "source": "naming",
+              "source_table": "character2ds",
+              "source_row": {
+                "id": 101,
+                "assetName": "ichika"
+              },
+              "rule": "assetName provides character-level naming evidence only",
+              "observed": "ichika",
+              "expected": "v2_01ichika_motion_base"
+            },
+            {
+              "schema_version": 1,
+              "evidence_id": "candidate-ichika-business",
+              "source": "master_table",
+              "source_table": "systemLive2ds",
+              "source_row": {
+                "characterId": 1,
+                "motion": "ichika_idle",
+                "expression": "ichika_smile"
+              },
+              "rule": "business row names character-level motion and facial clips",
+              "observed": "1",
+              "expected": "1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "model_output_id": "ichika-april2025",
+      "model_bundle": {
+        "name": "model/v2_01ichika_april2025",
+        "checksum": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "character2d_id": null,
+      "character_id": null,
+      "join_evidence": [],
+      "motion_sets": [
+        {
+          "schema_version": 1,
+          "motion_set_id": "ichika-base",
+          "motion_bundle": {
+            "name": "motion/v2_01ichika_motion_base",
+            "checksum": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+          },
+          "status": "ambiguous",
+          "evidence": [
+            {
+              "schema_version": 1,
+              "evidence_id": "candidate-ichika-variant-name",
+              "source": "naming",
+              "source_table": "character2ds",
+              "source_row": {
+                "id": 101,
+                "assetName": "ichika"
+              },
+              "rule": "no variant join is present; naming is character-level candidate evidence only",
+              "observed": "v2_01ichika_april2025",
+              "expected": "v2_01ichika_motion_base"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": 1,
+      "model_output_id": "mizuki-unit",
+      "model_bundle": {
+        "name": "model/v2_20mizuki_unit",
+        "checksum": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "character2d_id": 202,
+      "character_id": 20,
+      "join_evidence": [
+        {
+          "schema_version": 1,
+          "evidence_id": "join-mizuki-costume",
+          "source": "master_table",
+          "source_table": "costume2ds",
+          "source_row": {
+            "id": 2001,
+            "character2dId": 202,
+            "assetName": "v2_20mizuki_unit"
+          },
+          "rule": "costume2ds.character2dId -> character2ds",
+          "observed": "202",
+          "expected": "202"
+        }
+      ],
+      "motion_sets": [
+        {
+          "schema_version": 1,
+          "motion_set_id": "mizuki-base",
+          "motion_bundle": {
+            "name": "motion/v2_20mizuki_motion_base",
+            "checksum": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+          },
+          "status": "ambiguous",
+          "evidence": [
+            {
+              "schema_version": 1,
+              "evidence_id": "candidate-mizuki-name",
+              "source": "naming",
+              "source_table": "character2ds",
+              "source_row": {
+                "id": 202,
+                "assetName": "mizuki"
+              },
+              "rule": "assetName provides character-level naming evidence only",
+              "observed": "mizuki",
+              "expected": "v2_20mizuki_motion_base"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "schema_version": 1,
+      "code": "live2d_mapping_ambiguous",
+      "severity": "warning",
+      "message": "Naming evidence remains a candidate, not a direct model-variant relation",
+      "path": "models/ichika-april2025",
+      "details": {}
+    },
+    {
+      "schema_version": 1,
+      "code": "live2d_join_missing",
+      "severity": "warning",
+      "message": "No costume2ds join is recorded for the April 2025 model variant",
+      "path": "models/ichika-april2025",
+      "details": {}
+    }
+  ]
+}
