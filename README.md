@@ -59,8 +59,9 @@ The package layout follows that story:
     `process.py`
   - `storage/` — upload backends: `rclone.py` (subprocess + batched),
     `opendal.py` (in-process), `remote.py` (key derivation/validation)
-  - `live2d/` — Cubism motion restoration: `curves.py`, `motion3.py`,
-    `moc3.py`, `restore.py`
+  - `live2d/` — Cubism motion restoration and association contracts: `curves.py`,
+    `motion3.py`, `moc3.py`, `restore.py`, `contracts.py`, `association.py`,
+    `keys.py`, `publication.py`, `rollout.py`
   - `postprocess/` — Live2D and Charts post-processing: `dispatch.py`,
     `charts.py`, `live2d_models.py`, `incremental_state.py`, `config.py`
   - `modes.py`, `workspace.py`, `runtime.py`, `sanitize.py`, `state.py`,
@@ -130,14 +131,17 @@ Storage:
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
 - `ASSET_LOCAL_BUNDLE_CACHE_DIR`: keep downloaded bundles locally; if `None`, use a temp file
 - `LIVE2D_BUNDLE_CACHE_DIR`: separate persistent cache for `live2d/` bundles; if `None`, use a run-scoped temporary cache only while Live2D post-processing runs
-- `ASSET_REMOTE_STORAGE`: upload targets after processing; set to `[]` to disable uploads. Each target uses `type` to select its pipeline: `normal` for extracted assets, `live2d` for Live2D output, or `charts` for rendered charts.
+- `ASSET_REMOTE_STORAGE`: upload targets after processing; set to `[]` to disable uploads. Each target uses `type` to select its pipeline: `normal` for extracted assets, `live2d` for deprecated legacy Live2D output, `live2d-associated` for the versioned association namespace, or `charts` for rendered charts.
 - `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
+- `ENABLE_LIVE2D_POSTPROCESS` is deprecated but retained: it continues to own `live2d/model_list.json` and the legacy `live2d/` output. `ENABLE_LIVE2D_ASSOCIATED_PIPELINE` is independent and may be enabled at the same time.
+- `LIVE2D_ASSOCIATION_INDEX_PATH` optionally supplies a pre-built, validated `Live2DIndex` JSON document. The associated pipeline never invents an empty index when this is unset.
 - Multiple targets of each `ASSET_REMOTE_STORAGE` type upload sequentially after successful processing.
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
 - Charts never download or cache asset bundles. They use existing `music/music_score/*.txt` files first; when absent, they copy `music/music_score/` from the first successful `type == "normal"` target in `ASSET_REMOTE_STORAGE`, using that target's program and args. If `ASSET_LOCAL_EXTRACTED_DIR` is persistent, the fallback uses a separate temporary workspace and cannot pollute it. If it is unset, the existing run-scoped extracted workspace is reused and cleaned after processing. Ordinary assets retain their existing temporary-file semantics.
 - Chart incremental state is persisted at `chart_state.json` beside `DL_LIST_CACHE_PATH`. Only new or content-changed scores are re-rendered; runs with no changes skip rendering and upload entirely. State is updated atomically only after a successful render and upload.
 - Live2D motion incremental state is persisted at `live2d_motion_state.json` beside `DL_LIST_CACHE_PATH`. On subsequent runs, only new or content-changed motion bundles are restored; unchanged bundles and their uploads are skipped. The state includes a model fingerprint derived from `*.moc3` files and the Unity version, so moc3 changes trigger a full rebuild. State is updated atomically only after all restore, upload, and publish operations succeed.
+- The associated rollout has separate state at `live2d_associated_state.json`. It publishes only to `live2d-associated/v1/`: each validated generation is staged below `candidates/`, the regular `current.json` pointer is atomically replaced last, and `index.json`/`current.json` carry deterministic key and SHA-256 metadata. Invalid or ambiguous candidates do not advance `current.json`; rollback replaces it with a previously validated candidate, and disabling removes only the associated pointer/manifests while retaining candidates. Upload receipts skip unchanged generations only for the exact storage configurations previously recorded as successful; remote reconciliation is outside this local transaction. The legacy `live2d/` tree and `model_list.json` are not modified.
 
 Startup validates all configured concurrency values, AES key/IV lengths, the external process
 timeout, and executables required by the selected decoder and upload backends.
@@ -148,6 +152,7 @@ Cache files:
 - `ASSET_BUNDLE_INFO_CACHE_PATH`
 - `GAME_VERSION_JSON_CACHE_PATH`
 - `live2d_motion_state.json` (Live2D incremental state, sibling of `DL_LIST_CACHE_PATH`)
+- `live2d_associated_state.json` (associated-index rollout state, sibling of `DL_LIST_CACHE_PATH`)
 
 ## Main Usage
 
@@ -157,14 +162,19 @@ Run the full updater:
 uv run python main.py -c config.py
 ```
 
-The single entry point supports `--mode assets|live2d|charts` (default `assets`).
+The single entry point supports `--mode assets|live2d|live2d-associated|charts` (default `assets`).
 The `live2d` mode constrains bundles to `live2d/`, ignores `DL_INCLUDE_LIST` and
 `DL_EXCLUDE_LIST` for that namespace, and always runs Live2D processing. The
 `charts` mode does not download game bundles: it runs the local-first/normal-storage
 chart source fallback and then charts processing regardless of the enable flag.
+The `live2d-associated` mode uses the same explicit `live2d/` bundle scope and
+cache policy but publishes only the separate `live2d-associated/v1` rollout. It
+requires `LIVE2D_ASSOCIATION_INDEX_PATH` (or an explicit dispatcher API input)
+for publication and fails closed rather than building a fake index.
 
 ```bash
 uv run python main.py -c config.py --mode live2d
+uv run python main.py -c config.py --mode live2d-associated
 uv run python main.py -c config.py --mode charts
 ```
 

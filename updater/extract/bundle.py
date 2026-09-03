@@ -121,7 +121,7 @@ async def extract_asset_bundle(
 ) -> List[Path]:
     """Extract the asset bundle to the specified directory."""
     live2d_bundle = is_live2d_bundle(bundle)
-    if getattr(config, "UPDATER_MODE", "assets") == "live2d" and bundle.get(
+    if getattr(config, "UPDATER_MODE", "assets") in {"live2d", "live2d-associated"} and bundle.get(
         "bundleName", ""
     ).startswith("live2d/motion/"):
         return []

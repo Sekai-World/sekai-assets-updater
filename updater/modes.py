@@ -2,13 +2,29 @@
 
 from typing import Dict, List, Tuple
 
-SPECIALIZED_MODES = ("live2d", "charts")
+SPECIALIZED_MODES = ("live2d", "live2d-associated", "charts")
 LIVE2D_BUNDLE_PREFIX = "live2d/"
 SPECIALIZED_BUNDLE_PREFIXES = {
     "live2d": (LIVE2D_BUNDLE_PREFIX,),
+    "live2d-associated": (LIVE2D_BUNDLE_PREFIX,),
     "charts": (),
 }
-MODE_BUNDLE_PREFIXES = {"assets": (), "live2d": (LIVE2D_BUNDLE_PREFIX,), "charts": ()}
+MODE_BUNDLE_PREFIXES = {
+    "assets": (),
+    "live2d": (LIVE2D_BUNDLE_PREFIX,),
+    "live2d-associated": (LIVE2D_BUNDLE_PREFIX,),
+    "charts": (),
+}
+
+# Map specialized mode names to their independent config flags.
+# ``live2d-associated`` uses ``ENABLE_LIVE2D_ASSOCIATED_PIPELINE`` rather than
+# the ``ENABLE_*_POSTPROCESS`` pattern so the deprecated legacy flag and the
+# new pipeline flag remain explicitly distinguishable.
+SPECIALIZED_MODE_FLAGS = {
+    "live2d": "ENABLE_LIVE2D_POSTPROCESS",
+    "live2d-associated": "ENABLE_LIVE2D_ASSOCIATED_PIPELINE",
+    "charts": "ENABLE_CHARTS_POSTPROCESS",
+}
 
 
 def is_live2d_bundle(bundle: Dict[str, str]) -> bool:
@@ -23,7 +39,7 @@ def is_chart_score_bundle(bundle: Dict[str, str]) -> bool:
 
 def mode_uses_bundle_pipeline(mode: str) -> bool:
     """Whether a mode fetches and processes game asset bundles."""
-    if mode not in ("assets", "live2d", "charts"):
+    if mode not in ("assets", "live2d", "live2d-associated", "charts"):
         raise ValueError(f"Unsupported updater mode: {mode}")
     return mode != "charts"
 
@@ -37,7 +53,7 @@ def get_enabled_specialized_modes(mode: str, config) -> tuple[str, ...]:
     return tuple(
         specialized_mode
         for specialized_mode in SPECIALIZED_MODES
-        if getattr(config, f"ENABLE_{specialized_mode.upper()}_POSTPROCESS", False)
+        if getattr(config, SPECIALIZED_MODE_FLAGS[specialized_mode], False)
     )
 
 
@@ -61,15 +77,16 @@ def needs_shared_workspace(mode: str, config) -> bool:
 def needs_live2d_bundle_cache(mode: str, config) -> bool:
     """Whether Live2D needs a run-scoped bundle cache root."""
     return (
-        "live2d" in get_enabled_specialized_modes(mode, config)
+        bool({"live2d", "live2d-associated"} & set(get_enabled_specialized_modes(mode, config)))
         and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None
     )
 
 
 def retains_live2d_extracted_outputs(config) -> bool:
     """Whether Live2D extraction must remain available for post-processing."""
-    return "live2d" in get_enabled_specialized_modes(
-        getattr(config, "UPDATER_MODE", "assets"), config
+    return bool(
+        {"live2d", "live2d-associated"}
+        & set(get_enabled_specialized_modes(getattr(config, "UPDATER_MODE", "assets"), config))
     )
 
 

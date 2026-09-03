@@ -128,7 +128,7 @@ def _validate_specialized_settings(
     enabled_specialized_modes: tuple[str, ...],
     errors: list[str],
 ) -> None:
-    if "live2d" in enabled_specialized_modes:
+    if {"live2d", "live2d-associated"} & set(enabled_specialized_modes):
         unity_version = getattr(cfg, "UNITY_VERSION", None)
         if not isinstance(unity_version, str) or not unity_version.strip():
             errors.append("LIVE2D post-processing requires UNITY_VERSION")

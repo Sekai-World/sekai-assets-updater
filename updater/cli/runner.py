@@ -149,7 +149,10 @@ async def _run_main(
         cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
         cfg.GAME_VERSION_JSON_CACHE_PATH,
     )
-    active_cfg = cast(ConfigLike, _StatePathConfig(cfg, paths) if mode == "live2d" else cfg)
+    active_cfg = cast(
+        ConfigLike,
+        _StatePathConfig(cfg, paths) if mode in {"live2d", "live2d-associated"} else cfg,
+    )
 
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
     logger.info(

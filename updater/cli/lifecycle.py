@@ -183,13 +183,14 @@ async def _run_enabled_specialized_postprocess(
     # from the configured raw bundle cache instead of requiring this run to
     # download the model bundles again. Forced live2d mode keeps its existing
     # fail-fast behavior; optional assets mode follows skip_missing_sources.
-    if "live2d" in enabled_modes and live2d_bundles is not None:
+    if {"live2d", "live2d-associated"} & set(enabled_modes) and live2d_bundles is not None:
         try:
             await recover_live2d_model_outputs(cfg, live2d_bundles)
         except RuntimeError as exc:
             if mode != "assets":
                 raise
             logger.warning("Skipping optional Live2D cache recovery: %s", exc)
+    motion_outputs_ready = False
     for specialized_mode in enabled_modes:
         if specialized_mode == "charts":
             await run_specialized_postprocess(
@@ -199,13 +200,22 @@ async def _run_enabled_specialized_postprocess(
                 skip_missing_sources=mode == "assets",
                 score_include_list=cfg.DL_INCLUDE_LIST if mode == "assets" else None,
             )
-        else:
+        elif specialized_mode == "live2d-associated":
             await run_specialized_postprocess(
                 specialized_mode,
                 cfg,
                 extracted_dir_is_temporary=extracted_dir_is_temporary,
                 skip_missing_sources=mode == "assets",
+                motion_outputs_ready=motion_outputs_ready,
             )
+        else:
+            result = await run_specialized_postprocess(
+                specialized_mode,
+                cfg,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
+                skip_missing_sources=mode == "assets",
+            )
+            motion_outputs_ready = result is True
 
 
 async def _restore_pending_cache_on_failure(

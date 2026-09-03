@@ -1,12 +1,30 @@
 """Mode dispatcher for specialized post-processing runs."""
 
 import logging
+import shutil
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path as StdPath
 
 from anyio import Path
 
+from updater.live2d.contracts import Live2DIndex
+from updater.live2d.publication import validate_live2d_outputs
 from updater.live2d.restore import collect_param_id_map, restore_live2d_motions
+from updater.live2d.rollout import (
+    Live2DAssociatedRolloutError,
+    disable_live2d_associated,
+    live2d_associated_namespace_path,
+    live2d_associated_state_path,
+    load_current_pointer,
+    load_live2d_index,
+    load_rollout_state,
+    publish_live2d_associated_index,
+    record_uploaded_storages,
+    rollback_live2d_associated,
+    storage_receipt_key,
+    validate_publishable_index,
+)
 from updater.postprocess.charts import (
     _render_charts,
     fetch_chart_sources_from_storage,
@@ -51,13 +69,17 @@ async def _process_live2d(
     extracted_dir: StdPath,
     *,
     skip_missing_sources: bool = False,
-) -> None:
+) -> bool:
     """Incremental Live2D motion restore, upload, and state persist.
 
     State is only written after a successful restore **and** all uploads/publishes
     so that a crash mid-way causes a full rebuild on the next run.
     """
     live2d_storages = get_specialized_storage(config, "live2d")
+    logger.warning(
+        "Deprecated legacy Live2D post-processing is enabled; "
+        "use live2d-associated/v1 for association-index output"
+    )
     for storage in live2d_storages:
         _validate_live2d_storage(storage)
 
@@ -67,7 +89,7 @@ async def _process_live2d(
         message = "Live2D post-processing sources are missing: " + ", ".join(missing_sources)
         if skip_missing_sources:
             logger.warning("Skipping optional Live2D post-processing: %s", message)
-            return
+            return False
         raise RuntimeError(message)
 
     param_id_map = await collect_param_id_map(Path(str(model_dir)))
@@ -81,7 +103,7 @@ async def _process_live2d(
         and not pending_motion_bundles(current, stored_state["motions"])
     ):
         logger.info("Live2D motions are up to date; skipping restore and upload")
-        return
+        return True
 
     # Determine which bundles to restore
     if stored_state is None or stored_state["fingerprint"] != fingerprint:
@@ -121,6 +143,318 @@ async def _process_live2d(
     state_file = live2d_state_path(config)
     prepare_state_directory(state_file.parent)
     atomic_write_json(state_file, payload, validate_live2d_state)
+    return True
+
+
+async def _upload_live2d_associated_candidate(
+    namespace_root: StdPath,
+    candidate_id: str,
+    storage: dict,
+    config,
+) -> None:
+    """Upload only associated candidate material, never the legacy Live2D tree."""
+
+    _validate_live2d_storage(storage)
+    remote_root = Path(f"{str(storage['base']).rstrip('/')}/live2d-associated/v1")
+    candidate_root = namespace_root / "candidates" / candidate_id
+    await upload_directory(
+        Path(str(candidate_root)),
+        remote_root / "candidates" / candidate_id,
+        storage["program"],
+        storage["args"],
+        config=config,
+    )
+
+    # Remote directory uploads do not provide a portable atomic file-replace
+    # primitive. Upload the validated root manifests as ordinary files; the
+    # local current.json replacement remains the authoritative boundary.
+    with tempfile.TemporaryDirectory(prefix="sekai-live2d-associated-root-") as temp_dir:
+        root = StdPath(temp_dir) / "v1"
+        root.mkdir()
+        for filename in ("index.json", "current.json"):
+            shutil.copy2(namespace_root / filename, root / filename)
+        await upload_directory(
+            Path(str(root)),
+            remote_root,
+            storage["program"],
+            storage["args"],
+            config=config,
+        )
+
+
+def _validate_associated_storage(storage: dict) -> None:
+    _validate_live2d_storage(storage)
+    if not isinstance(storage.get("base"), str) or not storage["base"].strip():
+        raise ValueError("Live2D-associated storage requires a non-empty base")
+    if not isinstance(storage.get("program"), str) or not storage["program"].strip():
+        raise ValueError("Live2D-associated storage requires a non-empty program")
+    if not isinstance(storage.get("args"), list):
+        raise ValueError("Live2D-associated storage requires an args list")
+
+
+def _associated_model_outputs_exist(index: Live2DIndex, source_root: StdPath) -> bool:
+    for record in index.model_outputs:
+        references = record.file_references
+        for relative in (
+            references.moc,
+            *references.textures,
+            *((references.physics,) if references.physics is not None else ()),
+        ):
+            path = source_root / record.output_path / relative
+            if path.is_symlink() or not path.is_file():
+                return False
+    return True
+
+
+def _associated_motion_outputs_missing(index: Live2DIndex, source_root: StdPath) -> bool:
+    for record in index.motion_sets:
+        for output_directory, clips in (
+            (source_root / record.motion_output_path, record.known_clips.motions),
+            (source_root / record.facial_output_path, record.known_clips.facials),
+        ):
+            for clip in clips:
+                path = output_directory / f"{clip}.motion3.json"
+                if path.is_symlink() or not path.is_file():
+                    return True
+    return False
+
+
+async def _ensure_associated_motion_outputs(
+    config,
+    index: Live2DIndex,
+    source_root: StdPath,
+    *,
+    motion_outputs_ready: bool = False,
+) -> None:
+    """Ensure the explicit index's motion files exist without duplicate restore work."""
+
+    validation_error: Exception
+    try:
+        validate_live2d_outputs(index, source_root)
+        return
+    except Exception as exc:
+        validation_error = exc
+        if motion_outputs_ready:
+            raise Live2DAssociatedRolloutError(
+                "associated Live2D outputs are incomplete after the legacy motion restore"
+            ) from validation_error
+
+    if not _associated_model_outputs_exist(index, source_root):
+        raise Live2DAssociatedRolloutError(
+            "associated Live2D output root is missing one or more model outputs; "
+            "recover the model bundles before restoring motions"
+        ) from validation_error
+    if not _associated_motion_outputs_missing(index, source_root):
+        raise Live2DAssociatedRolloutError(
+            "associated Live2D outputs failed validation and cannot be safely materialized"
+        ) from validation_error
+
+    cache_root = getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None)
+    model_dir = source_root / "model"
+    motion_source = StdPath(str(cache_root)) / "live2d" / "motion" if cache_root else None
+    if not model_dir.is_dir() or motion_source is None or not motion_source.is_dir():
+        raise Live2DAssociatedRolloutError(
+            "associated Live2D motion outputs are missing and the model/motion bundle sources "
+            "are not configured"
+        ) from validation_error
+
+    try:
+        param_id_map = await collect_param_id_map(Path(str(model_dir)))
+        await restore_live2d_motions(
+            Path(str(motion_source)),
+            Path(str(source_root / "motion")),
+            Path(str(model_dir)),
+            config.UNITY_VERSION,
+            config=config,
+            param_id_map=param_id_map,
+        )
+    except Exception as exc:
+        raise Live2DAssociatedRolloutError(
+            f"associated Live2D motion restoration failed: {exc}"
+        ) from exc
+
+    try:
+        validate_live2d_outputs(index, source_root)
+    except Exception as exc:
+        raise Live2DAssociatedRolloutError(
+            f"associated Live2D outputs remain invalid after motion restoration: {exc}"
+        ) from exc
+
+
+def _log_associated_remote_divergence(
+    candidate_id: str,
+    attempted_storage_keys: list[str],
+    successful_storage_keys: list[str],
+    *,
+    rollback_error: Exception | None = None,
+) -> None:
+    detail = (
+        "local rollback also failed: " + str(rollback_error)
+        if rollback_error is not None
+        else "local rollout was rolled back"
+    )
+    logger.error(
+        "Live2D-associated remote divergence is possible for candidate %s: %s; "
+        "attempted_storages=%s successful_storages=%s",
+        candidate_id,
+        detail,
+        attempted_storage_keys,
+        successful_storage_keys,
+    )
+
+
+async def _process_live2d_associated(
+    config,
+    extracted_dir: StdPath,
+    *,
+    association_index: Live2DIndex | Mapping[str, object] | None = None,
+    association_index_path: StdPath | str | None = None,
+    association_output_root: StdPath | None = None,
+    association_namespace_root: StdPath | None = None,
+    association_state_path: StdPath | None = None,
+    skip_missing_sources: bool = False,
+    motion_outputs_ready: bool = False,
+) -> None:
+    """Publish an explicit association index through the isolated rollout API.
+
+    The current updater has no master-data loader at this boundary.  Missing
+    explicit input is therefore a clear error for forced mode and an optional
+    skip for ``assets`` mode.  No empty or inferred index is ever built here.
+    """
+
+    storages = get_specialized_storage(config, "live2d-associated")
+    if not storages:
+        message = (
+            "ENABLE_LIVE2D_ASSOCIATED_PIPELINE is enabled but no matching "
+            "live2d-associated storage is configured; refusing local-only advancement"
+        )
+        logger.error(message)
+        raise ValueError(message)
+    for storage in storages:
+        _validate_associated_storage(storage)
+
+    configured_path = getattr(config, "LIVE2D_ASSOCIATION_INDEX_PATH", None)
+    if association_index is not None and association_index_path is not None:
+        raise ValueError(
+            "live2d-associated accepts either association_index or association_index_path, not both"
+        )
+    if association_index is None and association_index_path is None:
+        association_index_path = configured_path
+    if association_index is None and association_index_path is None:
+        message = (
+            "live2d-associated requires an explicit validated association index "
+            "(association_index or association_index_path)"
+        )
+        if skip_missing_sources:
+            logger.warning("Skipping optional Live2D-associated post-processing: %s", message)
+            return
+        raise ValueError(message)
+
+    try:
+        index = (
+            load_live2d_index(association_index_path)
+            if association_index is None
+            else association_index
+        )
+        validated_index = validate_publishable_index(index)
+        source_root = association_output_root or extracted_dir / "live2d"
+        namespace_root = association_namespace_root or live2d_associated_namespace_path(
+            extracted_dir
+        )
+        state_path = association_state_path or live2d_associated_state_path(config)
+        previous = load_current_pointer(namespace_root)
+        previous_state = load_rollout_state(state_path)
+        await _ensure_associated_motion_outputs(
+            config,
+            validated_index,
+            StdPath(str(source_root)),
+            motion_outputs_ready=motion_outputs_ready,
+        )
+        pointer = publish_live2d_associated_index(
+            validated_index,
+            source_root,
+            namespace_root,
+            state_path=state_path,
+        )
+    except Live2DAssociatedRolloutError as exc:
+        if skip_missing_sources:
+            logger.warning("Skipping optional Live2D-associated post-processing: %s", exc)
+            return
+        raise
+
+    storage_entries = [(storage, storage_receipt_key(storage)) for storage in storages]
+    receipts = (
+        previous_state.uploaded_storages
+        if previous_state is not None
+        and previous is not None
+        and previous_state.current == previous
+        else {}
+    )
+    storages_to_upload = [
+        (storage, storage_key)
+        for storage, storage_key in storage_entries
+        if receipts.get(storage_key) != pointer.candidate_id
+    ]
+    if not storages_to_upload:
+        logger.info(
+            "Live2D-associated candidate %s is unchanged and has upload receipts for all "
+            "configured storages; skipping remote upload",
+            pointer.candidate_id,
+        )
+        return
+
+    attempted_storage_keys: list[str] = []
+    successful_storage_keys: list[str] = []
+    try:
+        for storage, storage_key in storages_to_upload:
+            attempted_storage_keys.append(storage_key)
+            await _upload_live2d_associated_candidate(
+                StdPath(str(namespace_root)),
+                pointer.candidate_id,
+                storage,
+                config,
+            )
+            successful_storage_keys.append(storage_key)
+        record_uploaded_storages(
+            namespace_root,
+            pointer.candidate_id,
+            successful_storage_keys,
+            state_path=state_path,
+        )
+    except Exception as upload_error:
+        try:
+            if previous is None:
+                disable_live2d_associated(namespace_root, state_path=state_path)
+            else:
+                rollback_live2d_associated(
+                    namespace_root,
+                    previous.candidate_id,
+                    state_path=state_path,
+                )
+        except Exception as rollback_error:
+            _log_associated_remote_divergence(
+                pointer.candidate_id,
+                attempted_storage_keys,
+                successful_storage_keys,
+                rollback_error=rollback_error,
+            )
+            raise Live2DAssociatedRolloutError(
+                f"associated upload failed: {upload_error}; "
+                f"local rollback failed: {rollback_error}; remote divergence is possible"
+            ) from upload_error
+        if attempted_storage_keys:
+            _log_associated_remote_divergence(
+                pointer.candidate_id,
+                attempted_storage_keys,
+                successful_storage_keys,
+            )
+        raise
+
+    logger.info(
+        "Live2D-associated index published at %s/current.json -> %s",
+        namespace_root,
+        pointer.candidate_id,
+    )
 
 
 async def _process_charts(
@@ -174,7 +508,10 @@ async def _process_charts(
 def _validate_postprocess_config(mode: str, config) -> None:
     if config.ASSET_LOCAL_EXTRACTED_DIR is None:
         raise ValueError("Specialized modes require ASSET_LOCAL_EXTRACTED_DIR")
-    if mode == "live2d" and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None:
+    if (
+        mode in {"live2d", "live2d-associated"}
+        and getattr(config, "LIVE2D_BUNDLE_CACHE_DIR", None) is None
+    ):
         raise ValueError("live2d mode requires LIVE2D_BUNDLE_CACHE_DIR")
 
 
@@ -230,12 +567,37 @@ async def _run_live2d_postprocess(
     extracted_dir: StdPath,
     motion_source: StdPath,
     skip_missing_sources: bool,
-) -> None:
-    await _process_live2d(
+) -> bool:
+    return await _process_live2d(
         config,
         motion_source,
         extracted_dir,
         skip_missing_sources=skip_missing_sources,
+    )
+
+
+async def _run_live2d_associated_postprocess(
+    config,
+    extracted_dir: StdPath,
+    skip_missing_sources: bool,
+    *,
+    association_index: Live2DIndex | Mapping[str, object] | None = None,
+    association_index_path: StdPath | str | None = None,
+    association_output_root: StdPath | None = None,
+    association_namespace_root: StdPath | None = None,
+    association_state_path: StdPath | None = None,
+    motion_outputs_ready: bool = False,
+) -> None:
+    await _process_live2d_associated(
+        config,
+        extracted_dir,
+        association_index=association_index,
+        association_index_path=association_index_path,
+        association_output_root=association_output_root,
+        association_namespace_root=association_namespace_root,
+        association_state_path=association_state_path,
+        skip_missing_sources=skip_missing_sources,
+        motion_outputs_ready=motion_outputs_ready,
     )
 
 
@@ -246,17 +608,35 @@ async def run_specialized_postprocess(
     extracted_dir_is_temporary: bool = False,
     skip_missing_sources: bool = False,
     score_include_list: list[str] | None = None,
-) -> None:
+    association_index: Live2DIndex | Mapping[str, object] | None = None,
+    association_index_path: StdPath | str | None = None,
+    association_output_root: StdPath | None = None,
+    association_namespace_root: StdPath | None = None,
+    association_state_path: StdPath | None = None,
+    motion_outputs_ready: bool = False,
+) -> bool | None:
     """Run mode-specific work only after every bundle has succeeded."""
     _validate_postprocess_config(mode, config)
     extracted_dir = StdPath(str(config.ASSET_LOCAL_EXTRACTED_DIR))
     if mode == "live2d":
         motion_source = StdPath(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion"
-        await _run_live2d_postprocess(
+        return await _run_live2d_postprocess(
             config,
             extracted_dir,
             motion_source,
             skip_missing_sources=skip_missing_sources,
+        )
+    if mode == "live2d-associated":
+        await _run_live2d_associated_postprocess(
+            config,
+            extracted_dir,
+            skip_missing_sources,
+            association_index=association_index,
+            association_index_path=association_index_path,
+            association_output_root=association_output_root,
+            association_namespace_root=association_namespace_root,
+            association_state_path=association_state_path,
+            motion_outputs_ready=motion_outputs_ready,
         )
         return
     if mode == "charts":
