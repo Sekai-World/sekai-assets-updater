@@ -534,43 +534,13 @@ class RolloutState:
         unknown = sorted(set(value) - allowed)
         if unknown:
             raise Live2DAssociatedRolloutError(f"rollout state contains unknown fields: {unknown}")
-        raw_current = value.get("current")
-        if raw_current is None:
-            current = None
-        elif isinstance(raw_current, Mapping):
-            current = CurrentPointer.from_dict(raw_current)
-        else:
-            raise Live2DAssociatedRolloutError("rollout state current must be an object or null")
+        current = _rollout_state_current(value)
         enabled = value.get("enabled")
         uploaded_storages = _validate_storage_receipts(
             value.get("uploaded_storages", {}), "rollout state uploaded_storages"
         )
-        if type(enabled) is not bool:
-            raise Live2DAssociatedRolloutError("rollout state enabled must be a bool")
-        if not enabled and current is not None:
-            raise Live2DAssociatedRolloutError(
-                "disabled rollout state must not retain a current pointer"
-            )
-        if current is None and uploaded_storages:
-            raise Live2DAssociatedRolloutError(
-                "rollout state without a current pointer must not retain upload receipts"
-            )
-        if any(
-            field in value
-            for field in allowed - {"schema_version", "namespace", "enabled", "current"}
-        ):
-            expected = RolloutState(
-                enabled=enabled,
-                current=current,
-                namespace=value.get("namespace", LIVE2D_ASSOCIATED_NAMESPACE),  # type: ignore[arg-type]
-                schema_version=value.get("schema_version", ROLLOUT_SCHEMA_VERSION),  # type: ignore[arg-type]
-                uploaded_storages=uploaded_storages,
-            ).to_dict()
-            for field in allowed - {"schema_version", "namespace", "enabled", "current"}:
-                if field in value and value[field] != expected[field]:
-                    raise Live2DAssociatedRolloutError(
-                        f"rollout state {field} does not match current pointer"
-                    )
+        _validate_rollout_state_core(enabled, current, uploaded_storages)
+        _validate_rollout_state_pointer_fields(value, allowed, enabled, current, uploaded_storages)
         return cls(
             enabled=value.get("enabled"),  # type: ignore[arg-type]
             current=current,
@@ -578,6 +548,56 @@ class RolloutState:
             schema_version=value.get("schema_version", ROLLOUT_SCHEMA_VERSION),  # type: ignore[arg-type]
             uploaded_storages=uploaded_storages,
         )
+
+
+def _rollout_state_current(value: Mapping[str, object]) -> CurrentPointer | None:
+    raw_current = value.get("current")
+    if raw_current is None:
+        return None
+    if isinstance(raw_current, Mapping):
+        return CurrentPointer.from_dict(raw_current)
+    raise Live2DAssociatedRolloutError("rollout state current must be an object or null")
+
+
+def _validate_rollout_state_core(
+    enabled: object,
+    current: CurrentPointer | None,
+    uploaded_storages: Mapping[str, str],
+) -> None:
+    if type(enabled) is not bool:
+        raise Live2DAssociatedRolloutError("rollout state enabled must be a bool")
+    if not enabled and current is not None:
+        raise Live2DAssociatedRolloutError(
+            "disabled rollout state must not retain a current pointer"
+        )
+    if current is None and uploaded_storages:
+        raise Live2DAssociatedRolloutError(
+            "rollout state without a current pointer must not retain upload receipts"
+        )
+
+
+def _validate_rollout_state_pointer_fields(
+    value: Mapping[str, object],
+    allowed: set[str],
+    enabled: object,
+    current: CurrentPointer | None,
+    uploaded_storages: Mapping[str, str],
+) -> None:
+    pointer_fields = allowed - {"schema_version", "namespace", "enabled", "current"}
+    if not any(field in value for field in pointer_fields):
+        return
+    expected = RolloutState(
+        enabled=enabled,  # type: ignore[arg-type]
+        current=current,
+        namespace=value.get("namespace", LIVE2D_ASSOCIATED_NAMESPACE),  # type: ignore[arg-type]
+        schema_version=value.get("schema_version", ROLLOUT_SCHEMA_VERSION),  # type: ignore[arg-type]
+        uploaded_storages=uploaded_storages,
+    ).to_dict()
+    for pointer_field in pointer_fields:
+        if pointer_field in value and value[pointer_field] != expected[pointer_field]:
+            raise Live2DAssociatedRolloutError(
+                f"rollout state {pointer_field} does not match current pointer"
+            )
 
 
 def validate_candidate_pointer(value: object) -> dict[str, object]:
@@ -997,10 +1017,7 @@ def _read_current(namespace: Path) -> tuple[CurrentPointer, Live2DIndex] | None:
     root_index = namespace / _INDEX_FILENAME
     if root_index.exists():
         _ensure_regular_target(root_index, "namespace index")
-        try:
-            root_index_data = load_live2d_index(root_index)
-        except Live2DAssociatedRolloutError:
-            raise
+        root_index_data = load_live2d_index(root_index)
         if canonical_index_bytes(root_index_data) != canonical_index_bytes(index):
             raise Live2DAssociatedRolloutError("namespace index.json does not match current")
     return current_pointer, index
@@ -1088,7 +1105,7 @@ def record_uploaded_storages(
             "associated rollout state does not match current while recording uploads"
         )
     receipts = dict(stored.uploaded_storages) if stored is not None else {}
-    receipts.update({key: candidate_id for key in normalized_keys})
+    receipts.update(dict.fromkeys(normalized_keys, candidate_id))
     updated = RolloutState(enabled=True, current=pointer, uploaded_storages=receipts)
     state.prepare_state_directory(target_state.parent)
     state.atomic_write_json(target_state, updated.to_dict(), validate_rollout_state)

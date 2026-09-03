@@ -80,7 +80,7 @@ DIAGNOSTIC_CODES = frozenset(
 )
 
 _TOKEN_RE = re.compile(r"^(?!_)\w[\w.+:-]*$", re.ASCII)
-_KEY_RE = re.compile(r"^(?!\d|_)\w+$", re.ASCII)
+_KEY_RE = re.compile(r"^(?![\d_])\w+$", re.ASCII)
 _SENSITIVE_TEXT_RE = re.compile(
     r"(?ix)"
     r"(?:\b[a-z][a-z0-9+.-]*://)"
