@@ -116,24 +116,26 @@ def test_model3_cardinality_and_json_errors(
     elif setup == "malformed":
         (output / "bad.model3.json").write_text("{not json", encoding="utf-8")
 
+    bundle = model_bundle()
     with pytest.raises(Live2DIndexAdapterError, match=message):
         build_model_output_record(
             output_root=tmp_path,
             output_path="model",
             model_output_id="model",
-            bundle=model_bundle(),
+            bundle=bundle,
             metadata_version=METADATA_VERSION,
         )
 
 
 def test_model_output_path_traversal_and_symlink_are_rejected(tmp_path: Path) -> None:
     write_model3(tmp_path / "model")
+    traversal_bundle = model_bundle()
     with pytest.raises(Live2DIndexAdapterError, match="relative POSIX path"):
         build_model_output_record(
             output_root=tmp_path,
             output_path="../model",
             model_output_id="model",
-            bundle=model_bundle(),
+            bundle=traversal_bundle,
             metadata_version=METADATA_VERSION,
         )
 
@@ -144,12 +146,13 @@ def test_model_output_path_traversal_and_symlink_are_rejected(tmp_path: Path) ->
         symlink.symlink_to(outside, target_is_directory=True)
     except OSError:
         pytest.skip("symlinks are unavailable")
+    symlink_bundle = model_bundle()
     with pytest.raises(Live2DIndexAdapterError, match="symlink"):
         build_model_output_record(
             output_root=tmp_path,
             output_path="linked-model",
             model_output_id="model",
-            bundle=model_bundle(),
+            bundle=symlink_bundle,
             metadata_version=METADATA_VERSION,
         )
 
@@ -226,6 +229,7 @@ def test_motion_output_validation(
             encoding="utf-8",
         )
 
+    bundle = motion_bundle()
     with pytest.raises(Live2DIndexAdapterError, match=message):
         build_shared_motion_set_record(
             output_root=tmp_path,
@@ -233,13 +237,14 @@ def test_motion_output_validation(
             motion_output_path="motion-files",
             facial_output_path="facial-files",
             motion_set_id="motion",
-            bundle=motion_bundle(),
+            bundle=bundle,
             metadata_version=METADATA_VERSION,
         )
 
 
 def test_motion_and_facial_outputs_must_be_separate(tmp_path: Path) -> None:
     write_motion_outputs(tmp_path)
+    bundle = motion_bundle()
     with pytest.raises(Live2DIndexAdapterError, match="physically separate"):
         build_shared_motion_set_record(
             output_root=tmp_path,
@@ -247,7 +252,7 @@ def test_motion_and_facial_outputs_must_be_separate(tmp_path: Path) -> None:
             motion_output_path="motion-files",
             facial_output_path="motion-files",
             motion_set_id="motion",
-            bundle=motion_bundle(),
+            bundle=bundle,
             metadata_version=METADATA_VERSION,
         )
 
@@ -261,6 +266,7 @@ def test_motion_clip_symlink_is_rejected_without_scanning_unlisted_files(tmp_pat
     except OSError:
         pytest.skip("symlinks are unavailable")
 
+    bundle = motion_bundle()
     with pytest.raises(Live2DIndexAdapterError, match="symlink"):
         build_shared_motion_set_record(
             output_root=tmp_path,
@@ -268,6 +274,6 @@ def test_motion_clip_symlink_is_rejected_without_scanning_unlisted_files(tmp_pat
             motion_output_path="motion-files",
             facial_output_path="facial-files",
             motion_set_id="motion",
-            bundle=motion_bundle(),
+            bundle=bundle,
             metadata_version=METADATA_VERSION,
         )

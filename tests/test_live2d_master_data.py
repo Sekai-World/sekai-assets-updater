@@ -167,35 +167,39 @@ def test_disagreeing_raw_asset_name_is_rejected(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
+    provider = LocalMasterDataProvider(tmp_path, "6.8.0.10")
     with pytest.raises(
         Live2DMasterDataError,
         match=r"costume2ds\[0\].*assetName.*live2dAssetbundleName",
     ):
-        LocalMasterDataProvider(tmp_path, "6.8.0.10").load_live2d_snapshot()
+        provider.load_live2d_snapshot()
 
 
 def test_missing_table_is_rejected(tmp_path: Path) -> None:
     write_tables(tmp_path)
     (tmp_path / "loginBonusLive2ds.json").unlink()
 
+    provider = LocalMasterDataProvider(tmp_path, "6.8.0.10")
     with pytest.raises(Live2DMasterDataFileError, match="loginBonusLive2ds.*missing"):
-        LocalMasterDataProvider(tmp_path, "6.8.0.10").load_live2d_snapshot()
+        provider.load_live2d_snapshot()
 
 
 def test_invalid_json_is_rejected(tmp_path: Path) -> None:
     write_tables(tmp_path)
     (tmp_path / "systemLive2ds.json").write_text("not json", encoding="utf-8")
 
+    provider = LocalMasterDataProvider(tmp_path, "6.8.0.10")
     with pytest.raises(Live2DMasterDataJSONError, match="systemLive2ds.*invalid JSON"):
-        LocalMasterDataProvider(tmp_path, "6.8.0.10").load_live2d_snapshot()
+        provider.load_live2d_snapshot()
 
 
 def test_non_array_table_root_is_rejected(tmp_path: Path) -> None:
     write_tables(tmp_path)
     (tmp_path / "bondsLive2ds.json").write_text("{}", encoding="utf-8")
 
+    provider = LocalMasterDataProvider(tmp_path, "6.8.0.10")
     with pytest.raises(Live2DMasterDataShapeError, match="bondsLive2ds.*root must be an array"):
-        LocalMasterDataProvider(tmp_path, "6.8.0.10").load_live2d_snapshot()
+        provider.load_live2d_snapshot()
 
 
 def test_missing_master_db_version_is_rejected(tmp_path: Path) -> None:

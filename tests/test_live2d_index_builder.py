@@ -229,12 +229,13 @@ def test_selection_inputs_must_be_sequences(
 
 def test_selection_items_must_use_the_explicit_selection_types() -> None:
     provider = CountingProvider(snapshot=empty_snapshot())
+    invalid_selection = object()
 
     with pytest.raises(Live2DIndexBuilderError, match=r"model_outputs\[0\]"):
         build_live2d_association_index(
             provider=provider,
             metadata_version=METADATA_VERSION,
-            model_outputs=[object()],  # type: ignore[list-item]
+            model_outputs=[invalid_selection],  # type: ignore[list-item]
             motion_sets=[],
         )
     assert provider.calls == 0
@@ -264,9 +265,10 @@ def test_provider_exception_is_not_hidden() -> None:
         def load_live2d_snapshot(self) -> Live2DMasterDataSnapshot:
             raise RuntimeError("provider failure")
 
+    provider = RaisingProvider()
     with pytest.raises(RuntimeError, match="provider failure"):
         build_live2d_association_index(
-            provider=RaisingProvider(),  # type: ignore[arg-type]
+            provider=provider,  # type: ignore[arg-type]
             metadata_version=METADATA_VERSION,
             model_outputs=[],
             motion_sets=[],

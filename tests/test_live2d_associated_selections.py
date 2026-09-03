@@ -343,15 +343,14 @@ def test_missing_master_data_is_mapped_to_associated_failure_policy(tmp_path: Pa
             skip_missing_sources=True,
         )
     )
+    call = dispatch.run_specialized_postprocess(
+        "live2d-associated",
+        config,
+        live2d_bundles=bundles,
+        asset_metadata_version="asset-v1",
+    )
     with pytest.raises(Live2DAssociatedRolloutError, match="index preparation"):
-        asyncio.run(
-            dispatch.run_specialized_postprocess(
-                "live2d-associated",
-                config,
-                live2d_bundles=bundles,
-                asset_metadata_version="asset-v1",
-            )
-        )
+        asyncio.run(call)
 
 
 def test_lifecycle_propagates_asset_metadata_version_to_associated_dispatch() -> None:

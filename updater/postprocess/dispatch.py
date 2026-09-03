@@ -68,6 +68,10 @@ from updater.workspace import get_bundle_cache_path
 
 logger = logging.getLogger("asset_updater")
 
+_BUILD_MOTION_DATA_FILENAME = "BuildMotionData.json"
+_MOTION_CLIP_SUFFIX = ".motion3.json"
+_OPTIONAL_LIVE2D_ASSOCIATED_LOG = "Skipping optional Live2D-associated post-processing: %s"
+
 
 async def _process_live2d(
     config,
@@ -229,53 +233,95 @@ def _manifest_motion_outputs_exist(selections, source_root: StdPath) -> bool:
     """Check whether every selected motion set is already materialized."""
 
     for selection in selections.motion_sets:
-        motion_bundle_directory = source_root / StdPath(str(selection.motion_bundle_output_path))
-        motion_directory = source_root / selection.motion_output_path
-        facial_directory = source_root / selection.facial_output_path
-        build_motion_data_path = motion_bundle_directory / "BuildMotionData.json"
-        if (
-            motion_bundle_directory.is_symlink()
-            or not motion_bundle_directory.is_dir()
-            or build_motion_data_path.is_symlink()
-            or not build_motion_data_path.is_file()
-        ):
+        if not _manifest_motion_set_outputs_exist(selection, source_root):
             return False
-        if (
-            motion_directory.is_symlink()
-            or not motion_directory.is_dir()
-            or facial_directory.is_symlink()
-            or not facial_directory.is_dir()
-        ):
-            return False
-
-        try:
-            build_motion_data = json.loads(build_motion_data_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return False
-        if not isinstance(build_motion_data, Mapping):
-            return False
-
-        for field_name, output_directory in (
-            ("motions", motion_directory),
-            ("expressions", facial_directory),
-        ):
-            clip_names = build_motion_data.get(field_name)
-            if not isinstance(clip_names, list):
-                return False
-            for clip_name in clip_names:
-                if (
-                    not isinstance(clip_name, str)
-                    or not clip_name
-                    or clip_name in {".", ".."}
-                    or "/" in clip_name
-                    or "\\" in clip_name
-                    or any(char.isspace() for char in clip_name)
-                ):
-                    return False
-                clip_path = output_directory / f"{clip_name}.motion3.json"
-                if clip_path.is_symlink() or not clip_path.is_file():
-                    return False
     return True
+
+
+def _manifest_motion_set_outputs_exist(selection, source_root: StdPath) -> bool:
+    motion_bundle_directory = source_root / StdPath(str(selection.motion_bundle_output_path))
+    motion_directory = source_root / selection.motion_output_path
+    facial_directory = source_root / selection.facial_output_path
+    build_motion_data_path = motion_bundle_directory / _BUILD_MOTION_DATA_FILENAME
+    if not _manifest_motion_directories_exist(
+        motion_bundle_directory,
+        build_motion_data_path,
+        motion_directory,
+        facial_directory,
+    ):
+        return False
+
+    build_motion_data = _load_manifest_motion_data(build_motion_data_path)
+    if not isinstance(build_motion_data, Mapping):
+        return False
+    return _manifest_motion_clips_exist(
+        build_motion_data,
+        motion_directory,
+        facial_directory,
+    )
+
+
+def _manifest_motion_directories_exist(
+    motion_bundle_directory: StdPath,
+    build_motion_data_path: StdPath,
+    motion_directory: StdPath,
+    facial_directory: StdPath,
+) -> bool:
+    return (
+        not motion_bundle_directory.is_symlink()
+        and motion_bundle_directory.is_dir()
+        and not build_motion_data_path.is_symlink()
+        and build_motion_data_path.is_file()
+        and not motion_directory.is_symlink()
+        and motion_directory.is_dir()
+        and not facial_directory.is_symlink()
+        and facial_directory.is_dir()
+    )
+
+
+def _load_manifest_motion_data(build_motion_data_path: StdPath):
+    try:
+        return json.loads(build_motion_data_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _manifest_motion_clips_exist(
+    build_motion_data: Mapping,
+    motion_directory: StdPath,
+    facial_directory: StdPath,
+) -> bool:
+    for field_name, output_directory in (
+        ("motions", motion_directory),
+        ("expressions", facial_directory),
+    ):
+        clip_names = build_motion_data.get(field_name)
+        if not isinstance(clip_names, list):
+            return False
+        if not _manifest_motion_clip_files_exist(clip_names, output_directory):
+            return False
+    return True
+
+
+def _manifest_motion_clip_files_exist(clip_names: list, output_directory: StdPath) -> bool:
+    for clip_name in clip_names:
+        if not _manifest_motion_clip_name_is_safe(clip_name):
+            return False
+        clip_path = output_directory / f"{clip_name}{_MOTION_CLIP_SUFFIX}"
+        if clip_path.is_symlink() or not clip_path.is_file():
+            return False
+    return True
+
+
+def _manifest_motion_clip_name_is_safe(clip_name) -> bool:
+    return (
+        isinstance(clip_name, str)
+        and bool(clip_name)
+        and clip_name not in {".", ".."}
+        and "/" not in clip_name
+        and "\\" not in clip_name
+        and not any(char.isspace() for char in clip_name)
+    )
 
 
 async def _ensure_manifest_motion_outputs(config, selections, source_root: StdPath) -> None:
@@ -402,22 +448,7 @@ def _log_associated_remote_divergence(
     )
 
 
-async def _process_live2d_associated(
-    config,
-    extracted_dir: StdPath,
-    *,
-    association_index: Live2DIndex | Mapping[str, object] | None = None,
-    association_index_path: StdPath | str | None = None,
-    association_output_root: StdPath | None = None,
-    association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
-    skip_missing_sources: bool = False,
-    motion_outputs_ready: bool = False,
-    live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
-    asset_metadata_version: str | None = None,
-) -> None:
-    """Build or load an explicit association index and publish it transactionally."""
-
+def _validated_associated_storages(config) -> list[dict]:
     storages = get_specialized_storage(config, "live2d-associated")
     if not storages:
         message = (
@@ -428,98 +459,247 @@ async def _process_live2d_associated(
         raise ValueError(message)
     for storage in storages:
         _validate_associated_storage(storage)
+    return storages
 
-    configured_path = getattr(config, "LIVE2D_ASSOCIATION_INDEX_PATH", None)
-    configured_selections_path = getattr(config, "LIVE2D_ASSOCIATION_SELECTIONS_PATH", None)
+
+def _resolve_associated_index_path(
+    association_index,
+    association_index_path,
+    configured_path,
+    configured_selections_path,
+):
     if association_index is not None and association_index_path is not None:
         raise ValueError(
             "live2d-associated accepts either association_index or association_index_path, not both"
         )
-    if association_index is None and association_index_path is None:
-        if configured_selections_path is None:
-            association_index_path = configured_path
     if (
         association_index is None
         and association_index_path is None
         and configured_selections_path is None
     ):
-        message = (
-            "live2d-associated requires an explicit validated association index or "
-            "association-selection manifest "
-            "(association_index, association_index_path, or configured selections path)"
-        )
-        if skip_missing_sources:
-            logger.warning("Skipping optional Live2D-associated post-processing: %s", message)
-            return
-        raise ValueError(message)
+        return configured_path
+    return association_index_path
 
-    source_root = association_output_root or extracted_dir / "live2d"
-    try:
-        if association_index is not None:
-            index = association_index
-        elif association_index_path is not None:
-            index = load_live2d_index(association_index_path)
-        else:
-            if live2d_bundles is None:
-                raise ValueError(
-                    "association-selection manifest requires current live2d_bundles metadata"
-                )
-            if not isinstance(asset_metadata_version, str) or not asset_metadata_version.strip():
-                raise ValueError(
-                    "association-selection manifest requires a non-empty asset metadata version"
-                )
-            selections = load_live2d_associated_selections(
-                configured_selections_path,
-                output_root=source_root,
-                live2d_bundles=live2d_bundles,
-            )
-            await _ensure_manifest_motion_outputs(config, selections, source_root)
-            index = build_live2d_association_index(
-                provider=selections.provider,
-                metadata_version=asset_metadata_version,
-                model_outputs=selections.model_outputs,
-                motion_sets=selections.motion_sets,
-            )
-        validated_index = validate_publishable_index(index)
-    except Live2DAssociatedRolloutError as exc:
-        if skip_missing_sources:
-            logger.warning("Skipping optional Live2D-associated post-processing: %s", exc)
-            return
-        raise
-    except Exception as exc:
-        mapped_error = Live2DAssociatedRolloutError(
-            f"associated Live2D index preparation failed: {exc}"
-        )
-        if skip_missing_sources:
-            logger.warning("Skipping optional Live2D-associated post-processing: %s", mapped_error)
-            return
-        raise mapped_error from exc
 
-    try:
-        namespace_root = association_namespace_root or live2d_associated_namespace_path(
-            extracted_dir
+def _associated_index_source_is_missing(
+    association_index,
+    association_index_path,
+    configured_selections_path,
+) -> bool:
+    return (
+        association_index is None
+        and association_index_path is None
+        and configured_selections_path is None
+    )
+
+
+async def _build_associated_index_from_manifest(
+    config,
+    source_root: StdPath,
+    configured_selections_path,
+    live2d_bundles,
+    asset_metadata_version,
+):
+    if live2d_bundles is None:
+        raise ValueError("association-selection manifest requires current live2d_bundles metadata")
+    if not isinstance(asset_metadata_version, str) or not asset_metadata_version.strip():
+        raise ValueError(
+            "association-selection manifest requires a non-empty asset metadata version"
         )
-        state_path = association_state_path or live2d_associated_state_path(config)
-        previous = load_current_pointer(namespace_root)
-        previous_state = load_rollout_state(state_path)
-        await _ensure_associated_motion_outputs(
+    selections = load_live2d_associated_selections(
+        configured_selections_path,
+        output_root=source_root,
+        live2d_bundles=live2d_bundles,
+    )
+    await _ensure_manifest_motion_outputs(config, selections, source_root)
+    return build_live2d_association_index(
+        provider=selections.provider,
+        metadata_version=asset_metadata_version,
+        model_outputs=selections.model_outputs,
+        motion_sets=selections.motion_sets,
+    )
+
+
+async def _load_associated_index(
+    config,
+    source_root: StdPath,
+    association_index,
+    association_index_path,
+    configured_selections_path,
+    live2d_bundles,
+    asset_metadata_version,
+):
+    if association_index is not None:
+        index = association_index
+    elif association_index_path is not None:
+        index = load_live2d_index(association_index_path)
+    else:
+        index = await _build_associated_index_from_manifest(
             config,
-            validated_index,
-            StdPath(str(source_root)),
-            motion_outputs_ready=motion_outputs_ready,
-        )
-        pointer = publish_live2d_associated_index(
-            validated_index,
             source_root,
-            namespace_root,
-            state_path=state_path,
+            configured_selections_path,
+            live2d_bundles,
+            asset_metadata_version,
+        )
+    return validate_publishable_index(index)
+
+
+async def _prepare_optional_associated_index(
+    config,
+    source_root: StdPath,
+    association_index,
+    association_index_path,
+    configured_selections_path,
+    live2d_bundles,
+    asset_metadata_version,
+):
+    try:
+        return await _load_associated_index(
+            config,
+            source_root,
+            association_index,
+            association_index_path,
+            configured_selections_path,
+            live2d_bundles,
+            asset_metadata_version,
+        )
+    except Exception as exc:
+        mapped_error = (
+            exc
+            if isinstance(exc, Live2DAssociatedRolloutError)
+            else Live2DAssociatedRolloutError(f"associated Live2D index preparation failed: {exc}")
+        )
+        logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, mapped_error)
+        return None
+
+
+class _AssociatedIndexErrorMapper:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exception_type, exception, _traceback) -> bool:
+        if (
+            exception is None
+            or not isinstance(exception, Exception)
+            or isinstance(exception, Live2DAssociatedRolloutError)
+        ):
+            return False
+        raise Live2DAssociatedRolloutError(
+            f"associated Live2D index preparation failed: {exception}"
+        ) from exception
+
+
+async def _prepare_forced_associated_index(
+    config,
+    source_root: StdPath,
+    association_index,
+    association_index_path,
+    configured_selections_path,
+    live2d_bundles,
+    asset_metadata_version,
+):
+    with _AssociatedIndexErrorMapper():
+        return await _load_associated_index(
+            config,
+            source_root,
+            association_index,
+            association_index_path,
+            configured_selections_path,
+            live2d_bundles,
+            asset_metadata_version,
+        )
+
+
+async def _prepare_associated_index(
+    config,
+    source_root: StdPath,
+    association_index,
+    association_index_path,
+    configured_selections_path,
+    live2d_bundles,
+    asset_metadata_version,
+    skip_missing_sources: bool,
+):
+    prepare = (
+        _prepare_optional_associated_index
+        if skip_missing_sources
+        else _prepare_forced_associated_index
+    )
+    return await prepare(
+        config,
+        source_root,
+        association_index,
+        association_index_path,
+        configured_selections_path,
+        live2d_bundles,
+        asset_metadata_version,
+    )
+
+
+async def _publish_associated_locally(
+    config,
+    source_root: StdPath,
+    extracted_dir: StdPath,
+    validated_index,
+    association_namespace_root,
+    association_state_path,
+    motion_outputs_ready: bool,
+):
+    namespace_root = association_namespace_root or live2d_associated_namespace_path(extracted_dir)
+    state_path = association_state_path or live2d_associated_state_path(config)
+    previous = load_current_pointer(namespace_root)
+    previous_state = load_rollout_state(state_path)
+    await _ensure_associated_motion_outputs(
+        config,
+        validated_index,
+        StdPath(str(source_root)),
+        motion_outputs_ready=motion_outputs_ready,
+    )
+    pointer = publish_live2d_associated_index(
+        validated_index,
+        source_root,
+        namespace_root,
+        state_path=state_path,
+    )
+    return namespace_root, state_path, previous, previous_state, pointer
+
+
+async def _prepare_associated_rollout(
+    config,
+    source_root: StdPath,
+    extracted_dir: StdPath,
+    validated_index,
+    association_namespace_root,
+    association_state_path,
+    motion_outputs_ready: bool,
+    skip_missing_sources: bool,
+):
+    if not skip_missing_sources:
+        return await _publish_associated_locally(
+            config,
+            source_root,
+            extracted_dir,
+            validated_index,
+            association_namespace_root,
+            association_state_path,
+            motion_outputs_ready,
+        )
+    try:
+        return await _publish_associated_locally(
+            config,
+            source_root,
+            extracted_dir,
+            validated_index,
+            association_namespace_root,
+            association_state_path,
+            motion_outputs_ready,
         )
     except Live2DAssociatedRolloutError as exc:
-        if skip_missing_sources:
-            logger.warning("Skipping optional Live2D-associated post-processing: %s", exc)
-            return
-        raise
+        logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, exc)
+        return None
 
+
+def _associated_storages_to_upload(storages, previous, previous_state, pointer):
     storage_entries = [(storage, storage_receipt_key(storage)) for storage in storages]
     receipts = (
         previous_state.uploaded_storages
@@ -528,19 +708,21 @@ async def _process_live2d_associated(
         and previous_state.current == previous
         else {}
     )
-    storages_to_upload = [
+    return [
         (storage, storage_key)
         for storage, storage_key in storage_entries
         if receipts.get(storage_key) != pointer.candidate_id
     ]
-    if not storages_to_upload:
-        logger.info(
-            "Live2D-associated candidate %s is unchanged and has upload receipts for all "
-            "configured storages; skipping remote upload",
-            pointer.candidate_id,
-        )
-        return
 
+
+async def _upload_associated_candidate_transaction(
+    config,
+    namespace_root,
+    state_path,
+    previous,
+    pointer,
+    storages_to_upload,
+):
     attempted_storage_keys: list[str] = []
     successful_storage_keys: list[str] = []
     try:
@@ -587,6 +769,98 @@ async def _process_live2d_associated(
                 successful_storage_keys,
             )
         raise
+
+
+async def _process_live2d_associated(
+    config,
+    extracted_dir: StdPath,
+    *,
+    association_index: Live2DIndex | Mapping[str, object] | None = None,
+    association_index_path: StdPath | str | None = None,
+    association_output_root: StdPath | None = None,
+    association_namespace_root: StdPath | None = None,
+    association_state_path: StdPath | None = None,
+    skip_missing_sources: bool = False,
+    motion_outputs_ready: bool = False,
+    live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
+    asset_metadata_version: str | None = None,
+) -> None:
+    """Build or load an explicit association index and publish it transactionally."""
+
+    storages = _validated_associated_storages(config)
+
+    configured_path = getattr(config, "LIVE2D_ASSOCIATION_INDEX_PATH", None)
+    configured_selections_path = getattr(config, "LIVE2D_ASSOCIATION_SELECTIONS_PATH", None)
+    association_index_path = _resolve_associated_index_path(
+        association_index,
+        association_index_path,
+        configured_path,
+        configured_selections_path,
+    )
+    if _associated_index_source_is_missing(
+        association_index,
+        association_index_path,
+        configured_selections_path,
+    ):
+        message = (
+            "live2d-associated requires an explicit validated association index or "
+            "association-selection manifest "
+            "(association_index, association_index_path, or configured selections path)"
+        )
+        if skip_missing_sources:
+            logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, message)
+            return
+        raise ValueError(message)
+
+    source_root = association_output_root or extracted_dir / "live2d"
+    validated_index = await _prepare_associated_index(
+        config,
+        source_root,
+        association_index,
+        association_index_path,
+        configured_selections_path,
+        live2d_bundles,
+        asset_metadata_version,
+        skip_missing_sources,
+    )
+    if validated_index is None:
+        return
+
+    rollout = await _prepare_associated_rollout(
+        config,
+        source_root,
+        extracted_dir,
+        validated_index,
+        association_namespace_root,
+        association_state_path,
+        motion_outputs_ready,
+        skip_missing_sources,
+    )
+    if rollout is None:
+        return
+    namespace_root, state_path, previous, previous_state, pointer = rollout
+    storages_to_upload = _associated_storages_to_upload(
+        storages,
+        previous,
+        previous_state,
+        pointer,
+    )
+    if not storages_to_upload:
+        logger.info(
+            "Live2D-associated candidate %s is unchanged and has upload receipts for all "
+            "configured storages; skipping remote upload",
+            pointer.candidate_id,
+        )
+        return
+
+    await _upload_associated_candidate_transaction(
+        config,
+        namespace_root,
+        state_path,
+        previous,
+        pointer,
+        storages_to_upload,
+    )
 
     logger.info(
         "Live2D-associated index published at %s/current.json -> %s",

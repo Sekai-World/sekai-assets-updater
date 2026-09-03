@@ -139,6 +139,67 @@ def _ensure_physical_containment(root: _Root, path: Path, field_name: str) -> Pa
     return resolved
 
 
+def _entry_mode(
+    path: Path,
+    relative: str,
+    field_name: str,
+    expected: str,
+) -> int:
+    try:
+        return os.lstat(path).st_mode
+    except FileNotFoundError as exc:
+        raise Live2DIndexAdapterError(
+            f"{field_name}: referenced {expected} is missing: {relative!r}"
+        ) from exc
+    except NotADirectoryError as exc:
+        raise Live2DIndexAdapterError(
+            f"{field_name}: path component is not a directory: {relative!r}"
+        ) from exc
+    except OSError as exc:
+        raise Live2DIndexAdapterError(
+            f"{field_name}: cannot inspect referenced path: {path}"
+        ) from exc
+
+
+def _inspect_entry_components(
+    root: _Root,
+    parts: tuple[str, ...],
+    field_name: str,
+    expected: str,
+) -> tuple[Path, int]:
+    relative = "/".join(parts)
+    current = root.lexical
+    final_mode: int | None = None
+    for index, part in enumerate(parts):
+        current /= part
+        mode = _entry_mode(current, relative, field_name, expected)
+        if stat.S_ISLNK(mode):
+            raise Live2DIndexAdapterError(
+                f"{field_name}: symlink path components are not allowed: {current}"
+            )
+        if index < len(parts) - 1 and not stat.S_ISDIR(mode):
+            raise Live2DIndexAdapterError(
+                f"{field_name}: path component is not a directory: {relative!r}"
+            )
+        final_mode = mode
+
+    assert final_mode is not None
+    return current, final_mode
+
+
+def _validate_entry_type(
+    mode: int,
+    parts: tuple[str, ...],
+    field_name: str,
+    expected: str,
+) -> None:
+    relative = "/".join(parts)
+    if expected == "directory" and not stat.S_ISDIR(mode):
+        raise Live2DIndexAdapterError(f"{field_name}: expected a regular directory: {relative!r}")
+    if expected == "file" and not stat.S_ISREG(mode):
+        raise Live2DIndexAdapterError(f"{field_name}: expected a regular file: {relative!r}")
+
+
 def _checked_entry(
     root: _Root,
     parts: tuple[str, ...],
@@ -150,43 +211,9 @@ def _checked_entry(
             raise Live2DIndexAdapterError(f"{field_name}: expected a path below the output root")
         return _CheckedEntry(root.lexical, root.resolved, parts)
 
-    current = root.lexical
-    final_mode: int | None = None
-    for index, part in enumerate(parts):
-        current /= part
-        try:
-            mode = os.lstat(current).st_mode
-        except FileNotFoundError as exc:
-            raise Live2DIndexAdapterError(
-                f"{field_name}: referenced {expected} is missing: {'/'.join(parts)!r}"
-            ) from exc
-        except NotADirectoryError as exc:
-            raise Live2DIndexAdapterError(
-                f"{field_name}: path component is not a directory: {'/'.join(parts)!r}"
-            ) from exc
-        except OSError as exc:
-            raise Live2DIndexAdapterError(
-                f"{field_name}: cannot inspect referenced path: {current}"
-            ) from exc
-
-        if stat.S_ISLNK(mode):
-            raise Live2DIndexAdapterError(
-                f"{field_name}: symlink path components are not allowed: {current}"
-            )
-        if index < len(parts) - 1 and not stat.S_ISDIR(mode):
-            raise Live2DIndexAdapterError(
-                f"{field_name}: path component is not a directory: {'/'.join(parts)!r}"
-            )
-        final_mode = mode
-
+    current, final_mode = _inspect_entry_components(root, parts, field_name, expected)
     resolved = _ensure_physical_containment(root, current, field_name)
-    assert final_mode is not None
-    if expected == "directory" and not stat.S_ISDIR(final_mode):
-        raise Live2DIndexAdapterError(
-            f"{field_name}: expected a regular directory: {'/'.join(parts)!r}"
-        )
-    if expected == "file" and not stat.S_ISREG(final_mode):
-        raise Live2DIndexAdapterError(f"{field_name}: expected a regular file: {'/'.join(parts)!r}")
+    _validate_entry_type(final_mode, parts, field_name, expected)
     return _CheckedEntry(current, resolved, parts)
 
 
@@ -235,6 +262,34 @@ def _checked_child_file(
     return _checked_entry(root, directory.relative_parts + filename_parts, field_name, "file")
 
 
+def _scan_directory_entries(directory: Path, field_name: str) -> list[os.DirEntry[str]]:
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entries, key=lambda entry: entry.name)
+    except OSError as exc:
+        raise Live2DIndexAdapterError(
+            f"{field_name}: cannot inspect output directory: {directory}"
+        ) from exc
+
+
+def _scan_entry_mode(root: _Root, path: Path, field_name: str) -> int:
+    try:
+        mode = os.lstat(path).st_mode
+    except OSError as exc:
+        raise Live2DIndexAdapterError(f"{field_name}: cannot inspect output path: {path}") from exc
+    if stat.S_ISLNK(mode):
+        raise Live2DIndexAdapterError(
+            f"{field_name}: symlink files and directories are not allowed: {path}"
+        )
+    _ensure_physical_containment(root, path, field_name)
+    return mode
+
+
+def _require_regular_model3_file(path: Path, mode: int, field_name: str) -> None:
+    if not stat.S_ISREG(mode):
+        raise Live2DIndexAdapterError(f"{field_name}: model3 output is not a regular file: {path}")
+
+
 def _scan_model3_files(
     root: _Root,
     output_directory: _CheckedEntry,
@@ -249,36 +304,16 @@ def _scan_model3_files(
 
     while pending:
         directory, directory_parts = pending.pop()
-        try:
-            with os.scandir(directory) as entries:
-                children = sorted(entries, key=lambda entry: entry.name)
-        except OSError as exc:
-            raise Live2DIndexAdapterError(
-                f"{field_name}: cannot inspect output directory: {directory}"
-            ) from exc
+        children = _scan_directory_entries(directory, field_name)
 
         for entry in children:
             child = directory / entry.name
             child_parts = directory_parts + (entry.name,)
-            try:
-                mode = os.lstat(child).st_mode
-            except OSError as exc:
-                raise Live2DIndexAdapterError(
-                    f"{field_name}: cannot inspect output path: {child}"
-                ) from exc
-            if stat.S_ISLNK(mode):
-                raise Live2DIndexAdapterError(
-                    f"{field_name}: symlink files and directories are not allowed: {child}"
-                )
-
-            _ensure_physical_containment(root, child, field_name)
+            mode = _scan_entry_mode(root, child, field_name)
             if stat.S_ISDIR(mode):
                 pending.append((child, child_parts))
             elif entry.name.endswith(".model3.json"):
-                if not stat.S_ISREG(mode):
-                    raise Live2DIndexAdapterError(
-                        f"{field_name}: model3 output is not a regular file: {child}"
-                    )
+                _require_regular_model3_file(child, mode, field_name)
                 found.append(child)
 
     return sorted(found, key=lambda path: path.as_posix())

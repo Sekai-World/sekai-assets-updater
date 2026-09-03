@@ -18,6 +18,8 @@ from typing import TypeAlias
 from updater import state
 from updater.live2d.contracts import (
     Live2DIndex,
+    ModelOutputRecord,
+    SharedMotionSetRecord,
     to_json_dict,
     validate_index,
 )
@@ -108,46 +110,55 @@ def _relative_parts(value: str, field_name: str) -> tuple[str, ...]:
     return parts
 
 
-def _checked_entry(
+def _entry_stat(
+    path: Path,
+    relative: str,
+    field_name: str,
+    expected: str,
+) -> os.stat_result:
+    try:
+        entry_stat = path.stat(follow_symlinks=False)
+    except FileNotFoundError as exc:
+        raise Live2DPublicationError(
+            f"{field_name}: referenced {expected} is missing: {relative!r}"
+        ) from exc
+    except NotADirectoryError as exc:
+        raise Live2DPublicationError(
+            f"{field_name}: path component is not a directory: {relative!r}"
+        ) from exc
+    except OSError as exc:
+        raise Live2DPublicationError(
+            f"{field_name}: cannot inspect referenced path {relative!r}: {exc}"
+        ) from exc
+
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise Live2DPublicationError(
+            f"{field_name}: symlink path components are not allowed: {relative!r}"
+        )
+    return entry_stat
+
+
+def _inspect_entry_components(
     root: _OutputRoot,
     parts: tuple[str, ...],
     field_name: str,
     expected: str,
-) -> _CheckedPath:
+) -> tuple[Path, os.stat_result | None]:
     relative = "/".join(parts)
     current = root.lexical
     final_stat: os.stat_result | None = None
-
     for index, part in enumerate(parts):
-        current = current / part
-        try:
-            entry_stat = current.stat(follow_symlinks=False)
-        except FileNotFoundError as exc:
-            raise Live2DPublicationError(
-                f"{field_name}: referenced {expected} is missing: {relative!r}"
-            ) from exc
-        except NotADirectoryError as exc:
-            raise Live2DPublicationError(
-                f"{field_name}: path component is not a directory: {relative!r}"
-            ) from exc
-        except OSError as exc:
-            raise Live2DPublicationError(
-                f"{field_name}: cannot inspect referenced path {relative!r}: {exc}"
-            ) from exc
-
-        if stat.S_ISLNK(entry_stat.st_mode):
-            raise Live2DPublicationError(
-                f"{field_name}: symlink path components are not allowed: {relative!r}"
-            )
+        current /= part
+        entry_stat = _entry_stat(current, relative, field_name, expected)
         if index < len(parts) - 1 and not stat.S_ISDIR(entry_stat.st_mode):
             raise Live2DPublicationError(
                 f"{field_name}: path component is not a directory: {relative!r}"
             )
         final_stat = entry_stat
+    return current, final_stat
 
-    # All components were lstat'ed above.  Resolving again gives a physical
-    # containment check for roots whose parent path contains a symlink and
-    # guards against a lexical path escaping the requested root.
+
+def _resolve_entry(root: _OutputRoot, current: Path, relative: str, field_name: str) -> Path:
     try:
         resolved = current.resolve(strict=True)
         resolved.relative_to(root.resolved)
@@ -159,12 +170,37 @@ def _checked_entry(
         raise Live2DPublicationError(
             f"{field_name}: cannot resolve referenced path {relative!r}: {exc}"
         ) from exc
+    return resolved
+
+
+def _validate_entry_type(
+    entry_stat: os.stat_result,
+    relative: str,
+    field_name: str,
+    expected: str,
+) -> None:
+    if expected == "directory" and not stat.S_ISDIR(entry_stat.st_mode):
+        raise Live2DPublicationError(f"{field_name}: expected a regular directory: {relative!r}")
+    if expected == "file" and not stat.S_ISREG(entry_stat.st_mode):
+        raise Live2DPublicationError(f"{field_name}: expected a regular file: {relative!r}")
+
+
+def _checked_entry(
+    root: _OutputRoot,
+    parts: tuple[str, ...],
+    field_name: str,
+    expected: str,
+) -> _CheckedPath:
+    relative = "/".join(parts)
+    current, final_stat = _inspect_entry_components(root, parts, field_name, expected)
+
+    # All components were lstat'ed above.  Resolving again gives a physical
+    # containment check for roots whose parent path contains a symlink and
+    # guards against a lexical path escaping the requested root.
+    resolved = _resolve_entry(root, current, relative, field_name)
 
     assert final_stat is not None  # ``parts`` is always non-empty after validation.
-    if expected == "directory" and not stat.S_ISDIR(final_stat.st_mode):
-        raise Live2DPublicationError(f"{field_name}: expected a regular directory: {relative!r}")
-    if expected == "file" and not stat.S_ISREG(final_stat.st_mode):
-        raise Live2DPublicationError(f"{field_name}: expected a regular file: {relative!r}")
+    _validate_entry_type(final_stat, relative, field_name, expected)
     return _CheckedPath(lexical=current, resolved=resolved)
 
 
@@ -213,10 +249,12 @@ def _validate_output_directory_aliases(
         seen[resolved] = directory
 
 
-def _validate_physical_references(index: Live2DIndex, root: _OutputRoot) -> set[Path]:
+def _collect_model_output_directories(
+    index: Live2DIndex,
+    root: _OutputRoot,
+) -> tuple[set[Path], list[_OutputDirectoryOwner]]:
     protected_directories: set[Path] = set()
     output_directories: list[_OutputDirectoryOwner] = []
-
     for record in index.model_outputs:
         field = f"model_outputs[{record.model_output_id!r}]"
         output_directory = _checked_directory(
@@ -232,7 +270,35 @@ def _validate_physical_references(index: Live2DIndex, root: _OutputRoot) -> set[
                 checked=output_directory,
             )
         )
+    return protected_directories, output_directories
 
+
+def _validate_motion_directory_pair(
+    field: str,
+    motion_directory: _CheckedPath,
+    facial_directory: _CheckedPath,
+) -> None:
+    try:
+        same_directory = os.path.samefile(
+            motion_directory.lexical,
+            facial_directory.lexical,
+        )
+    except OSError as exc:
+        raise Live2DPublicationError(
+            f"{field}: cannot compare motion and facial output directories: {exc}"
+        ) from exc
+    if same_directory:
+        raise Live2DPublicationError(
+            f"{field}: motion and facial output directories must be physically separate"
+        )
+
+
+def _collect_motion_output_directories(
+    index: Live2DIndex,
+    root: _OutputRoot,
+) -> tuple[set[Path], list[_OutputDirectoryOwner]]:
+    protected_directories: set[Path] = set()
+    output_directories: list[_OutputDirectoryOwner] = []
     for record in index.motion_sets:
         field = f"motion_sets[{record.motion_set_id!r}]"
         motion_directory = _checked_directory(
@@ -245,20 +311,7 @@ def _validate_physical_references(index: Live2DIndex, root: _OutputRoot) -> set[
             record.facial_output_path,
             f"{field}.facial_output_path",
         )
-        try:
-            same_directory = os.path.samefile(
-                motion_directory.lexical,
-                facial_directory.lexical,
-            )
-        except OSError as exc:
-            raise Live2DPublicationError(
-                f"{field}: cannot compare motion and facial output directories: {exc}"
-            ) from exc
-        if same_directory:
-            raise Live2DPublicationError(
-                f"{field}: motion and facial output directories must be physically separate"
-            )
-
+        _validate_motion_directory_pair(field, motion_directory, facial_directory)
         output_directories.extend(
             (
                 _OutputDirectoryOwner(
@@ -274,52 +327,89 @@ def _validate_physical_references(index: Live2DIndex, root: _OutputRoot) -> set[
             )
         )
         protected_directories.update((motion_directory.resolved, facial_directory.resolved))
+    return protected_directories, output_directories
 
-    _validate_output_directory_aliases(output_directories)
 
-    for record in index.model_outputs:
-        field = f"model_outputs[{record.model_output_id!r}]"
-        references = record.file_references
+def _validate_model_record_references(root: _OutputRoot, record: ModelOutputRecord) -> None:
+    field = f"model_outputs[{record.model_output_id!r}]"
+    references = record.file_references
+    _checked_file(
+        root,
+        record.output_path,
+        references.moc,
+        f"{field}.file_references.Moc",
+    )
+    for texture_index, texture in enumerate(references.textures):
         _checked_file(
             root,
             record.output_path,
-            references.moc,
-            f"{field}.file_references.Moc",
+            texture,
+            f"{field}.file_references.Textures[{texture_index}]",
         )
-        for texture_index, texture in enumerate(references.textures):
-            _checked_file(
-                root,
-                record.output_path,
-                texture,
-                f"{field}.file_references.Textures[{texture_index}]",
-            )
-        if references.physics is not None:
-            _checked_file(
-                root,
-                record.output_path,
-                references.physics,
-                f"{field}.file_references.Physics",
-            )
+    if references.physics is not None:
+        _checked_file(
+            root,
+            record.output_path,
+            references.physics,
+            f"{field}.file_references.Physics",
+        )
 
+
+def _validate_model_references(index: Live2DIndex, root: _OutputRoot) -> None:
+    for record in index.model_outputs:
+        _validate_model_record_references(root, record)
+
+
+def _validate_motion_clip_files(
+    root: _OutputRoot,
+    directory: str,
+    clip_names: tuple[str, ...],
+    field: str,
+    clip_kind: str,
+) -> None:
+    for clip_index, clip_name in enumerate(clip_names):
+        _checked_file(
+            root,
+            directory,
+            f"{clip_name}.motion3.json",
+            f"{field}.known_clips.{clip_kind}[{clip_index}]",
+        )
+
+
+def _validate_motion_record_references(
+    root: _OutputRoot,
+    record: SharedMotionSetRecord,
+) -> None:
+    field = f"motion_sets[{record.motion_set_id!r}]"
+    _validate_motion_clip_files(
+        root,
+        record.motion_output_path,
+        record.known_clips.motions,
+        field,
+        "motions",
+    )
+    _validate_motion_clip_files(
+        root,
+        record.facial_output_path,
+        record.known_clips.facials,
+        field,
+        "facials",
+    )
+
+
+def _validate_motion_references(index: Live2DIndex, root: _OutputRoot) -> None:
     for record in index.motion_sets:
-        field = f"motion_sets[{record.motion_set_id!r}]"
-        for clip_index, clip_name in enumerate(record.known_clips.motions):
-            _checked_file(
-                root,
-                record.motion_output_path,
-                f"{clip_name}.motion3.json",
-                f"{field}.known_clips.motions[{clip_index}]",
-            )
-        for clip_index, clip_name in enumerate(record.known_clips.facials):
-            # Facial clips are intentionally Motion3 files too.  The business
-            # field named ``expression`` is not an exp3 output reference.
-            _checked_file(
-                root,
-                record.facial_output_path,
-                f"{clip_name}.motion3.json",
-                f"{field}.known_clips.facials[{clip_index}]",
-            )
+        _validate_motion_record_references(root, record)
 
+
+def _validate_physical_references(index: Live2DIndex, root: _OutputRoot) -> set[Path]:
+    protected_directories, output_directories = _collect_model_output_directories(index, root)
+    motion_protected, motion_directories = _collect_motion_output_directories(index, root)
+    protected_directories.update(motion_protected)
+    output_directories.extend(motion_directories)
+    _validate_output_directory_aliases(output_directories)
+    _validate_model_references(index, root)
+    _validate_motion_references(index, root)
     return protected_directories
 
 

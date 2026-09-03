@@ -22,6 +22,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeAlias
@@ -53,6 +54,19 @@ _CANDIDATE_FILENAME = "candidate.json"
 _CURRENT_POINTER = _CURRENT_FILENAME
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CANDIDATE_POINTER_FIELDS = frozenset(
+    {
+        "schema_version",
+        "namespace",
+        "candidate_id",
+        "index_key",
+        "index_sha256",
+        "canonical_index_sha256",
+        "model_keys",
+        "motion_set_keys",
+        "output_checksums",
+    }
+)
 
 PathInput: TypeAlias = str | os.PathLike[str]
 IndexInput: TypeAlias = Live2DIndex | Mapping[str, object]
@@ -369,6 +383,25 @@ def _validate_relative_file_key(value: object, field_name: str) -> str:
     return value
 
 
+def _candidate_pointer_values(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        raise Live2DAssociatedRolloutError("candidate pointer must be an object")
+    unknown = sorted(set(value) - _CANDIDATE_POINTER_FIELDS)
+    if unknown:
+        raise Live2DAssociatedRolloutError(f"candidate pointer contains unknown fields: {unknown}")
+    return {
+        "candidate_id": value.get("candidate_id"),
+        "index_key": value.get("index_key"),
+        "index_sha256": value.get("index_sha256"),
+        "canonical_index_sha256": value.get("canonical_index_sha256"),
+        "model_keys": value.get("model_keys", {}),
+        "motion_set_keys": value.get("motion_set_keys", {}),
+        "output_checksums": value.get("output_checksums", {}),
+        "namespace": value.get("namespace", LIVE2D_ASSOCIATED_NAMESPACE),
+        "schema_version": value.get("schema_version", ROLLOUT_SCHEMA_VERSION),
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class CandidatePointer:
     """Integrity metadata stored beside one complete candidate index."""
@@ -422,35 +455,7 @@ class CandidatePointer:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> CandidatePointer:
-        if not isinstance(value, Mapping):
-            raise Live2DAssociatedRolloutError("candidate pointer must be an object")
-        allowed = {
-            "schema_version",
-            "namespace",
-            "candidate_id",
-            "index_key",
-            "index_sha256",
-            "canonical_index_sha256",
-            "model_keys",
-            "motion_set_keys",
-            "output_checksums",
-        }
-        unknown = sorted(set(value) - allowed)
-        if unknown:
-            raise Live2DAssociatedRolloutError(
-                f"candidate pointer contains unknown fields: {unknown}"
-            )
-        return cls(
-            candidate_id=value.get("candidate_id"),  # type: ignore[arg-type]
-            index_key=value.get("index_key"),  # type: ignore[arg-type]
-            index_sha256=value.get("index_sha256"),  # type: ignore[arg-type]
-            canonical_index_sha256=value.get("canonical_index_sha256"),  # type: ignore[arg-type]
-            model_keys=value.get("model_keys", {}),  # type: ignore[arg-type]
-            motion_set_keys=value.get("motion_set_keys", {}),  # type: ignore[arg-type]
-            output_checksums=value.get("output_checksums", {}),  # type: ignore[arg-type]
-            namespace=value.get("namespace", LIVE2D_ASSOCIATED_NAMESPACE),  # type: ignore[arg-type]
-            schema_version=value.get("schema_version", ROLLOUT_SCHEMA_VERSION),  # type: ignore[arg-type]
-        )
+        return cls(**_candidate_pointer_values(value))  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)
@@ -756,10 +761,8 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         if descriptor is not None:
             os.close(descriptor)
         if temporary is not None:
-            try:
+            with suppress(OSError):
                 temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def _atomic_write_contract(path: Path, index: Live2DIndex) -> None:
@@ -1075,7 +1078,9 @@ def record_uploaded_storages(
         raise Live2DAssociatedRolloutError(
             f"cannot record uploads for non-current candidate: {candidate_id}"
         )
-    normalized_keys = sorted({_validate_sha(key, "storage receipt key") for key in storage_keys})
+    normalized_keys = sorted(
+        dict.fromkeys(_validate_sha(key, "storage receipt key") for key in storage_keys)
+    )
     target_state = _state_target(state_path, namespace)
     stored = load_rollout_state(target_state)
     if stored is not None and stored.current is not None and stored.current != pointer:

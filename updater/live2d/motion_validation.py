@@ -14,9 +14,12 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 _UNAVAILABLE = object()
+_BUILD_MOTION_DATA_FILENAME = "BuildMotionData.json"
 _MOTION3_SUFFIX = ".motion3.json"
 _EXP3_SUFFIX = ".exp3.json"
 _VALID_CURVE_TARGETS = frozenset({"Model", "Parameter", "PartOpacity"})
+_SEGMENT_WIDTHS = {0: 3, 1: 7, 2: 3, 3: 3}
+_SEGMENT_POINT_DELTAS = {0: 1, 1: 3, 2: 1, 3: 1}
 _COUNT_FIELDS = (
     "CurveCount",
     "UserDataCount",
@@ -122,19 +125,19 @@ def validate_motion_output(
         )
         return _report(diagnostics, 0, 0)
 
-    manifest_path = root_path / "BuildMotionData.json"
+    manifest_path = root_path / _BUILD_MOTION_DATA_FILENAME
     manifest = _read_json_file(
         manifest_path,
-        "BuildMotionData.json",
+        _BUILD_MOTION_DATA_FILENAME,
         diagnostics,
         missing_code="build_motion_data_missing",
-        missing_message="BuildMotionData.json is missing.",
+        missing_message=f"{_BUILD_MOTION_DATA_FILENAME} is missing.",
         not_file_code="build_motion_data_not_file",
-        not_file_message="BuildMotionData.json is not a regular file.",
+        not_file_message=f"{_BUILD_MOTION_DATA_FILENAME} is not a regular file.",
         read_code="build_motion_data_unreadable",
-        read_message="BuildMotionData.json could not be read.",
+        read_message=f"{_BUILD_MOTION_DATA_FILENAME} could not be read.",
         invalid_code="build_motion_data_invalid_json",
-        invalid_message="BuildMotionData.json is not valid JSON.",
+        invalid_message=f"{_BUILD_MOTION_DATA_FILENAME} is not valid JSON.",
     )
     if manifest is _UNAVAILABLE:
         return _report(diagnostics, 0, 0)
@@ -142,8 +145,8 @@ def validate_motion_output(
         diagnostics.append(
             MotionDiagnostic(
                 "build_motion_data_not_object",
-                "BuildMotionData.json",
-                "BuildMotionData.json must contain a JSON object.",
+                _BUILD_MOTION_DATA_FILENAME,
+                f"{_BUILD_MOTION_DATA_FILENAME} must contain a JSON object.",
             )
         )
         return _report(diagnostics, 0, 0)
@@ -174,7 +177,6 @@ def validate_motion_output(
     )
 
     constant_facial_count, dynamic_facial_count = _validate_group_files(
-        root_path / "facial",
         "facial",
         facial_names,
         facial_available,
@@ -182,7 +184,6 @@ def validate_motion_output(
         diagnostics,
     )
     _validate_group_files(
-        root_path / "motion",
         "motion",
         motion_names,
         motion_available,
@@ -267,13 +268,13 @@ def _read_manifest_names(
     field: str,
     diagnostics: list[MotionDiagnostic],
 ) -> tuple[tuple[str, ...], int]:
-    path = "BuildMotionData.json"
+    path = _BUILD_MOTION_DATA_FILENAME
     if field not in manifest:
         diagnostics.append(
             MotionDiagnostic(
                 "manifest_field_missing",
                 path,
-                f"BuildMotionData.json is missing the {field} array.",
+                f"{_BUILD_MOTION_DATA_FILENAME} is missing the {field} array.",
             )
         )
         return (), 0
@@ -284,7 +285,7 @@ def _read_manifest_names(
             MotionDiagnostic(
                 "manifest_field_not_array",
                 path,
-                f"BuildMotionData.json field {field} must be an array.",
+                f"{_BUILD_MOTION_DATA_FILENAME} field {field} must be an array.",
             )
         )
         return (), 0
@@ -357,7 +358,7 @@ def _check_expected_count(
         diagnostics.append(
             MotionDiagnostic(
                 "expected_count_invalid",
-                "BuildMotionData.json",
+                _BUILD_MOTION_DATA_FILENAME,
                 f"Expected {group} count must be a non-negative integer.",
             )
         )
@@ -366,7 +367,7 @@ def _check_expected_count(
         diagnostics.append(
             MotionDiagnostic(
                 mismatch_code,
-                "BuildMotionData.json",
+                _BUILD_MOTION_DATA_FILENAME,
                 f"Expected {group} count does not match the manifest.",
             )
         )
@@ -420,72 +421,91 @@ def _inspect_group_directory(
     expected_files = {f"{name}{_MOTION3_SUFFIX}" for name in names}
     matching_files: dict[str, Path] = {}
     for entry in entries:
-        relative_entry = f"{group}/{entry.relative_to(directory).as_posix()}"
-        try:
-            is_directory = entry.is_dir()
-            is_file = entry.is_file()
-        except OSError:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "filesystem_entry_unreadable",
-                    relative_entry,
-                    "Output entry could not be inspected.",
-                )
-            )
-            continue
-
-        if is_directory:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "unexpected_directory",
-                    relative_entry,
-                    "Nested output directories are not allowed.",
-                )
-            )
-            continue
-        if not is_file:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "unexpected_filesystem_entry",
-                    relative_entry,
-                    "Output entry is not a regular file.",
-                )
-            )
-            continue
-
-        is_direct_entry = "/" not in entry.relative_to(directory).as_posix()
-        if is_direct_entry and entry.name in expected_files:
-            matching_files[entry.name] = entry
-        elif entry.name.casefold().endswith(_MOTION3_SUFFIX):
-            diagnostics.append(
-                MotionDiagnostic(
-                    "extra_motion3_file",
-                    relative_entry,
-                    f"Unlisted {group} motion3 file is present.",
-                )
-            )
-        elif entry.name.casefold().endswith(_EXP3_SUFFIX):
-            code = "facial_exp3_unsupported" if group == "facial" else "exp3_unsupported"
-            message = (
-                "Facial output must use .motion3.json; .exp3.json is not accepted."
-                if group == "facial"
-                else ".exp3.json is not a supported motion output."
-            )
-            diagnostics.append(MotionDiagnostic(code, relative_entry, message))
-        else:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "unexpected_extension",
-                    relative_entry,
-                    f"{group} output must use .motion3.json.",
-                )
-            )
+        _inspect_group_entry(
+            entry,
+            directory,
+            group,
+            expected_files,
+            matching_files,
+            diagnostics,
+        )
 
     return True, matching_files
 
 
-def _validate_group_files(
+def _inspect_group_entry(
+    entry: Path,
     directory: Path,
+    group: str,
+    expected_files: set[str],
+    matching_files: dict[str, Path],
+    diagnostics: list[MotionDiagnostic],
+) -> None:
+    relative_entry = f"{group}/{entry.relative_to(directory).as_posix()}"
+    try:
+        is_directory = entry.is_dir()
+        is_file = entry.is_file()
+    except OSError:
+        diagnostics.append(
+            MotionDiagnostic(
+                "filesystem_entry_unreadable",
+                relative_entry,
+                "Output entry could not be inspected.",
+            )
+        )
+        return
+
+    if is_directory:
+        diagnostics.append(
+            MotionDiagnostic(
+                "unexpected_directory",
+                relative_entry,
+                "Nested output directories are not allowed.",
+            )
+        )
+        return
+    if not is_file:
+        diagnostics.append(
+            MotionDiagnostic(
+                "unexpected_filesystem_entry",
+                relative_entry,
+                "Output entry is not a regular file.",
+            )
+        )
+        return
+
+    is_direct_entry = "/" not in entry.relative_to(directory).as_posix()
+    if is_direct_entry and entry.name in expected_files:
+        matching_files[entry.name] = entry
+        return
+    if entry.name.casefold().endswith(_MOTION3_SUFFIX):
+        diagnostics.append(
+            MotionDiagnostic(
+                "extra_motion3_file",
+                relative_entry,
+                f"Unlisted {group} motion3 file is present.",
+            )
+        )
+        return
+    if entry.name.casefold().endswith(_EXP3_SUFFIX):
+        code = "facial_exp3_unsupported" if group == "facial" else "exp3_unsupported"
+        message = (
+            "Facial output must use .motion3.json; .exp3.json is not accepted."
+            if group == "facial"
+            else ".exp3.json is not a supported motion output."
+        )
+        diagnostics.append(MotionDiagnostic(code, relative_entry, message))
+        return
+    diagnostics.append(
+        MotionDiagnostic(
+            "unexpected_extension",
+            relative_entry,
+            f"{group} output must use .motion3.json.",
+        )
+    )
+
+
+def _validate_group_files(
     group: str,
     names: tuple[str, ...],
     available: bool,
@@ -551,119 +571,14 @@ def _validate_motion3_document(
         )
         return None
 
-    version = document.get("Version", _UNAVAILABLE)
-    if version is _UNAVAILABLE:
-        diagnostics.append(
-            MotionDiagnostic("motion3_version_missing", relative_path, "Version is missing.")
-        )
-    elif type(version) is not int or version != 3:
-        diagnostics.append(
-            MotionDiagnostic("motion3_version_invalid", relative_path, "Version must be 3.")
-        )
-
-    meta = document.get("Meta", _UNAVAILABLE)
-    meta_counts: dict[str, int] = {}
-    if not isinstance(meta, dict):
-        diagnostics.append(
-            MotionDiagnostic("motion3_meta_invalid", relative_path, "Meta must be an object.")
-        )
-    else:
-        for field in ("Duration", "Fps"):
-            value = meta.get(field, _UNAVAILABLE)
-            if value is _UNAVAILABLE:
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_meta_field_missing", relative_path, f"Meta.{field} is missing."
-                    )
-                )
-            elif not _is_number(value):
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_meta_number_invalid",
-                        relative_path,
-                        f"Meta.{field} must be numeric.",
-                    )
-                )
-
-        for field in _COUNT_FIELDS:
-            value = meta.get(field, _UNAVAILABLE)
-            if value is _UNAVAILABLE:
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_meta_count_missing", relative_path, f"Meta.{field} is missing."
-                    )
-                )
-            elif not _is_count(value):
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_meta_count_invalid",
-                        relative_path,
-                        f"Meta.{field} must be a non-negative integer.",
-                    )
-                )
-            else:
-                meta_counts[field] = value
-
+    _validate_version(document.get("Version", _UNAVAILABLE), relative_path, diagnostics)
+    meta_counts = _validate_meta(document.get("Meta", _UNAVAILABLE), relative_path, diagnostics)
     curves_value = document.get("Curves", _UNAVAILABLE)
-    curve_summaries: list[_CurveSummary] = []
-    if not isinstance(curves_value, list):
-        diagnostics.append(
-            MotionDiagnostic("motion3_curves_invalid", relative_path, "Curves must be an array.")
-        )
-        curve_count: int | None = None
-    else:
-        curve_count = len(curves_value)
-        seen_ids: set[str] = set()
-        for index, curve in enumerate(curves_value):
-            summary = _validate_curve(curve, index, relative_path, diagnostics, seen_ids)
-            if summary is not None:
-                curve_summaries.append(summary)
-
+    curve_count, curve_summaries = _validate_curves(curves_value, relative_path, diagnostics)
     user_data_value = document.get("UserData", _UNAVAILABLE)
-    user_data_size = 0
-    user_data_valid = True
-    if not isinstance(user_data_value, list):
-        diagnostics.append(
-            MotionDiagnostic(
-                "motion3_user_data_invalid", relative_path, "UserData must be an array."
-            )
-        )
-        user_data_count: int | None = None
-    else:
-        user_data_count = len(user_data_value)
-        for index, item in enumerate(user_data_value):
-            if not isinstance(item, dict):
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_user_data_entry_invalid",
-                        relative_path,
-                        f"UserData[{index}] must be an object.",
-                    )
-                )
-                user_data_valid = False
-                continue
-            time = item.get("Time", _UNAVAILABLE)
-            value = item.get("Value", _UNAVAILABLE)
-            if not _is_number(time):
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_user_data_time_invalid",
-                        relative_path,
-                        f"UserData[{index}].Time must be numeric.",
-                    )
-                )
-                user_data_valid = False
-            if not isinstance(value, str):
-                diagnostics.append(
-                    MotionDiagnostic(
-                        "motion3_user_data_value_invalid",
-                        relative_path,
-                        f"UserData[{index}].Value must be a string.",
-                    )
-                )
-                user_data_valid = False
-            else:
-                user_data_size += len(value)
+    user_data_count, user_data_size, user_data_valid = _validate_user_data(
+        user_data_value, relative_path, diagnostics
+    )
 
     if "CurveCount" in meta_counts and curve_count is not None:
         _check_document_count(
@@ -713,6 +628,157 @@ def _validate_motion3_document(
         point_count=total_point_count,
         curve_is_constant=tuple(summary.is_constant for summary in curve_summaries),
     )
+
+
+def _validate_version(
+    version: object,
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> None:
+    if version is _UNAVAILABLE:
+        diagnostics.append(
+            MotionDiagnostic("motion3_version_missing", relative_path, "Version is missing.")
+        )
+    elif type(version) is not int or version != 3:
+        diagnostics.append(
+            MotionDiagnostic("motion3_version_invalid", relative_path, "Version must be 3.")
+        )
+
+
+def _validate_meta(
+    meta: object,
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> dict[str, int]:
+    if not isinstance(meta, dict):
+        diagnostics.append(
+            MotionDiagnostic("motion3_meta_invalid", relative_path, "Meta must be an object.")
+        )
+        return {}
+
+    _validate_meta_numbers(meta, relative_path, diagnostics)
+    return _validate_meta_counts(meta, relative_path, diagnostics)
+
+
+def _validate_meta_numbers(
+    meta: dict[str, Any],
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> None:
+    for field in ("Duration", "Fps"):
+        value = meta.get(field, _UNAVAILABLE)
+        if value is _UNAVAILABLE:
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_meta_field_missing", relative_path, f"Meta.{field} is missing."
+                )
+            )
+        elif not _is_number(value):
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_meta_number_invalid",
+                    relative_path,
+                    f"Meta.{field} must be numeric.",
+                )
+            )
+
+
+def _validate_meta_counts(
+    meta: dict[str, Any],
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> dict[str, int]:
+    meta_counts: dict[str, int] = {}
+    for field in _COUNT_FIELDS:
+        value = meta.get(field, _UNAVAILABLE)
+        if value is _UNAVAILABLE:
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_meta_count_missing", relative_path, f"Meta.{field} is missing."
+                )
+            )
+        elif not _is_count(value):
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_meta_count_invalid",
+                    relative_path,
+                    f"Meta.{field} must be a non-negative integer.",
+                )
+            )
+        else:
+            meta_counts[field] = value
+    return meta_counts
+
+
+def _validate_curves(
+    curves: object,
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> tuple[int | None, list[_CurveSummary]]:
+    if not isinstance(curves, list):
+        diagnostics.append(
+            MotionDiagnostic("motion3_curves_invalid", relative_path, "Curves must be an array.")
+        )
+        return None, []
+
+    summaries: list[_CurveSummary] = []
+    seen_ids: set[str] = set()
+    for index, curve in enumerate(curves):
+        summary = _validate_curve(curve, index, relative_path, diagnostics, seen_ids)
+        if summary is not None:
+            summaries.append(summary)
+    return len(curves), summaries
+
+
+def _validate_user_data(
+    user_data: object,
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> tuple[int | None, int, bool]:
+    if not isinstance(user_data, list):
+        diagnostics.append(
+            MotionDiagnostic(
+                "motion3_user_data_invalid", relative_path, "UserData must be an array."
+            )
+        )
+        return None, 0, True
+
+    user_data_size = 0
+    user_data_valid = True
+    for index, item in enumerate(user_data):
+        if not isinstance(item, dict):
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_user_data_entry_invalid",
+                    relative_path,
+                    f"UserData[{index}] must be an object.",
+                )
+            )
+            user_data_valid = False
+            continue
+        time = item.get("Time", _UNAVAILABLE)
+        value = item.get("Value", _UNAVAILABLE)
+        if not _is_number(time):
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_user_data_time_invalid",
+                    relative_path,
+                    f"UserData[{index}].Time must be numeric.",
+                )
+            )
+            user_data_valid = False
+        if not isinstance(value, str):
+            diagnostics.append(
+                MotionDiagnostic(
+                    "motion3_user_data_value_invalid",
+                    relative_path,
+                    f"UserData[{index}].Value must be a string.",
+                )
+            )
+            user_data_valid = False
+        else:
+            user_data_size += len(value)
+    return len(user_data), user_data_size, user_data_valid
 
 
 def _check_document_count(
@@ -767,14 +833,7 @@ def _validate_curve(
     else:
         seen_ids.add(curve_id)
 
-    if not isinstance(target, str) or not target.strip():
-        diagnostics.append(
-            MotionDiagnostic(
-                "motion3_curve_target_invalid", relative_path, f"Curves[{index}].Target is invalid."
-            )
-        )
-        valid = False
-    elif target not in _VALID_CURVE_TARGETS:
+    if not isinstance(target, str) or not target.strip() or target not in _VALID_CURVE_TARGETS:
         diagnostics.append(
             MotionDiagnostic(
                 "motion3_curve_target_invalid", relative_path, f"Curves[{index}].Target is invalid."
@@ -819,62 +878,76 @@ def _validate_segments(
     point_count = 1
     values: list[int | float] = [segments[1]]
     previous_time: int | float | None = None
-    widths = {0: 3, 1: 7, 2: 3, 3: 3}
-    point_deltas = {0: 1, 1: 3, 2: 1, 3: 1}
 
     while cursor < len(segments):
-        segment_type = segments[cursor]
-        if type(segment_type) is not int or segment_type not in widths:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "motion3_segments_invalid",
-                    relative_path,
-                    f"{prefix} contains an unsupported segment type.",
-                )
-            )
-            return None
-        width = widths[segment_type]
-        if cursor + width > len(segments):
-            diagnostics.append(
-                MotionDiagnostic(
-                    "motion3_segments_invalid",
-                    relative_path,
-                    f"{prefix} contains a truncated segment.",
-                )
-            )
+        segment = _read_segment(segments, cursor, previous_time, prefix, relative_path, diagnostics)
+        if segment is None:
             return None
 
-        payload = segments[cursor + 1 : cursor + width]
-        if not all(_is_number(value) for value in payload):
-            diagnostics.append(
-                MotionDiagnostic(
-                    "motion3_segments_invalid",
-                    relative_path,
-                    f"{prefix} contains a non-numeric segment value.",
-                )
-            )
-            return None
-
-        endpoint_time = payload[-2]
-        if previous_time is not None and endpoint_time < previous_time:
-            diagnostics.append(
-                MotionDiagnostic(
-                    "motion3_segments_invalid",
-                    relative_path,
-                    f"{prefix} times must be non-decreasing.",
-                )
-            )
-            return None
-        previous_time = endpoint_time
+        segment_type, width, payload, previous_time = segment
         if segment_type == 1:
             values.extend((payload[1], payload[3], payload[5]))
         else:
             values.append(payload[1])
         segment_count += 1
-        point_count += point_deltas[segment_type]
+        point_count += _SEGMENT_POINT_DELTAS[segment_type]
         cursor += width
 
     return _CurveSummary(segment_count, point_count, tuple(values))
+
+
+def _read_segment(
+    segments: list[Any],
+    cursor: int,
+    previous_time: int | float | None,
+    prefix: str,
+    relative_path: str,
+    diagnostics: list[MotionDiagnostic],
+) -> tuple[int, int, list[Any], int | float] | None:
+    segment_type = segments[cursor]
+    if type(segment_type) is not int or segment_type not in _SEGMENT_WIDTHS:
+        diagnostics.append(
+            MotionDiagnostic(
+                "motion3_segments_invalid",
+                relative_path,
+                f"{prefix} contains an unsupported segment type.",
+            )
+        )
+        return None
+
+    width = _SEGMENT_WIDTHS[segment_type]
+    if cursor + width > len(segments):
+        diagnostics.append(
+            MotionDiagnostic(
+                "motion3_segments_invalid",
+                relative_path,
+                f"{prefix} contains a truncated segment.",
+            )
+        )
+        return None
+
+    payload = segments[cursor + 1 : cursor + width]
+    if not all(_is_number(value) for value in payload):
+        diagnostics.append(
+            MotionDiagnostic(
+                "motion3_segments_invalid",
+                relative_path,
+                f"{prefix} contains a non-numeric segment value.",
+            )
+        )
+        return None
+
+    endpoint_time = payload[-2]
+    if previous_time is not None and endpoint_time < previous_time:
+        diagnostics.append(
+            MotionDiagnostic(
+                "motion3_segments_invalid",
+                relative_path,
+                f"{prefix} times must be non-decreasing.",
+            )
+        )
+        return None
+    return segment_type, width, payload, endpoint_time
 
 
 def _is_number(value: object) -> bool:

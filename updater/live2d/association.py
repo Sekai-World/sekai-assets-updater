@@ -48,7 +48,6 @@ _ROW_FIELDS = (
     "expression",
 )
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]*$")
-_V2_PREFIX_RE = re.compile(r"^(\d+)(.+)$")
 _MOTION_SUFFIX = "_motion_base"
 _BUSINESS_ROLE_RULE = (
     "characterId + motion + expression records character-level role use; "
@@ -72,6 +71,13 @@ class _PreparedTables:
         tuple[str, int | str], tuple[tuple[str, Mapping[str, object]], ...]
     ]
     diagnostics: tuple[Diagnostic, ...]
+
+
+@dataclass
+class _MotionGroup:
+    motion: SharedMotionSetRecord
+    kind: str
+    contexts: list[_CharacterContext]
 
 
 def _stable_json(value: object) -> str:
@@ -140,87 +146,144 @@ def _sanitize_row(table_name: str, row: object) -> Mapping[str, object] | None:
     return dict(evidence.source_row)
 
 
-def _prepare_tables(tables: Mapping[str, object]) -> _PreparedTables:
+def _validate_table_input(tables: Mapping[str, object]) -> None:
     if not isinstance(tables, Mapping):
         raise ValueError("tables must be a mapping of the six Live2D business tables")
     unknown = sorted(set(tables) - set(LIVE2D_TABLE_NAMES))
     if unknown:
         raise ValueError(f"unsupported Live2D business tables: {', '.join(unknown)}")
 
-    diagnostics: list[Diagnostic] = []
-    seen_diagnostics: set[str] = set()
-    prepared: dict[str, tuple[Mapping[str, object], ...]] = {}
-    for table_name in LIVE2D_TABLE_NAMES:
-        if table_name not in tables:
-            _append_diagnostic(
+
+def _append_malformed_row_diagnostic(
+    table_name: str,
+    raw_row: object,
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> None:
+    raw_mapping = raw_row if isinstance(raw_row, Mapping) else {}
+    _append_diagnostic(
+        diagnostics,
+        seen_diagnostics,
+        code=DiagnosticCode.LIVE2D_JOIN_MISSING,
+        severity=DiagnosticSeverity.ERROR,
+        message="Malformed sanitized business-table row was ignored",
+        path=f"tables/{table_name}",
+        details={
+            "reason": "malformed_row",
+            "row_id": _row_digest(raw_mapping),
+        },
+    )
+
+
+def _prepare_table_rows(
+    table_name: str,
+    tables: Mapping[str, object],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> tuple[Mapping[str, object], ...]:
+    if table_name not in tables:
+        _append_diagnostic(
+            diagnostics,
+            seen_diagnostics,
+            code=DiagnosticCode.LIVE2D_JOIN_MISSING,
+            severity=DiagnosticSeverity.ERROR,
+            message="Required Live2D business table is missing",
+            path=f"tables/{table_name}",
+            details={"reason": "missing_table"},
+        )
+        return ()
+
+    table_rows = tables[table_name]
+    if not isinstance(table_rows, (list, tuple)):
+        raise ValueError(f"tables.{table_name} must be a sequence of row mappings")
+
+    valid_rows: list[Mapping[str, object]] = []
+    for raw_row in table_rows:
+        sanitized = _sanitize_row(table_name, raw_row)
+        if sanitized is None:
+            _append_malformed_row_diagnostic(
+                table_name,
+                raw_row,
                 diagnostics,
                 seen_diagnostics,
-                code=DiagnosticCode.LIVE2D_JOIN_MISSING,
-                severity=DiagnosticSeverity.ERROR,
-                message="Required Live2D business table is missing",
-                path=f"tables/{table_name}",
-                details={"reason": "missing_table"},
             )
-            prepared[table_name] = ()
             continue
+        valid_rows.append(sanitized)
 
-        table_rows = tables[table_name]
-        if not isinstance(table_rows, (list, tuple)):
-            raise ValueError(f"tables.{table_name} must be a sequence of row mappings")
+    valid_rows.sort(key=_stable_json)
+    return tuple(valid_rows)
 
-        valid_rows: list[Mapping[str, object]] = []
-        for raw_row in table_rows:
-            sanitized = _sanitize_row(table_name, raw_row)
-            if sanitized is None:
-                raw_mapping = raw_row if isinstance(raw_row, Mapping) else {}
-                _append_diagnostic(
-                    diagnostics,
-                    seen_diagnostics,
-                    code=DiagnosticCode.LIVE2D_JOIN_MISSING,
-                    severity=DiagnosticSeverity.ERROR,
-                    message="Malformed sanitized business-table row was ignored",
-                    path=f"tables/{table_name}",
-                    details={
-                        "reason": "malformed_row",
-                        "row_id": _row_digest(raw_mapping),
-                    },
-                )
-                continue
-            valid_rows.append(sanitized)
 
-        valid_rows.sort(key=_stable_json)
-        prepared[table_name] = tuple(valid_rows)
+def _append_role_row(
+    table_name: str,
+    row: Mapping[str, object],
+    role_rows: dict[tuple[str, int | str], list[tuple[str, Mapping[str, object]]]],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> None:
+    if "motion" not in row and "expression" not in row:
+        return
 
+    character_id = _entity_id(row.get("characterId"))
+    motion_name = _string_value(row, "motion")
+    expression_name = _string_value(row, "expression")
+    if character_id is None or motion_name is None or expression_name is None:
+        _append_diagnostic(
+            diagnostics,
+            seen_diagnostics,
+            code=DiagnosticCode.LIVE2D_JOIN_MISSING,
+            severity=DiagnosticSeverity.ERROR,
+            message="Malformed character role-use row was ignored",
+            path=f"tables/{table_name}",
+            details={
+                "reason": "malformed_role_row",
+                "row_id": _row_digest(row),
+            },
+        )
+        return
+
+    key = _entity_key(character_id)
+    if key is not None:
+        role_rows.setdefault(key, []).append((table_name, row))
+
+
+def _prepare_role_rows(
+    prepared: Mapping[str, tuple[Mapping[str, object], ...]],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> Mapping[tuple[str, int | str], tuple[tuple[str, Mapping[str, object]], ...]]:
     role_rows: dict[tuple[str, int | str], list[tuple[str, Mapping[str, object]]]] = {}
     for table_name in LIVE2D_TABLE_NAMES:
         for row in prepared[table_name]:
-            if "motion" not in row and "expression" not in row:
-                continue
-            character_id = _entity_id(row.get("characterId"))
-            motion_name = _string_value(row, "motion")
-            expression_name = _string_value(row, "expression")
-            if character_id is None or motion_name is None or expression_name is None:
-                _append_diagnostic(
-                    diagnostics,
-                    seen_diagnostics,
-                    code=DiagnosticCode.LIVE2D_JOIN_MISSING,
-                    severity=DiagnosticSeverity.ERROR,
-                    message="Malformed character role-use row was ignored",
-                    path=f"tables/{table_name}",
-                    details={
-                        "reason": "malformed_role_row",
-                        "row_id": _row_digest(row),
-                    },
-                )
-                continue
-            key = _entity_key(character_id)
-            if key is not None:
-                role_rows.setdefault(key, []).append((table_name, row))
+            _append_role_row(
+                table_name,
+                row,
+                role_rows,
+                diagnostics,
+                seen_diagnostics,
+            )
 
-    indexed_roles = {
+    return {
         key: tuple(sorted(rows, key=lambda item: (item[0], _stable_json(item[1]))))
         for key, rows in role_rows.items()
     }
+
+
+def _prepare_tables(tables: Mapping[str, object]) -> _PreparedTables:
+    _validate_table_input(tables)
+
+    diagnostics: list[Diagnostic] = []
+    seen_diagnostics: set[str] = set()
+    prepared = {
+        table_name: _prepare_table_rows(
+            table_name,
+            tables,
+            diagnostics,
+            seen_diagnostics,
+        )
+        for table_name in LIVE2D_TABLE_NAMES
+    }
+    indexed_roles = _prepare_role_rows(prepared, diagnostics, seen_diagnostics)
     return _PreparedTables(prepared, indexed_roles, tuple(diagnostics))
 
 
@@ -286,19 +349,63 @@ def _model_leaf(model: ModelOutputRecord) -> str:
     return model.model_bundle.name.rsplit("/", 1)[-1]
 
 
+def _v2_prefix_parts(value: str) -> tuple[str, str] | None:
+    """Return the groups matched by the v2 naming prefix without backtracking."""
+
+    prefix_length = 0
+    while prefix_length < len(value) and value[prefix_length].isdecimal():
+        prefix_length += 1
+    if prefix_length == 0:
+        return None
+    if prefix_length == len(value):
+        prefix_length -= 1
+    if prefix_length == 0:
+        return None
+    tail = value[prefix_length:]
+    if "\n" in tail:
+        return None
+    return value[:prefix_length], tail
+
+
 def _model_variant_matches(model_leaf: str, asset_name: str) -> bool:
     if not model_leaf.startswith("v2_"):
         return False
-    match = _V2_PREFIX_RE.fullmatch(model_leaf[3:])
-    return bool(match and match.group(2).startswith(f"{asset_name}_"))
+    parts = _v2_prefix_parts(model_leaf[3:])
+    return bool(parts and parts[1].startswith(f"{asset_name}_"))
 
 
 def _motion_numeric_prefix(motion: SharedMotionSetRecord) -> str | None:
     leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
     if not leaf.startswith("v2_"):
         return None
-    match = _V2_PREFIX_RE.fullmatch(leaf[3:])
-    return match.group(1) if match else None
+    parts = _v2_prefix_parts(leaf[3:])
+    return parts[0] if parts else None
+
+
+def _motion_v2_parts(motion: SharedMotionSetRecord) -> tuple[str, str] | None:
+    leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
+    if not leaf.startswith("v2_"):
+        return None
+    return _v2_prefix_parts(leaf[3:])
+
+
+def _numeric_character_id(value: int | str | None) -> int | None:
+    if type(value) is int:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _motion_variant_kind(rest: str) -> str | None:
+    if rest == _MOTION_SUFFIX:
+        return "normal"
+    if not rest.endswith(_MOTION_SUFFIX) or not rest.startswith("_"):
+        return None
+    variant_tokens = rest[1 : -len(_MOTION_SUFFIX)].split("_")
+    if "back" in variant_tokens or "still" in variant_tokens:
+        return "protected"
+    return "variant"
 
 
 def _motion_match_kind(
@@ -308,32 +415,18 @@ def _motion_match_kind(
     asset_name = _string_value(context.row, "assetName")
     if asset_name is None:
         return None
-    leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
-    if not leaf.startswith("v2_"):
+    parts = _motion_v2_parts(motion)
+    if parts is None:
         return None
-    prefix_match = _V2_PREFIX_RE.fullmatch(leaf[3:])
-    if not prefix_match:
-        return None
-    numeric_prefix, tail = prefix_match.groups()
+    numeric_prefix, tail = parts
     if not tail.startswith(f"{asset_name}_"):
         return None
-    expected_character_id: int | None = None
-    if type(context.character_id) is int:
-        expected_character_id = context.character_id
-    elif isinstance(context.character_id, str) and context.character_id.isdigit():
-        expected_character_id = int(context.character_id)
+    expected_character_id = _numeric_character_id(context.character_id)
     if expected_character_id is not None and int(numeric_prefix) != expected_character_id:
         return "character_id_mismatch" if context.exact_join else None
 
     rest = tail[len(asset_name) :]
-    if rest == _MOTION_SUFFIX:
-        return "normal"
-    if not rest.endswith(_MOTION_SUFFIX) or not rest.startswith("_"):
-        return None
-    variant_tokens = rest[1 : -len(_MOTION_SUFFIX)].split("_")
-    if "back" in variant_tokens or "still" in variant_tokens:
-        return "protected"
-    return "variant"
+    return _motion_variant_kind(rest)
 
 
 def _context_key(context: _CharacterContext) -> str:
@@ -427,42 +520,42 @@ def _role_evidence(
     ]
 
 
-def _model_contexts(
-    model: ModelOutputRecord,
+def _matching_costume_rows(
+    model_leaf: str,
     prepared: _PreparedTables,
-    diagnostics: list[Diagnostic],
-    seen_diagnostics: set[str],
-) -> tuple[
-    int | str | None,
-    int | str | None,
-    tuple[_CharacterContext, ...],
-    tuple[CandidateEvidence, ...],
-]:
-    model_path = f"models/{model.model_output_id}"
-    model_leaf = _model_leaf(model)
+    model_bundle_name: str,
+) -> list[Mapping[str, object]]:
     costume_rows = prepared.rows["costume2ds"]
-    character_rows = prepared.rows["character2ds"]
     matching_costumes = [
         row
         for row in costume_rows
         if row.get("assetName") == model_leaf
-        or row.get("bundleName") in {model.model_bundle.name, model_leaf}
+        or row.get("bundleName") in {model_bundle_name, model_leaf}
     ]
     matching_costumes.sort(key=_stable_json)
+    return matching_costumes
 
-    join_ambiguous = len(matching_costumes) > 1
-    if join_ambiguous:
-        row_character2d_ids = [_entity_id(row.get("character2dId")) for row in matching_costumes]
-        valid_character2d_ids = [
-            character2d_id for character2d_id in row_character2d_ids if character2d_id is not None
-        ]
-        duplicate_reason = (
-            "duplicate_character2d_id"
-            if len(valid_character2d_ids) == len(row_character2d_ids)
-            and len({_entity_key(value) for value in valid_character2d_ids})
-            < len(valid_character2d_ids)
-            else "duplicate_costume_match"
-        )
+
+def _costume_duplicate_reason(matching_costumes: list[Mapping[str, object]]) -> str:
+    row_character2d_ids = [_entity_id(row.get("character2dId")) for row in matching_costumes]
+    valid_character2d_ids = [
+        character2d_id for character2d_id in row_character2d_ids if character2d_id is not None
+    ]
+    if len(valid_character2d_ids) == len(row_character2d_ids) and len(
+        {_entity_key(value) for value in valid_character2d_ids}
+    ) < len(valid_character2d_ids):
+        return "duplicate_character2d_id"
+    return "duplicate_costume_match"
+
+
+def _diagnose_costume_matches(
+    model_path: str,
+    bundle_leaf: str,
+    matching_costumes: list[Mapping[str, object]],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> bool:
+    if len(matching_costumes) > 1:
         _append_diagnostic(
             diagnostics,
             seen_diagnostics,
@@ -470,9 +563,13 @@ def _model_contexts(
             severity=DiagnosticSeverity.ERROR,
             message="Multiple costume2ds rows match the model Bundle",
             path=model_path,
-            details={"match_count": len(matching_costumes), "reason": duplicate_reason},
+            details={
+                "match_count": len(matching_costumes),
+                "reason": _costume_duplicate_reason(matching_costumes),
+            },
         )
-    elif not matching_costumes:
+        return True
+    if not matching_costumes:
         _append_diagnostic(
             diagnostics,
             seen_diagnostics,
@@ -480,9 +577,17 @@ def _model_contexts(
             severity=DiagnosticSeverity.ERROR,
             message="No exact costume2ds row matches the model Bundle leaf",
             path=model_path,
-            details={"bundle_leaf": model_leaf},
+            details={"bundle_leaf": bundle_leaf},
         )
+    return False
 
+
+def _costume_character2d_ids(
+    model_path: str,
+    matching_costumes: list[Mapping[str, object]],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> list[int | str]:
     row_character2d_ids = [_entity_id(row.get("character2dId")) for row in matching_costumes]
     invalid_character2d_rows = sum(character2d_id is None for character2d_id in row_character2d_ids)
     costume_ids = [
@@ -502,93 +607,180 @@ def _model_contexts(
                 "invalid_row_count": invalid_character2d_rows,
             },
         )
+    return costume_ids
 
-    contexts: list[_CharacterContext] = []
-    joined_character_rows: list[Mapping[str, object]] = []
-    association_character2d_id: int | str | None = None
+
+def _join_character_rows(
+    character2d_id: int | str,
+    character_rows: tuple[Mapping[str, object], ...],
+    *,
+    model_path: str,
+    can_associate_character: bool,
+    join_ambiguous: bool,
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> tuple[
+    list[_CharacterContext],
+    list[Mapping[str, object]],
+    bool,
+    int | str | None,
+]:
+    matches = [row for row in character_rows if _same_entity(row.get("id"), character2d_id)]
+    matches.sort(key=_stable_json)
+    if not matches:
+        _append_diagnostic(
+            diagnostics,
+            seen_diagnostics,
+            code=DiagnosticCode.LIVE2D_JOIN_MISSING,
+            severity=DiagnosticSeverity.ERROR,
+            message="No character2ds row satisfies the exact character2dId join",
+            path=model_path,
+            details={"character2d_id": character2d_id},
+        )
+    elif len(matches) > 1:
+        join_ambiguous = True
+        _append_diagnostic(
+            diagnostics,
+            seen_diagnostics,
+            code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
+            severity=DiagnosticSeverity.ERROR,
+            message="Multiple character2ds rows satisfy the exact character2dId join",
+            path=model_path,
+            details={"character2d_id": character2d_id, "match_count": len(matches)},
+        )
+
     association_character_id: int | str | None = None
-
-    if len(matching_costumes) == 1 and len(costume_ids) == 1:
-        association_character2d_id = costume_ids[0]
-    for character2d_id in costume_ids:
-        matches = [row for row in character_rows if _same_entity(row.get("id"), character2d_id)]
-        matches.sort(key=_stable_json)
-        joined_character_rows.extend(matches)
-        if not matches:
+    if len(matches) == 1:
+        character_id = _entity_id(matches[0].get("characterId"))
+        if character_id is None:
             _append_diagnostic(
                 diagnostics,
                 seen_diagnostics,
                 code=DiagnosticCode.LIVE2D_JOIN_MISSING,
                 severity=DiagnosticSeverity.ERROR,
-                message="No character2ds row satisfies the exact character2dId join",
+                message="Joined character2ds row has no valid characterId",
                 path=model_path,
                 details={"character2d_id": character2d_id},
             )
-        elif len(matches) > 1:
-            join_ambiguous = True
-            _append_diagnostic(
-                diagnostics,
-                seen_diagnostics,
-                code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
-                severity=DiagnosticSeverity.ERROR,
-                message="Multiple character2ds rows satisfy the exact character2dId join",
-                path=model_path,
-                details={"character2d_id": character2d_id, "match_count": len(matches)},
+        elif can_associate_character:
+            association_character_id = character_id
+
+    contexts: list[_CharacterContext] = []
+    for row in matches:
+        character_id = _entity_id(row.get("characterId"))
+        if _string_value(row, "assetName") is None:
+            continue
+        contexts.append(
+            _CharacterContext(
+                row=row,
+                character2d_id=character2d_id,
+                character_id=character_id,
+                exact_join=(
+                    can_associate_character and len(matches) == 1 and character_id is not None
+                ),
+                join_ambiguous=join_ambiguous,
             )
-        if len(matches) == 1:
-            character_id = _entity_id(matches[0].get("characterId"))
-            if character_id is None:
-                _append_diagnostic(
-                    diagnostics,
-                    seen_diagnostics,
-                    code=DiagnosticCode.LIVE2D_JOIN_MISSING,
-                    severity=DiagnosticSeverity.ERROR,
-                    message="Joined character2ds row has no valid characterId",
-                    path=model_path,
-                    details={"character2d_id": character2d_id},
-                )
-            elif len(matching_costumes) == 1 and len(costume_ids) == 1:
-                association_character_id = character_id
-        for row in matches:
-            character_id = _entity_id(row.get("characterId"))
-            if _string_value(row, "assetName") is not None:
-                contexts.append(
-                    _CharacterContext(
-                        row=row,
-                        character2d_id=character2d_id,
-                        character_id=character_id,
-                        exact_join=(
-                            len(matching_costumes) == 1
-                            and len(costume_ids) == 1
-                            and len(matches) == 1
-                            and character_id is not None
-                        ),
-                        join_ambiguous=join_ambiguous,
-                    )
-                )
+        )
+    return contexts, matches, join_ambiguous, association_character_id
+
+
+def _fallback_context(
+    model_leaf: str,
+    row: Mapping[str, object],
+    join_ambiguous: bool,
+) -> _CharacterContext | None:
+    asset_name = _string_value(row, "assetName")
+    if asset_name is None or not _model_variant_matches(model_leaf, asset_name):
+        return None
+    return _CharacterContext(
+        row=row,
+        character2d_id=_entity_id(row.get("id")),
+        character_id=_entity_id(row.get("characterId")),
+        exact_join=False,
+        join_ambiguous=join_ambiguous,
+    )
+
+
+def _fallback_contexts(
+    model_leaf: str,
+    character_rows: tuple[Mapping[str, object], ...],
+    join_ambiguous: bool,
+) -> list[_CharacterContext]:
+    contexts: list[_CharacterContext] = []
+    for row in character_rows:
+        context = _fallback_context(model_leaf, row, join_ambiguous)
+        if context is not None:
+            contexts.append(context)
+    return contexts
+
+
+def _unique_contexts(contexts: list[_CharacterContext]) -> tuple[_CharacterContext, ...]:
+    unique_contexts: dict[str, _CharacterContext] = {}
+    for context in contexts:
+        unique_contexts[_context_key(context)] = context
+    return tuple(sorted(unique_contexts.values(), key=_context_key))
+
+
+def _model_contexts(
+    model: ModelOutputRecord,
+    prepared: _PreparedTables,
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> tuple[
+    int | str | None,
+    int | str | None,
+    tuple[_CharacterContext, ...],
+    tuple[CandidateEvidence, ...],
+]:
+    model_path = f"models/{model.model_output_id}"
+    model_leaf = _model_leaf(model)
+    character_rows = prepared.rows["character2ds"]
+    matching_costumes = _matching_costume_rows(
+        model_leaf,
+        prepared,
+        model.model_bundle.name,
+    )
+    join_ambiguous = _diagnose_costume_matches(
+        model_path,
+        model_leaf,
+        matching_costumes,
+        diagnostics,
+        seen_diagnostics,
+    )
+    costume_ids = _costume_character2d_ids(
+        model_path,
+        matching_costumes,
+        diagnostics,
+        seen_diagnostics,
+    )
+
+    can_associate_character = len(matching_costumes) == 1 and len(costume_ids) == 1
+    association_character2d_id = costume_ids[0] if can_associate_character else None
+    association_character_id: int | str | None = None
+    contexts: list[_CharacterContext] = []
+    joined_character_rows: list[Mapping[str, object]] = []
+    for character2d_id in costume_ids:
+        joined_contexts, joined_rows, join_ambiguous, joined_character_id = _join_character_rows(
+            character2d_id,
+            character_rows,
+            model_path=model_path,
+            can_associate_character=can_associate_character,
+            join_ambiguous=join_ambiguous,
+            diagnostics=diagnostics,
+            seen_diagnostics=seen_diagnostics,
+        )
+        contexts.extend(joined_contexts)
+        joined_character_rows.extend(joined_rows)
+        if joined_character_id is not None:
+            association_character_id = joined_character_id
 
     # A missing/ambiguous costume join may still have useful character-level
     # naming evidence.  This fallback is deliberately candidate-only and never
     # fills the association's Character2D or character identifiers.
     if not contexts or join_ambiguous or not matching_costumes:
-        for row in character_rows:
-            asset_name = _string_value(row, "assetName")
-            if asset_name is None or not _model_variant_matches(model_leaf, asset_name):
-                continue
-            contexts.append(
-                _CharacterContext(
-                    row=row,
-                    character2d_id=_entity_id(row.get("id")),
-                    character_id=_entity_id(row.get("characterId")),
-                    exact_join=False,
-                    join_ambiguous=join_ambiguous,
-                )
-            )
+        contexts.extend(_fallback_contexts(model_leaf, character_rows, join_ambiguous))
 
-    unique_contexts: dict[str, _CharacterContext] = {}
-    for context in contexts:
-        unique_contexts[_context_key(context)] = context
-    contexts = sorted(unique_contexts.values(), key=_context_key)
+    contexts = list(_unique_contexts(contexts))
 
     join_evidence = _join_evidence(matching_costumes, joined_character_rows)
     return (
@@ -596,6 +788,177 @@ def _model_contexts(
         association_character_id,
         tuple(contexts),
         tuple(join_evidence),
+    )
+
+
+def _append_prefix_mismatch_diagnostic(
+    model_path: str,
+    motion: SharedMotionSetRecord,
+    context: _CharacterContext,
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> None:
+    _append_diagnostic(
+        diagnostics,
+        seen_diagnostics,
+        code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
+        severity=DiagnosticSeverity.WARNING,
+        message="Joined characterId disagrees with the motion Bundle numeric prefix",
+        path=model_path,
+        details={
+            "motion_set_id": motion.motion_set_id,
+            "character_id": context.character_id,
+            "bundle_prefix": _motion_numeric_prefix(motion),
+            "reason": "character_id_prefix_mismatch",
+        },
+    )
+
+
+def _collect_motion_groups(
+    model_path: str,
+    contexts: tuple[_CharacterContext, ...],
+    motion_sets: tuple[SharedMotionSetRecord, ...],
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> dict[str, _MotionGroup]:
+    grouped: dict[str, _MotionGroup] = {}
+    for context in contexts:
+        for motion in motion_sets:
+            match_kind = _motion_match_kind(motion, context)
+            if match_kind == "character_id_mismatch":
+                _append_prefix_mismatch_diagnostic(
+                    model_path,
+                    motion,
+                    context,
+                    diagnostics,
+                    seen_diagnostics,
+                )
+                continue
+            if match_kind is None:
+                continue
+            group = grouped.get(motion.motion_set_id)
+            if group is None:
+                group = _MotionGroup(motion, match_kind, [])
+                grouped[motion.motion_set_id] = group
+            elif match_kind != "normal":
+                group.kind = match_kind
+            group.contexts.append(context)
+    return grouped
+
+
+def _naming_rule(match_kind: str, context: _CharacterContext) -> str:
+    if match_kind == "protected":
+        return (
+            "back/still motion Bundle variants remain ambiguous and are protected "
+            "from automatic character attribution"
+        )
+    if match_kind == "variant":
+        return (
+            "non-base motion Bundle naming supplies candidate evidence only and "
+            "does not verify a model-variant relation"
+        )
+    if context.exact_join and not context.join_ambiguous:
+        return (
+            "character2ds.assetName matches the exact character segment of the "
+            "v2_* motion Bundle name; this is a derived candidate, not a direct "
+            "model-variant relation"
+        )
+    return (
+        "model/character naming supplies candidate evidence only; no exact "
+        "costume2ds.character2dId -> character2ds.id join verifies this model variant"
+    )
+
+
+def _candidate_evidence(
+    group: _MotionGroup,
+    group_contexts: list[_CharacterContext],
+    join_evidence: tuple[CandidateEvidence, ...],
+    prepared: _PreparedTables,
+) -> list[CandidateEvidence]:
+    evidence: list[CandidateEvidence] = list(join_evidence)
+    motion_leaf = group.motion.motion_bundle.name.rsplit("/", 1)[-1]
+    for context in group_contexts:
+        asset_name = _string_value(context.row, "assetName") or ""
+        evidence.append(
+            _evidence(
+                source="naming",
+                source_table="character2ds",
+                source_row=context.row,
+                rule=_naming_rule(group.kind, context),
+                observed=asset_name,
+                expected=motion_leaf,
+            )
+        )
+        evidence.extend(_role_evidence(context, prepared))
+
+    evidence.append(
+        _evidence(
+            source="bundle_metadata",
+            rule="Candidate references the supplied SharedMotionSetRecord Bundle identity",
+            source_table=None,
+            source_row={"bundleName": group.motion.motion_bundle.name},
+            observed=group.motion.motion_set_id,
+        )
+    )
+    return _unique_evidence(evidence)
+
+
+def _candidate_is_exact(
+    match_kind: str,
+    group_contexts: list[_CharacterContext],
+) -> bool:
+    return (
+        match_kind == "normal"
+        and len(group_contexts) == 1
+        and group_contexts[0].exact_join
+        and not group_contexts[0].join_ambiguous
+    )
+
+
+def _candidate_is_ambiguous(
+    match_kind: str,
+    group_contexts: list[_CharacterContext],
+) -> bool:
+    return (
+        match_kind != "normal"
+        or len(group_contexts) > 1
+        or any(context.join_ambiguous for context in group_contexts)
+    )
+
+
+def _build_motion_candidate(
+    model_path: str,
+    motion_set_id: str,
+    group: _MotionGroup,
+    join_evidence: tuple[CandidateEvidence, ...],
+    prepared: _PreparedTables,
+    diagnostics: list[Diagnostic],
+    seen_diagnostics: set[str],
+) -> MotionSetCandidate:
+    group_contexts = list(_unique_contexts(group.contexts))
+    evidence = _candidate_evidence(group, group_contexts, join_evidence, prepared)
+    status = (
+        CandidateStatus.DERIVED.value
+        if _candidate_is_exact(group.kind, group_contexts)
+        else CandidateStatus.AMBIGUOUS.value
+    )
+    if _candidate_is_ambiguous(group.kind, group_contexts):
+        reason = "protected_motion_variant" if group.kind == "protected" else "ambiguous_mapping"
+        _append_diagnostic(
+            diagnostics,
+            seen_diagnostics,
+            code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
+            severity=DiagnosticSeverity.WARNING,
+            message="Motion-set ownership remains an auditable candidate",
+            path=model_path,
+            details={"motion_set_id": motion_set_id, "reason": reason},
+        )
+
+    return MotionSetCandidate(
+        motion_set_id=group.motion.motion_set_id,
+        motion_bundle=group.motion.motion_bundle,
+        status=status,
+        evidence=evidence,
     )
 
 
@@ -608,130 +971,25 @@ def _build_model_candidates(
     diagnostics: list[Diagnostic],
     seen_diagnostics: set[str],
 ) -> tuple[MotionSetCandidate, ...]:
-    grouped: dict[str, dict[str, object]] = {}
-    for context in contexts:
-        for motion in motion_sets:
-            match_kind = _motion_match_kind(motion, context)
-            if match_kind == "character_id_mismatch":
-                _append_diagnostic(
-                    diagnostics,
-                    seen_diagnostics,
-                    code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
-                    severity=DiagnosticSeverity.WARNING,
-                    message="Joined characterId disagrees with the motion Bundle numeric prefix",
-                    path=f"models/{model.model_output_id}",
-                    details={
-                        "motion_set_id": motion.motion_set_id,
-                        "character_id": context.character_id,
-                        "bundle_prefix": _motion_numeric_prefix(motion),
-                        "reason": "character_id_prefix_mismatch",
-                    },
-                )
-                continue
-            if match_kind is None:
-                continue
-            group = grouped.setdefault(
-                motion.motion_set_id,
-                {"motion": motion, "kind": match_kind, "contexts": []},
-            )
-            if match_kind != "normal":
-                group["kind"] = match_kind
-            group["contexts"].append(context)
-
-    candidates: list[MotionSetCandidate] = []
     model_path = f"models/{model.model_output_id}"
+    grouped = _collect_motion_groups(
+        model_path,
+        contexts,
+        motion_sets,
+        diagnostics,
+        seen_diagnostics,
+    )
+    candidates: list[MotionSetCandidate] = []
     for motion_set_id in sorted(grouped):
-        group = grouped[motion_set_id]
-        motion = group["motion"]
-        match_kind = group["kind"]
-        group_contexts: list[_CharacterContext] = []
-        seen_contexts: set[str] = set()
-        for context in group["contexts"]:
-            context_key = _context_key(context)
-            if context_key not in seen_contexts:
-                group_contexts.append(context)
-                seen_contexts.add(context_key)
-        group_contexts.sort(key=_context_key)
-
-        evidence: list[CandidateEvidence] = list(join_evidence)
-        for context in group_contexts:
-            asset_name = _string_value(context.row, "assetName") or ""
-            motion_leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
-            if match_kind == "protected":
-                naming_rule = (
-                    "back/still motion Bundle variants remain ambiguous and are protected "
-                    "from automatic character attribution"
-                )
-            elif match_kind == "variant":
-                naming_rule = (
-                    "non-base motion Bundle naming supplies candidate evidence only and "
-                    "does not verify a model-variant relation"
-                )
-            elif context.exact_join and not context.join_ambiguous:
-                naming_rule = (
-                    "character2ds.assetName matches the exact character segment of the "
-                    "v2_* motion Bundle name; this is a derived candidate, not a direct "
-                    "model-variant relation"
-                )
-            else:
-                naming_rule = (
-                    "model/character naming supplies candidate evidence only; no exact "
-                    "costume2ds.character2dId -> character2ds.id join verifies this model variant"
-                )
-            evidence.append(
-                _evidence(
-                    source="naming",
-                    source_table="character2ds",
-                    source_row=context.row,
-                    rule=naming_rule,
-                    observed=asset_name,
-                    expected=motion_leaf,
-                )
-            )
-            evidence.extend(_role_evidence(context, prepared))
-
-        evidence.append(
-            _evidence(
-                source="bundle_metadata",
-                rule="Candidate references the supplied SharedMotionSetRecord Bundle identity",
-                source_table=None,
-                source_row={"bundleName": motion.motion_bundle.name},
-                observed=motion.motion_set_id,
-            )
-        )
-        evidence = _unique_evidence(evidence)
-
-        exact_derived = (
-            match_kind == "normal"
-            and len(group_contexts) == 1
-            and group_contexts[0].exact_join
-            and not group_contexts[0].join_ambiguous
-        )
-        status = CandidateStatus.DERIVED.value if exact_derived else CandidateStatus.AMBIGUOUS.value
-        if (
-            match_kind != "normal"
-            or len(group_contexts) > 1
-            or any(context.join_ambiguous for context in group_contexts)
-        ):
-            reason = (
-                "protected_motion_variant" if match_kind == "protected" else "ambiguous_mapping"
-            )
-            _append_diagnostic(
+        candidates.append(
+            _build_motion_candidate(
+                model_path,
+                motion_set_id,
+                grouped[motion_set_id],
+                join_evidence,
+                prepared,
                 diagnostics,
                 seen_diagnostics,
-                code=DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS,
-                severity=DiagnosticSeverity.WARNING,
-                message="Motion-set ownership remains an auditable candidate",
-                path=model_path,
-                details={"motion_set_id": motion_set_id, "reason": reason},
-            )
-
-        candidates.append(
-            MotionSetCandidate(
-                motion_set_id=motion.motion_set_id,
-                motion_bundle=motion.motion_bundle,
-                status=status,
-                evidence=evidence,
             )
         )
     return tuple(candidates)

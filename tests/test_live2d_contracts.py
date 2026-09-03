@@ -206,8 +206,9 @@ def test_statuses_and_diagnostic_vocabulary_are_validated() -> None:
     for code in DIAGNOSTIC_CODES:
         Diagnostic(code=code, severity=DiagnosticSeverity.INFO, message="stable diagnostic")
 
+    candidate_type = load_fixture().models[0].motion_sets[0].__class__
     with pytest.raises(ValueError, match="candidate.status"):
-        load_fixture().models[0].motion_sets[0].__class__(
+        candidate_type(
             motion_set_id="bad-status",
             motion_bundle={"name": "motion/base", "checksum": "sha256:abc"},
             status="pending",

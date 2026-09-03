@@ -179,17 +179,14 @@ def test_ambiguous_or_empty_index_is_rejected_before_namespace_mutation(tmp_path
     ambiguous = Live2DIndex.from_dict(fixture_data())
     materialize_outputs(source, ambiguous)
     namespace = live2d_associated_namespace_path(tmp_path)
+    empty = Live2DIndex(index_version=1, metadata_version="v", master_db_version="v")
 
     with pytest.raises(Live2DAssociatedRolloutError, match="ambiguous"):
         publish_candidate(ambiguous, source, namespace)
     assert not namespace.exists()
 
     with pytest.raises(Live2DAssociatedRolloutError, match="empty"):
-        publish_candidate(
-            Live2DIndex(index_version=1, metadata_version="v", master_db_version="v"),
-            source,
-            namespace,
-        )
+        publish_candidate(empty, source, namespace)
     assert not namespace.exists()
 
 
@@ -315,8 +312,9 @@ def test_forced_associated_dispatch_rejects_missing_explicit_index(tmp_path: Pat
         LIVE2D_BUNDLE_CACHE_DIR=tmp_path / "bundle-cache",
         ASSET_REMOTE_STORAGE=[associated_storage()],
     )
+    call = dispatch.run_specialized_postprocess("live2d-associated", config)
     with pytest.raises(ValueError, match="explicit validated association index"):
-        asyncio.run(dispatch.run_specialized_postprocess("live2d-associated", config))
+        asyncio.run(call)
 
 
 def test_standalone_associated_dispatch_restores_missing_motions_once(tmp_path: Path) -> None:
@@ -426,17 +424,16 @@ def test_associated_pipeline_without_storage_refuses_local_only_publish(tmp_path
     config = associated_config(tmp_path, [])
     namespace = live2d_associated_namespace_path(tmp_path)
 
+    call = dispatch.run_specialized_postprocess(
+        "live2d-associated",
+        config,
+        association_index=index,
+        association_output_root=source,
+        association_namespace_root=namespace,
+        skip_missing_sources=True,
+    )
     with pytest.raises(ValueError, match="no matching live2d-associated storage"):
-        asyncio.run(
-            dispatch.run_specialized_postprocess(
-                "live2d-associated",
-                config,
-                association_index=index,
-                association_output_root=source,
-                association_namespace_root=namespace,
-                skip_missing_sources=True,
-            )
-        )
+        asyncio.run(call)
     assert not namespace.exists()
 
 
@@ -459,17 +456,16 @@ def test_assets_upload_failure_is_not_swallowed_and_reports_partial_remote_diver
         "_upload_live2d_associated_candidate",
         new=AsyncMock(side_effect=[None, upload_error]),
     ) as upload:
+        call = dispatch.run_specialized_postprocess(
+            "live2d-associated",
+            config,
+            association_index=index,
+            association_output_root=source,
+            association_namespace_root=namespace,
+            skip_missing_sources=True,
+        )
         with pytest.raises(RuntimeError, match="second remote upload failed"):
-            asyncio.run(
-                dispatch.run_specialized_postprocess(
-                    "live2d-associated",
-                    config,
-                    association_index=index,
-                    association_output_root=source,
-                    association_namespace_root=namespace,
-                    skip_missing_sources=True,
-                )
-            )
+            asyncio.run(call)
 
     assert upload.await_count == 2
     assert load_current_pointer(namespace) is None
@@ -504,20 +500,19 @@ def test_upload_failure_surfaces_local_rollback_failure(tmp_path: Path) -> None:
             side_effect=RuntimeError("rollback failed"),
         ),
     ):
+        call = dispatch.run_specialized_postprocess(
+            "live2d-associated",
+            config,
+            association_index=second,
+            association_output_root=source,
+            association_namespace_root=namespace,
+            skip_missing_sources=True,
+        )
         with pytest.raises(
             Live2DAssociatedRolloutError,
             match="upload failed.*rollback failed.*remote divergence",
         ):
-            asyncio.run(
-                dispatch.run_specialized_postprocess(
-                    "live2d-associated",
-                    config,
-                    association_index=second,
-                    association_output_root=source,
-                    association_namespace_root=namespace,
-                    skip_missing_sources=True,
-                )
-            )
+            asyncio.run(call)
 
 
 def test_unchanged_associated_candidate_skips_uploaded_storage_and_retries_changed_target(

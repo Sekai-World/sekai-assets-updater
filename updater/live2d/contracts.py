@@ -79,8 +79,8 @@ DIAGNOSTIC_CODES = frozenset(
     }
 )
 
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]*$")
-_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_TOKEN_RE = re.compile(r"^(?!_)\w[\w.+:-]*$", re.ASCII)
+_KEY_RE = re.compile(r"^(?!\d|_)\w+$", re.ASCII)
 _SENSITIVE_TEXT_RE = re.compile(
     r"(?ix)"
     r"(?:\b[a-z][a-z0-9+.-]*://)"
@@ -140,6 +140,22 @@ _SENSITIVE_KEYS = frozenset(
 )
 
 _FORBIDDEN_MODEL3_REFERENCE_KEYS = frozenset({"motions", "expressions"})
+_REQUIRED_MESSAGE = "is required"
+_FILE_REFERENCES_FIELD = "file_references"
+_MODEL3_MOC_KEY = "Moc"
+_MODEL3_TEXTURES_KEY = "Textures"
+_MODEL3_PHYSICS_KEY = "Physics"
+_MODEL3_REFERENCE_KEYS = frozenset({_MODEL3_MOC_KEY, _MODEL3_TEXTURES_KEY, _MODEL3_PHYSICS_KEY})
+_FILE_REFERENCES_MOC_FIELD = f"{_FILE_REFERENCES_FIELD}.{_MODEL3_MOC_KEY}"
+_FILE_REFERENCES_TEXTURES_FIELD = f"{_FILE_REFERENCES_FIELD}.{_MODEL3_TEXTURES_KEY}"
+_FILE_REFERENCES_PHYSICS_FIELD = f"{_FILE_REFERENCES_FIELD}.{_MODEL3_PHYSICS_KEY}"
+_MODEL3_REFERENCE_ALIASES = MappingProxyType(
+    {
+        _MODEL3_MOC_KEY: "moc",
+        _MODEL3_TEXTURES_KEY: "textures",
+        _MODEL3_PHYSICS_KEY: "physics",
+    }
+)
 
 
 class Live2DContractError(ValueError):
@@ -177,6 +193,14 @@ def _reject_unknown_keys(value: Mapping[str, object], allowed: set[str], field_n
     unknown = sorted(key for key in value if key not in allowed)
     if unknown:
         _fail(field_name, f"unsupported fields: {', '.join(unknown)}")
+
+
+def _require_fields(
+    value: Mapping[str, object], field_name: str, required_fields: tuple[str, ...]
+) -> None:
+    for required_field in required_fields:
+        if required_field not in value:
+            _fail(f"{field_name}.{required_field}", _REQUIRED_MESSAGE)
 
 
 def _validate_schema_version(value: object, field_name: str, expected: int) -> int:
@@ -270,6 +294,28 @@ def _is_path_key(key: str) -> bool:
     return normalized == "path" or normalized.endswith("path")
 
 
+def _freeze_json_object(
+    value: Mapping[str, object], field_name: str, depth: int
+) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key in sorted(value, key=str):
+        safe_key = _validate_json_key(key, f"{field_name}.key")
+        child = value[key]
+        if _is_path_key(safe_key) and isinstance(child, str):
+            _validate_relative_path(child, f"{field_name}.{safe_key}")
+        frozen[safe_key] = _freeze_json_value(child, f"{field_name}.{safe_key}", depth=depth + 1)
+    return MappingProxyType(frozen)
+
+
+def _freeze_json_sequence(
+    value: list[object] | tuple[object, ...], field_name: str, depth: int
+) -> tuple[object, ...]:
+    return tuple(
+        _freeze_json_value(item, f"{field_name}[{index}]", depth=depth + 1)
+        for index, item in enumerate(value)
+    )
+
+
 def _freeze_json_value(value: object, field_name: str, *, depth: int = 0) -> object:
     """Validate a small JSON value and make containers immutable."""
 
@@ -286,21 +332,9 @@ def _freeze_json_value(value: object, field_name: str, *, depth: int = 0) -> obj
     if isinstance(value, str):
         return _validate_safe_text(value, field_name, allow_empty=True)
     if isinstance(value, Mapping):
-        frozen: dict[str, object] = {}
-        for key in sorted(value, key=str):
-            safe_key = _validate_json_key(key, f"{field_name}.key")
-            child = value[key]
-            if _is_path_key(safe_key) and isinstance(child, str):
-                _validate_relative_path(child, f"{field_name}.{safe_key}")
-            frozen[safe_key] = _freeze_json_value(
-                child, f"{field_name}.{safe_key}", depth=depth + 1
-            )
-        return MappingProxyType(frozen)
+        return _freeze_json_object(value, field_name, depth)
     if isinstance(value, (list, tuple)):
-        return tuple(
-            _freeze_json_value(item, f"{field_name}[{index}]", depth=depth + 1)
-            for index, item in enumerate(value)
-        )
+        return _freeze_json_sequence(value, field_name, depth)
     _fail(field_name, f"unsupported JSON value type {type(value).__name__}")
 
 
@@ -310,6 +344,30 @@ def _freeze_json_mapping(value: object, field_name: str) -> Mapping[str, object]
     if not isinstance(frozen, Mapping):  # pragma: no cover - guarded above
         _fail(field_name, "expected an object")
     return frozen
+
+
+def _validate_model3_textures(moc: object, textures: object) -> tuple[str, ...]:
+    _validate_relative_path(moc, _FILE_REFERENCES_MOC_FIELD)
+    texture_values = _sequence(textures, _FILE_REFERENCES_TEXTURES_FIELD)
+    validated = tuple(
+        _validate_relative_path(texture, f"{_FILE_REFERENCES_TEXTURES_FIELD}[{index}]")
+        for index, texture in enumerate(texture_values)
+    )
+    _validate_unique(validated, _FILE_REFERENCES_TEXTURES_FIELD)
+    return validated
+
+
+def _validate_model3_additional(value: object) -> Mapping[str, object]:
+    additional = _freeze_json_mapping(value, f"{_FILE_REFERENCES_FIELD}.additional")
+    for key in additional:
+        if key in _MODEL3_REFERENCE_KEYS:
+            _fail(f"{_FILE_REFERENCES_FIELD}.{key}", "duplicates a represented field")
+        if key.casefold() in _FORBIDDEN_MODEL3_REFERENCE_KEYS:
+            _fail(
+                f"{_FILE_REFERENCES_FIELD}.{key}",
+                "Motions and Expressions are not model output references",
+            )
+    return additional
 
 
 def _plain(value: object) -> Any:
@@ -345,11 +403,12 @@ def _coerce(value: object, contract_type: type[_Contract], field_name: str) -> _
 
 
 def _enum_value(value: object, enum_type: type[StrEnum], field_name: str) -> str:
-    if isinstance(value, enum_type):
-        return value.value
-    if isinstance(value, str) and value in {member.value for member in enum_type}:
-        return value
-    _fail(field_name, f"unsupported value {value!r}")
+    if not isinstance(value, str):
+        _fail(field_name, f"unsupported value {value!r}")
+    try:
+        return enum_type(value).value
+    except ValueError:
+        _fail(field_name, f"unsupported value {value!r}")
 
 
 def _validate_optional_entity_id(value: object, field_name: str) -> int | str | None:
@@ -407,9 +466,8 @@ class BundleIdentity(_Contract):
             _fail("bundle", "name and bundleName disagree")
         name = mapping.get("name", mapping.get("bundleName"))
         if name is None:
-            _fail("bundle.name", "is required")
-        if "checksum" not in mapping:
-            _fail("bundle.checksum", "is required")
+            _fail("bundle.name", _REQUIRED_MESSAGE)
+        _require_fields(mapping, "bundle", ("checksum",))
         return cls(name=name, checksum=mapping["checksum"])
 
     def to_dict(self) -> dict[str, JSONValue]:
@@ -426,25 +484,11 @@ class Model3FileReferences(_Contract):
     additional: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _validate_relative_path(self.moc, "file_references.Moc")
-        texture_values = _sequence(self.textures, "file_references.Textures")
-        textures = tuple(
-            _validate_relative_path(texture, f"file_references.Textures[{index}]")
-            for index, texture in enumerate(texture_values)
-        )
-        _validate_unique(textures, "file_references.Textures")
+        textures = _validate_model3_textures(self.moc, self.textures)
         object.__setattr__(self, "textures", textures)
         if self.physics is not None:
-            _validate_relative_path(self.physics, "file_references.Physics")
-        additional = _freeze_json_mapping(self.additional, "file_references.additional")
-        for key in additional:
-            if key in {"Moc", "Textures", "Physics"}:
-                _fail(f"file_references.{key}", "duplicates a represented field")
-            if key.casefold() in _FORBIDDEN_MODEL3_REFERENCE_KEYS:
-                _fail(
-                    f"file_references.{key}",
-                    "Motions and Expressions are not model output references",
-                )
+            _validate_relative_path(self.physics, _FILE_REFERENCES_PHYSICS_FIELD)
+        additional = _validate_model3_additional(self.additional)
         object.__setattr__(self, "additional", additional)
 
     @classmethod
@@ -457,21 +501,20 @@ class Model3FileReferences(_Contract):
         )
         if forbidden:
             _fail(
-                "file_references",
+                _FILE_REFERENCES_FIELD,
                 f"forbidden fields: {', '.join(forbidden)}",
             )
-        if "Moc" not in mapping:
-            _fail("file_references.Moc", "is required")
-        if "Textures" not in mapping:
-            _fail("file_references.Textures", "is required")
+        _require_fields(
+            mapping,
+            _FILE_REFERENCES_FIELD,
+            (_MODEL3_MOC_KEY, _MODEL3_TEXTURES_KEY),
+        )
         return cls(
-            moc=mapping["Moc"],
-            textures=mapping["Textures"],
-            physics=mapping.get("Physics"),
+            moc=mapping[_MODEL3_MOC_KEY],
+            textures=mapping[_MODEL3_TEXTURES_KEY],
+            physics=mapping.get(_MODEL3_PHYSICS_KEY),
             additional={
-                key: item
-                for key, item in mapping.items()
-                if key not in {"Moc", "Textures", "Physics"}
+                key: item for key, item in mapping.items() if key not in _MODEL3_REFERENCE_KEYS
             },
         )
 
@@ -481,19 +524,13 @@ class Model3FileReferences(_Contract):
         file_references = mapping.get("FileReferences", mapping)
         return cls.from_dict(_require_mapping(file_references, "model3.FileReferences"))
 
-    # These aliases make the policy obvious to callers handling a raw model3
-    # document while keeping the Python fields idiomatic.
-    @property
-    def Moc(self) -> str:  # noqa: N802 - mirrors the model3 contract
-        return self.moc
+    def __getattr__(self, name: str) -> object:
+        """Keep legacy model3-style attribute access without field-name clashes."""
 
-    @property
-    def Textures(self) -> tuple[str, ...]:  # noqa: N802
-        return self.textures
-
-    @property
-    def Physics(self) -> str | None:  # noqa: N802
-        return self.physics
+        field_name = _MODEL3_REFERENCE_ALIASES.get(name)
+        if field_name is None:
+            raise AttributeError(f"{type(self).__name__} object has no attribute {name!r}")
+        return object.__getattribute__(self, field_name)
 
     @property
     def additional_references(self) -> Mapping[str, object]:
@@ -512,9 +549,12 @@ class Model3FileReferences(_Contract):
         return self.additional.get("HitAreas")
 
     def to_dict(self) -> dict[str, JSONValue]:
-        result: dict[str, JSONValue] = {"Moc": self.moc, "Textures": list(self.textures)}
+        result: dict[str, JSONValue] = {
+            _MODEL3_MOC_KEY: self.moc,
+            _MODEL3_TEXTURES_KEY: list(self.textures),
+        }
         if self.physics is not None:
-            result["Physics"] = self.physics
+            result[_MODEL3_PHYSICS_KEY] = self.physics
         result.update({key: _plain(self.additional[key]) for key in sorted(self.additional)})
         return result
 
@@ -624,10 +664,7 @@ class CandidateEvidence(_Contract):
             },
             "evidence",
         )
-        if "source" not in mapping:
-            _fail("evidence.source", "is required")
-        if "rule" not in mapping:
-            _fail("evidence.rule", "is required")
+        _require_fields(mapping, "evidence", ("source", "rule"))
         return cls(
             source=mapping["source"],
             rule=mapping["rule"],
@@ -692,9 +729,7 @@ class Diagnostic(_Contract):
             {"schema_version", "code", "severity", "message", "path", "details"},
             "diagnostic",
         )
-        for required in ("code", "severity", "message"):
-            if required not in mapping:
-                _fail(f"diagnostic.{required}", "is required")
+        _require_fields(mapping, "diagnostic", ("code", "severity", "message"))
         return cls(
             code=mapping["code"],
             severity=mapping["severity"],
@@ -757,15 +792,17 @@ class ModelOutputRecord(_Contract):
             },
             "model_output",
         )
-        for required in (
-            "model_output_id",
-            "model_bundle",
-            "output_path",
-            "file_references",
-            "metadata_version",
-        ):
-            if required not in mapping:
-                _fail(f"model_output.{required}", "is required")
+        _require_fields(
+            mapping,
+            "model_output",
+            (
+                "model_output_id",
+                "model_bundle",
+                "output_path",
+                "file_references",
+                "metadata_version",
+            ),
+        )
         return cls(
             model_output_id=mapping["model_output_id"],
             model_bundle=mapping["model_bundle"],
@@ -829,16 +866,18 @@ class SharedMotionSetRecord(_Contract):
             },
             "motion_set",
         )
-        for required in (
-            "motion_set_id",
-            "motion_bundle",
-            "motion_output_path",
-            "facial_output_path",
-            "known_clips",
-            "metadata_version",
-        ):
-            if required not in mapping:
-                _fail(f"motion_set.{required}", "is required")
+        _require_fields(
+            mapping,
+            "motion_set",
+            (
+                "motion_set_id",
+                "motion_bundle",
+                "motion_output_path",
+                "facial_output_path",
+                "known_clips",
+                "metadata_version",
+            ),
+        )
         return cls(
             motion_set_id=mapping["motion_set_id"],
             motion_bundle=mapping["motion_bundle"],
@@ -903,9 +942,7 @@ class MotionSetCandidate(_Contract):
             },
             "candidate",
         )
-        for required in ("motion_set_id", "motion_bundle", "status"):
-            if required not in mapping:
-                _fail(f"candidate.{required}", "is required")
+        _require_fields(mapping, "candidate", ("motion_set_id", "motion_bundle", "status"))
         return cls(
             motion_set_id=mapping["motion_set_id"],
             motion_bundle=mapping["motion_bundle"],
@@ -1004,9 +1041,7 @@ class Live2DModelAssociation(_Contract):
             },
             "model_association",
         )
-        for required in ("model_output_id", "model_bundle"):
-            if required not in mapping:
-                _fail(f"model_association.{required}", "is required")
+        _require_fields(mapping, "model_association", ("model_output_id", "model_bundle"))
         return cls(
             model_output_id=mapping["model_output_id"],
             model_bundle=mapping["model_bundle"],
@@ -1027,6 +1062,102 @@ class Live2DModelAssociation(_Contract):
             "motion_sets": [item.to_dict() for item in self.motion_sets],
             "join_evidence": [item.to_dict() for item in self.join_evidence],
         }
+
+
+def _coerce_contract_sequence(
+    value: object, contract_type: type[_Contract], field_name: str
+) -> tuple[_Contract, ...]:
+    return tuple(
+        _coerce(item, contract_type, f"{field_name}[{index}]")
+        for index, item in enumerate(_sequence(value, field_name))
+    )
+
+
+def _validate_index_uniqueness(
+    model_outputs: tuple[_Contract, ...],
+    motion_sets: tuple[_Contract, ...],
+    models: tuple[_Contract, ...],
+    diagnostics: tuple[_Contract, ...],
+) -> None:
+    _validate_unique(model_outputs, "index.model_outputs", key=lambda item: item.model_output_id)
+    _validate_unique(
+        model_outputs, "index.model_outputs bundles", key=lambda item: item.model_bundle.name
+    )
+    _validate_unique(motion_sets, "index.motion_sets", key=lambda item: item.motion_set_id)
+    _validate_unique(
+        motion_sets, "index.motion_sets bundles", key=lambda item: item.motion_bundle.name
+    )
+    _validate_unique(models, "index.models", key=lambda item: item.model_output_id)
+    diagnostic_ids = tuple(
+        (item.code, item.severity, item.message, item.path, _stable_object_bytes(item.details))
+        for item in diagnostics
+    )
+    _validate_unique(diagnostic_ids, "index.diagnostics")
+
+
+def _validate_motion_reference(
+    candidate: MotionSetCandidate, motion_by_id: Mapping[str, SharedMotionSetRecord]
+) -> None:
+    referenced_motion = motion_by_id.get(candidate.motion_set_id)
+    if referenced_motion is None:
+        _integrity_fail(f"dangling motion-set reference {candidate.motion_set_id!r}")
+    if candidate.motion_bundle != referenced_motion.motion_bundle:
+        _integrity_fail(f"motion Bundle mismatch for {candidate.motion_set_id!r}")
+
+
+def _validate_model_association_reference(
+    association: Live2DModelAssociation,
+    model_by_id: Mapping[str, ModelOutputRecord],
+    motion_by_id: Mapping[str, SharedMotionSetRecord],
+    metadata_version: str,
+) -> None:
+    referenced_model = model_by_id.get(association.model_output_id)
+    if referenced_model is None:
+        _integrity_fail(f"dangling model output reference {association.model_output_id!r}")
+    if association.model_bundle != referenced_model.model_bundle:
+        _integrity_fail(f"model bundle mismatch for {association.model_output_id!r}")
+    if referenced_model.metadata_version != metadata_version:
+        _integrity_fail(f"model metadata version mismatch for {association.model_output_id!r}")
+    for candidate in association.motion_sets:
+        _validate_motion_reference(candidate, motion_by_id)
+
+
+def _validate_index_references(
+    model_outputs: tuple[ModelOutputRecord, ...],
+    motion_sets: tuple[SharedMotionSetRecord, ...],
+    models: tuple[Live2DModelAssociation, ...],
+    metadata_version: str,
+) -> None:
+    model_by_id = {item.model_output_id: item for item in model_outputs}
+    motion_by_id = {item.motion_set_id: item for item in motion_sets}
+    for association in models:
+        _validate_model_association_reference(
+            association, model_by_id, motion_by_id, metadata_version
+        )
+
+
+def _validate_index_record_versions(
+    model_outputs: tuple[ModelOutputRecord, ...],
+    motion_sets: tuple[SharedMotionSetRecord, ...],
+    metadata_version: str,
+) -> None:
+    for record in model_outputs:
+        if record.metadata_version != metadata_version:
+            _integrity_fail(f"model metadata version mismatch for {record.model_output_id!r}")
+    for record in motion_sets:
+        if record.metadata_version != metadata_version:
+            _integrity_fail(f"motion metadata version mismatch for {record.motion_set_id!r}")
+
+
+def _validate_index_bundle_names(
+    model_outputs: tuple[ModelOutputRecord, ...],
+    motion_sets: tuple[SharedMotionSetRecord, ...],
+) -> None:
+    all_bundle_names = tuple(
+        [record.model_bundle.name for record in model_outputs]
+        + [record.motion_bundle.name for record in motion_sets]
+    )
+    _validate_unique(all_bundle_names, "index Bundle identities")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1050,71 +1181,19 @@ class Live2DIndex(_Contract):
         _validate_version_label(self.metadata_version, "metadata_version")
         _validate_version_label(self.master_db_version, "master_db_version")
 
-        model_outputs = tuple(
-            _coerce(item, ModelOutputRecord, f"index.model_outputs[{index}]")
-            for index, item in enumerate(_sequence(self.model_outputs, "index.model_outputs"))
+        model_outputs = _coerce_contract_sequence(
+            self.model_outputs, ModelOutputRecord, "index.model_outputs"
         )
-        motion_sets = tuple(
-            _coerce(item, SharedMotionSetRecord, f"index.motion_sets[{index}]")
-            for index, item in enumerate(_sequence(self.motion_sets, "index.motion_sets"))
+        motion_sets = _coerce_contract_sequence(
+            self.motion_sets, SharedMotionSetRecord, "index.motion_sets"
         )
-        models = tuple(
-            _coerce(item, Live2DModelAssociation, f"index.models[{index}]")
-            for index, item in enumerate(_sequence(self.models, "index.models"))
-        )
-        diagnostics = tuple(
-            _coerce(item, Diagnostic, f"index.diagnostics[{index}]")
-            for index, item in enumerate(_sequence(self.diagnostics, "index.diagnostics"))
-        )
+        models = _coerce_contract_sequence(self.models, Live2DModelAssociation, "index.models")
+        diagnostics = _coerce_contract_sequence(self.diagnostics, Diagnostic, "index.diagnostics")
 
-        _validate_unique(
-            model_outputs, "index.model_outputs", key=lambda item: item.model_output_id
-        )
-        _validate_unique(
-            model_outputs, "index.model_outputs bundles", key=lambda item: item.model_bundle.name
-        )
-        _validate_unique(motion_sets, "index.motion_sets", key=lambda item: item.motion_set_id)
-        _validate_unique(
-            motion_sets, "index.motion_sets bundles", key=lambda item: item.motion_bundle.name
-        )
-        _validate_unique(models, "index.models", key=lambda item: item.model_output_id)
-        diagnostic_ids = tuple(
-            (item.code, item.severity, item.message, item.path, _stable_object_bytes(item.details))
-            for item in diagnostics
-        )
-        _validate_unique(diagnostic_ids, "index.diagnostics")
-
-        model_by_id = {item.model_output_id: item for item in model_outputs}
-        motion_by_id = {item.motion_set_id: item for item in motion_sets}
-        for association in models:
-            referenced_model = model_by_id.get(association.model_output_id)
-            if referenced_model is None:
-                _integrity_fail(f"dangling model output reference {association.model_output_id!r}")
-            if association.model_bundle != referenced_model.model_bundle:
-                _integrity_fail(f"model bundle mismatch for {association.model_output_id!r}")
-            if referenced_model.metadata_version != self.metadata_version:
-                _integrity_fail(
-                    f"model metadata version mismatch for {association.model_output_id!r}"
-                )
-            for candidate in association.motion_sets:
-                referenced_motion = motion_by_id.get(candidate.motion_set_id)
-                if referenced_motion is None:
-                    _integrity_fail(f"dangling motion-set reference {candidate.motion_set_id!r}")
-                if candidate.motion_bundle != referenced_motion.motion_bundle:
-                    _integrity_fail(f"motion Bundle mismatch for {candidate.motion_set_id!r}")
-
-        for record in model_outputs:
-            if record.metadata_version != self.metadata_version:
-                _integrity_fail(f"model metadata version mismatch for {record.model_output_id!r}")
-        for record in motion_sets:
-            if record.metadata_version != self.metadata_version:
-                _integrity_fail(f"motion metadata version mismatch for {record.motion_set_id!r}")
-
-        all_bundle_names = tuple(
-            [record.model_bundle.name for record in model_outputs]
-            + [record.motion_bundle.name for record in motion_sets]
-        )
-        _validate_unique(all_bundle_names, "index Bundle identities")
+        _validate_index_uniqueness(model_outputs, motion_sets, models, diagnostics)
+        _validate_index_references(model_outputs, motion_sets, models, self.metadata_version)
+        _validate_index_record_versions(model_outputs, motion_sets, self.metadata_version)
+        _validate_index_bundle_names(model_outputs, motion_sets)
 
         object.__setattr__(
             self,
@@ -1160,9 +1239,7 @@ class Live2DIndex(_Contract):
             },
             "index",
         )
-        for required in ("metadata_version", "master_db_version"):
-            if required not in mapping:
-                _fail(f"index.{required}", "is required")
+        _require_fields(mapping, "index", ("metadata_version", "master_db_version"))
         return cls(
             index_version=mapping.get("index_version", INDEX_SCHEMA_VERSION),
             metadata_version=mapping["metadata_version"],

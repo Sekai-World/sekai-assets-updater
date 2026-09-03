@@ -180,10 +180,11 @@ def test_changed_keys_is_sorted_and_reports_new_and_removed_ids() -> None:
 
 
 def test_partial_key_snapshot_mapping_reports_missing_fields() -> None:
+    previous = Live2DKeys(model_keys={}, motion_set_keys={}, index_key="index")
     with pytest.raises(TypeError, match="incomplete key snapshot mapping") as error:
         changed_keys(
             {"model_keys": {}},
-            Live2DKeys(model_keys={}, motion_set_keys={}, index_key="index"),
+            previous,
         )
 
     assert "index_key, motion_set_keys" in str(error.value)
