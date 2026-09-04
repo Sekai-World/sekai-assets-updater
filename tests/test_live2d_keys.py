@@ -97,7 +97,7 @@ def test_model_motion_and_index_keys_have_expected_sha256_digests() -> None:
     assert motion_set_key(motion_set) == envelope_digest(
         MOTION_SET_KEY_DOMAIN, expected_motion_payload
     )
-    assert index_key(index) == ("eb55220a0d6b1344feb89aa9e0989260f4bbce44645808264d0b7f9e9d7f1d5b")
+    assert index_key(index) == ("98feb2d74525cac533e5a93330ab3dc96a0ca12bc29ad643549318a68c7c4f1c")
     assert index_key(index) == envelope_digest(INDEX_KEY_DOMAIN, expected_index_payload)
     assert compute_keys(index).index_key == index_key(index)
 

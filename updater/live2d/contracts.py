@@ -41,6 +41,24 @@ class CandidateStatus(StrEnum):
     AMBIGUOUS = "ambiguous"
 
 
+class CandidateEvidenceRuleCode(StrEnum):
+    """Stable machine-readable origins for :class:`CandidateEvidence`.
+
+    ``UNSPECIFIED`` is the compatibility fallback used when loading legacy
+    serialized evidence that predates the ``rule_code`` field.
+    """
+
+    EXACT_COSTUME_JOIN_ANCHOR = "exact_costume_join_anchor"
+    EXACT_COSTUME_JOIN_TARGET = "exact_costume_join_target"
+    BUSINESS_ROLE_USE = "business_role_use"
+    NAMING_CANDIDATE = "naming_candidate"
+    BUNDLE_IDENTITY = "bundle_identity"
+    UNSPECIFIED = "unspecified"
+
+
+CANDIDATE_EVIDENCE_RULE_CODES = frozenset(code.value for code in CandidateEvidenceRuleCode)
+
+
 class DiagnosticSeverity(StrEnum):
     ERROR = "error"
     WARNING = "warning"
@@ -80,6 +98,7 @@ DIAGNOSTIC_CODES = frozenset(
 )
 
 _TOKEN_RE = re.compile(r"^(?!_)\w[\w.+:-]*$", re.ASCII)
+_RULE_CODE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$", re.ASCII)
 _KEY_RE = re.compile(r"^(?![\d_])\w+$", re.ASCII)
 _SENSITIVE_TEXT_RE = re.compile(
     r"(?ix)"
@@ -239,6 +258,15 @@ def _validate_token(value: object, field_name: str) -> str:
     text = _validate_safe_text(value, field_name, max_length=256)
     if not _TOKEN_RE.fullmatch(text):
         _fail(field_name, "must be a stable identifier token")
+    return text
+
+
+def _validate_rule_code(value: object, field_name: str) -> str:
+    if isinstance(value, CandidateEvidenceRuleCode):
+        value = value.value
+    text = _validate_safe_text(value, field_name, max_length=128)
+    if not _RULE_CODE_RE.fullmatch(text):
+        _fail(field_name, "must be a lowercase snake_case identifier token")
     return text
 
 
@@ -614,6 +642,9 @@ class CandidateEvidence(_Contract):
     expected: str | None = None
     evidence_id: str | None = None
     schema_version: int = CANDIDATE_SCHEMA_VERSION
+    # Legacy serialized evidence may omit this field; ``unspecified`` keeps
+    # those records loadable while making the compatibility fallback explicit.
+    rule_code: CandidateEvidenceRuleCode | str = CandidateEvidenceRuleCode.UNSPECIFIED
 
     def __post_init__(self) -> None:
         _validate_schema_version(
@@ -621,6 +652,8 @@ class CandidateEvidence(_Contract):
         )
         _validate_token(self.source, "evidence.source")
         _validate_safe_text(self.rule, "evidence.rule", max_length=1024)
+        rule_code = _validate_rule_code(self.rule_code, "evidence.rule_code")
+        object.__setattr__(self, "rule_code", rule_code)
         if self.source_table is not None:
             table = _validate_token(self.source_table, "evidence.source_table")
             lowered = table.casefold()
@@ -637,6 +670,7 @@ class CandidateEvidence(_Contract):
             seed = {
                 "source": self.source,
                 "rule": self.rule,
+                "rule_code": rule_code,
                 "source_table": self.source_table,
                 "source_row": _plain(frozen_row),
                 "observed": self.observed,
@@ -659,6 +693,7 @@ class CandidateEvidence(_Contract):
                 "source_table",
                 "source_row",
                 "rule",
+                "rule_code",
                 "observed",
                 "expected",
             },
@@ -668,6 +703,7 @@ class CandidateEvidence(_Contract):
         return cls(
             source=mapping["source"],
             rule=mapping["rule"],
+            rule_code=mapping.get("rule_code", CandidateEvidenceRuleCode.UNSPECIFIED),
             source_table=mapping.get("source_table"),
             source_row=mapping.get("source_row", {}),
             observed=mapping.get("observed"),
@@ -682,6 +718,7 @@ class CandidateEvidence(_Contract):
             "evidence_id": self.evidence_id,
             "source": self.source,
             "rule": self.rule,
+            "rule_code": self.rule_code,
             "source_row": _plain(self.source_row),
         }
         if self.source_table is not None:

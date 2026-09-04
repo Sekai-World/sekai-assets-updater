@@ -8,6 +8,7 @@ from pathlib import Path
 
 from updater.live2d.association import LIVE2D_TABLE_NAMES, build_live2d_index
 from updater.live2d.contracts import (
+    CandidateEvidenceRuleCode,
     CandidateStatus,
     DiagnosticCode,
     ModelOutputRecord,
@@ -106,6 +107,45 @@ def test_exact_costume_character_join_and_normal_candidate_provenance() -> None:
     assert all(".exp3" in evidence.rule for evidence in role_evidence)
 
 
+def test_association_evidence_exposes_stable_rule_codes_for_filtering() -> None:
+    models, motions = fixture_records(("ichika-unit",), ("ichika-base",))
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=models,
+        motion_sets=motions,
+        tables=business_tables(),
+    )
+
+    association = index.models[0]
+    candidate = association.motion_sets[0]
+    anchor_code = CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_ANCHOR.value
+    target_code = CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_TARGET.value
+    business_code = CandidateEvidenceRuleCode.BUSINESS_ROLE_USE.value
+    naming_code = CandidateEvidenceRuleCode.NAMING_CANDIDATE.value
+    bundle_code = CandidateEvidenceRuleCode.BUNDLE_IDENTITY.value
+
+    assert {evidence.rule_code for evidence in association.join_evidence} == {
+        anchor_code,
+        target_code,
+    }
+    assert {evidence.rule_code for evidence in candidate.evidence} == {
+        anchor_code,
+        target_code,
+        business_code,
+        naming_code,
+        bundle_code,
+    }
+
+    business_evidence = [
+        evidence for evidence in candidate.evidence if evidence.rule_code == business_code
+    ]
+    assert len(business_evidence) == len(LIVE2D_TABLE_NAMES)
+    assert all(evidence.source_table in LIVE2D_TABLE_NAMES for evidence in business_evidence)
+    assert [evidence for evidence in candidate.evidence if evidence.rule_code == naming_code]
+    assert [evidence for evidence in candidate.evidence if evidence.rule_code == bundle_code]
+
+
 def test_prefixed_character_asset_names_match_normal_candidates() -> None:
     models, motions = fixture_records(
         ("ichika-unit", "mizuki-unit"), ("ichika-base", "mizuki-base")
@@ -188,6 +228,103 @@ def test_legacy_character_asset_names_match_normal_candidates() -> None:
         "ichika-unit": [("ichika-base", CandidateStatus.DERIVED.value)],
         "mizuki-unit": [("mizuki-base", CandidateStatus.DERIVED.value)],
     }
+
+
+def test_exact_legacy_sub_asset_model_matches_base_candidate() -> None:
+    models, _ = fixture_records(("ichika-unit",), ())
+    model = replace(
+        models[0],
+        model_bundle=replace(models[0].model_bundle, name="model/sub_airichild"),
+    )
+    motion = synthetic_motion_set("sub-airichild-base", "motion/sub_airichild_motion_base")
+    tables = business_tables()
+    tables["character2ds"].append({"id": 113, "characterId": 7, "assetName": "sub_airichild"})
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=[model],
+        motion_sets=[motion],
+        tables=tables,
+    )
+
+    candidate = index.models[0].motion_sets[0]
+    assert candidate.motion_set_id == "sub-airichild-base"
+    assert candidate.status == CandidateStatus.AMBIGUOUS.value
+
+
+def test_glued_legacy_sub_black_model_matches_base_candidate() -> None:
+    models, _ = fixture_records(("ichika-unit",), ())
+    model = replace(
+        models[0],
+        model_bundle=replace(models[0].model_bundle, name="model/sub_airichildblack"),
+    )
+    motion = synthetic_motion_set("sub-airichild-base", "motion/sub_airichild_motion_base")
+    tables = business_tables()
+    tables["character2ds"].append({"id": 113, "characterId": 7, "assetName": "sub_airichild"})
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=[model],
+        motion_sets=[motion],
+        tables=tables,
+    )
+
+    candidate = index.models[0].motion_sets[0]
+    assert candidate.motion_set_id == "sub-airichild-base"
+    assert candidate.status == CandidateStatus.AMBIGUOUS.value
+
+
+def test_exact_joined_variant_uses_canonical_motion_candidate() -> None:
+    models, _ = fixture_records(("ichika-unit",), ())
+    model = replace(
+        models[0],
+        model_bundle=replace(models[0].model_bundle, name="model/13tsukasa_liondance"),
+    )
+    motion = synthetic_motion_set("tsukasa-base", "motion/13tsukasa_motion_base")
+    tables = business_tables()
+    tables["character2ds"].append(
+        {"id": 117, "characterId": 13, "assetName": "13tsukasa_liondance"}
+    )
+    tables["costume2ds"] = [{"id": 180, "character2dId": 117, "assetName": "13tsukasa_liondance"}]
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=[model],
+        motion_sets=[motion],
+        tables=tables,
+    )
+
+    association = index.models[0]
+    assert association.character2d_id == 117
+    assert association.character_id == 13
+    assert association.motion_sets[0].motion_set_id == "tsukasa-base"
+    assert association.motion_sets[0].status == CandidateStatus.DERIVED.value
+
+
+def test_protected_motion_is_not_reverse_matched() -> None:
+    models, _ = fixture_records(("ichika-unit",), ())
+    model = replace(
+        models[0],
+        model_bundle=replace(models[0].model_bundle, name="model/13tsukasa_back_liondance"),
+    )
+    protected_motion = synthetic_motion_set("tsukasa-back", "motion/13tsukasa_back_motion_base")
+    tables = business_tables()
+    tables["character2ds"].append(
+        {"id": 118, "characterId": 13, "assetName": "13tsukasa_back_liondance"}
+    )
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=[model],
+        motion_sets=[protected_motion],
+        tables=tables,
+    )
+
+    assert index.models[0].motion_sets == ()
 
 
 def test_legacy_joined_character_id_prefix_mismatch_is_auditable() -> None:

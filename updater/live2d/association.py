@@ -18,6 +18,7 @@ from typing import Any
 
 from updater.live2d.contracts import (
     CandidateEvidence,
+    CandidateEvidenceRuleCode,
     CandidateStatus,
     Diagnostic,
     DiagnosticCode,
@@ -139,6 +140,7 @@ def _sanitize_row(table_name: str, row: object) -> Mapping[str, object] | None:
             source="master_table",
             source_table=table_name,
             rule="sanitized business-table row",
+            rule_code=CandidateEvidenceRuleCode.BUSINESS_ROLE_USE,
             source_row=selected,
         )
     except ValueError:
@@ -368,7 +370,11 @@ def _v2_prefix_parts(value: str) -> tuple[str, str] | None:
 
 
 def _model_variant_matches(model_leaf: str, asset_name: str) -> bool:
-    if model_leaf.startswith(f"{asset_name}_"):
+    if (
+        model_leaf == asset_name
+        or model_leaf.startswith(f"{asset_name}_")
+        or model_leaf == f"{asset_name}black"
+    ):
         return True
     if asset_name.startswith("v2_"):
         return False
@@ -391,6 +397,54 @@ def _motion_v2_parts(motion: SharedMotionSetRecord) -> tuple[str, str] | None:
     if not leaf.startswith("v2_"):
         return None
     return _v2_prefix_parts(leaf[3:])
+
+
+def _canonical_motion_parts(
+    leaf: str,
+) -> tuple[str | None, tuple[str, ...]] | None:
+    """Return numeric prefix and canonical stems for a normal motion Bundle."""
+
+    if not leaf.endswith(_MOTION_SUFFIX):
+        return None
+
+    if leaf.startswith("v2_"):
+        parts = _v2_prefix_parts(leaf[3:])
+        if parts is None:
+            return None
+        numeric_prefix, tail = parts
+        character_stem = tail[: -len(_MOTION_SUFFIX)]
+        if not character_stem or "_" in character_stem:
+            return None
+        legacy_stem = f"{numeric_prefix}{character_stem}"
+        return numeric_prefix, (
+            character_stem,
+            f"v2_{legacy_stem}",
+        )
+
+    character_stem = leaf[: -len(_MOTION_SUFFIX)]
+    parts = _v2_prefix_parts(character_stem)
+    if parts is not None:
+        numeric_prefix, character_name = parts
+        if not character_name or "_" in character_name:
+            return None
+        return numeric_prefix, (character_stem,)
+
+    if character_stem.startswith("sub_") and "_" not in character_stem[4:]:
+        return None, (character_stem,)
+    return None
+
+
+def _reverse_motion_match(
+    leaf: str,
+    asset_name: str,
+) -> tuple[str | None, str] | None:
+    parts = _canonical_motion_parts(leaf)
+    if parts is None:
+        return None
+    numeric_prefix, canonical_stems = parts
+    if not any(asset_name.startswith(f"{stem}_") for stem in canonical_stems):
+        return None
+    return numeric_prefix, _MOTION_SUFFIX
 
 
 def _numeric_character_id(value: int | str | None) -> int | None:
@@ -420,24 +474,28 @@ def _motion_match_kind(
     if asset_name is None:
         return None
     leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
+    numeric_prefix: str | None = None
+    rest: str | None = None
     if leaf.startswith("v2_"):
         parts = _motion_v2_parts(motion)
         if parts is None:
             return None
         numeric_prefix, tail = parts
         if asset_name.startswith("v2_"):
-            if not leaf.startswith(f"{asset_name}_"):
-                return None
-            rest = leaf[len(asset_name) :]
+            if leaf.startswith(f"{asset_name}_"):
+                rest = leaf[len(asset_name) :]
         else:
-            if not tail.startswith(f"{asset_name}_"):
-                return None
-            rest = tail[len(asset_name) :]
+            if tail.startswith(f"{asset_name}_"):
+                rest = tail[len(asset_name) :]
     else:
-        if not leaf.startswith(f"{asset_name}_"):
-            return None
         numeric_prefix = _motion_numeric_prefix(motion)
-        rest = leaf[len(asset_name) :]
+        if leaf.startswith(f"{asset_name}_"):
+            rest = leaf[len(asset_name) :]
+    if rest is None:
+        reverse_match = _reverse_motion_match(leaf, asset_name)
+        if reverse_match is None:
+            return None
+        numeric_prefix, rest = reverse_match
     expected_character_id = _numeric_character_id(context.character_id)
     if (
         numeric_prefix is not None
@@ -465,6 +523,7 @@ def _evidence(
     *,
     source: str,
     rule: str,
+    rule_code: CandidateEvidenceRuleCode | str,
     source_table: str | None,
     source_row: Mapping[str, object],
     observed: str | None = None,
@@ -473,6 +532,7 @@ def _evidence(
     return CandidateEvidence(
         source=source,
         rule=rule,
+        rule_code=rule_code,
         source_table=source_table,
         source_row=source_row,
         observed=observed,
@@ -500,6 +560,7 @@ def _join_evidence(
                 source_table="costume2ds",
                 source_row=row,
                 rule="Exact costume2ds.character2dId -> character2ds.id join anchor",
+                rule_code=CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_ANCHOR,
                 observed=str(row.get("character2dId"))
                 if row.get("character2dId") is not None
                 else None,
@@ -512,6 +573,7 @@ def _join_evidence(
                 source_table="character2ds",
                 source_row=row,
                 rule="Exact costume2ds.character2dId -> character2ds.id join target",
+                rule_code=CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_TARGET,
                 observed=str(row.get("id")) if row.get("id") is not None else None,
             )
         )
@@ -533,6 +595,7 @@ def _role_evidence(
             source_table=table_name,
             source_row=row,
             rule=_BUSINESS_ROLE_RULE,
+            rule_code=CandidateEvidenceRuleCode.BUSINESS_ROLE_USE,
             observed=row["motion"],
             expected=row["expression"],
         )
@@ -905,6 +968,7 @@ def _candidate_evidence(
                 source_table="character2ds",
                 source_row=context.row,
                 rule=_naming_rule(group.kind, context),
+                rule_code=CandidateEvidenceRuleCode.NAMING_CANDIDATE,
                 observed=asset_name,
                 expected=motion_leaf,
             )
@@ -915,6 +979,7 @@ def _candidate_evidence(
         _evidence(
             source="bundle_metadata",
             rule="Candidate references the supplied SharedMotionSetRecord Bundle identity",
+            rule_code=CandidateEvidenceRuleCode.BUNDLE_IDENTITY,
             source_table=None,
             source_row={"bundleName": group.motion.motion_bundle.name},
             observed=group.motion.motion_set_id,

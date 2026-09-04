@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 
 from updater.live2d.contracts import (
+    CANDIDATE_EVIDENCE_RULE_CODES,
     DIAGNOSTIC_CODES,
     BundleIdentity,
     CandidateEvidence,
+    CandidateEvidenceRuleCode,
     CandidateStatus,
     Diagnostic,
     DiagnosticCode,
@@ -128,6 +130,48 @@ def test_canonical_serialization_is_independent_of_equivalent_input_order() -> N
         source_row={"second": 2, "first": 1},
     )
     assert first_evidence.evidence_id == second_evidence.evidence_id
+
+
+def test_candidate_evidence_rule_code_round_trips_and_supports_legacy_fallback() -> None:
+    assert {
+        CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_ANCHOR.value,
+        CandidateEvidenceRuleCode.EXACT_COSTUME_JOIN_TARGET.value,
+        CandidateEvidenceRuleCode.BUSINESS_ROLE_USE.value,
+        CandidateEvidenceRuleCode.NAMING_CANDIDATE.value,
+        CandidateEvidenceRuleCode.BUNDLE_IDENTITY.value,
+    } <= CANDIDATE_EVIDENCE_RULE_CODES
+
+    evidence = CandidateEvidence(
+        source="naming",
+        rule="human-readable naming explanation",
+        rule_code=CandidateEvidenceRuleCode.NAMING_CANDIDATE,
+    )
+    serialized = evidence.to_dict()
+    assert serialized["rule_code"] == "naming_candidate"
+    assert CandidateEvidence.from_dict(serialized) == evidence
+
+    legacy = CandidateEvidence.from_dict(
+        {"source": "naming", "rule": "legacy human-readable explanation"}
+    )
+    assert legacy.rule_code == CandidateEvidenceRuleCode.UNSPECIFIED.value
+    assert legacy.to_dict()["rule_code"] == CandidateEvidenceRuleCode.UNSPECIFIED.value
+
+
+def test_candidate_evidence_rule_code_is_part_of_generated_identity() -> None:
+    common = {"source": "metadata", "rule": "same explanation"}
+    first = CandidateEvidence(**common, rule_code="naming_candidate")
+    second = CandidateEvidence(**common, rule_code="bundle_identity")
+
+    assert first.evidence_id != second.evidence_id
+
+
+@pytest.mark.parametrize(
+    "rule_code",
+    ("", "naming candidate", "Naming_Candidate", "naming-candidate", "_naming_candidate", 42),
+)
+def test_candidate_evidence_rejects_unsafe_rule_codes(rule_code: object) -> None:
+    with pytest.raises(ValueError, match="evidence.rule_code"):
+        CandidateEvidence(source="metadata", rule="explanation", rule_code=rule_code)
 
 
 def test_canonical_output_contains_no_sensitive_transport_or_raw_bundle_data() -> None:
