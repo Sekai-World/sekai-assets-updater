@@ -152,9 +152,18 @@ ASSET_REMOTE_STORAGE = [
 ]
 
 # Optional post-processing in the default assets mode. Explicit --mode
-# live2d/charts always runs its corresponding post-processor.
+# live2d/live2d-associated/charts always runs its corresponding post-processor.
+# Deprecated: the legacy flag and live2d/model_list.json output remain available
+# for compatibility. Prefer the independently rolled out association index.
 ENABLE_LIVE2D_POSTPROCESS = False
+ENABLE_LIVE2D_ASSOCIATED_PIPELINE = False
 ENABLE_CHARTS_POSTPROCESS = False
+# Optional path to a pre-built, validated Live2DIndex JSON document. The
+# associated mode refuses to invent an index when this is unset.
+LIVE2D_ASSOCIATION_INDEX_PATH = None
+# Optional path to an explicit Live2D association-selection manifest. When set,
+# it is used to build the index from the current run's Live2D bundle metadata.
+LIVE2D_ASSOCIATION_SELECTIONS_PATH = None
 # Master-data server used to load chart metadata. Defaults to REGION; set this
 # when its repository name differs from the asset/cache region (for example,
 # TC charts use "tc" while TC assets use the TW region).

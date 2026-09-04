@@ -7,6 +7,7 @@ from anyio import Path
 class ConfigLike(Protocol):
     UPDATER_MODE: str
     ENABLE_LIVE2D_POSTPROCESS: bool
+    ENABLE_LIVE2D_ASSOCIATED_PIPELINE: bool
     ENABLE_CHARTS_POSTPROCESS: bool
     ENABLE_MODEL3D_FBX_EXPORT: bool
     MAX_CONCURRENCY: int
@@ -52,6 +53,8 @@ class ConfigLike(Protocol):
     ASSET_LOCAL_EXTRACTED_DIR: Optional[Path]
     ASSET_LOCAL_BUNDLE_CACHE_DIR: Optional[Path]
     LIVE2D_BUNDLE_CACHE_DIR: Optional[Path]
+    LIVE2D_ASSOCIATION_INDEX_PATH: Optional[Path]
+    LIVE2D_ASSOCIATION_SELECTIONS_PATH: Optional[Path]
     CHART_DATA_SERVER: Optional[str]
     CHART_JACKET_BASE_URL: Optional[str]
     ASSET_REMOTE_STORAGE: Optional[list[dict[str, Any]]]

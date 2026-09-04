@@ -45,6 +45,11 @@ from updater.workspace import ensure_dir_exists
 logger = logging.getLogger("asset_updater")
 
 
+def _asset_metadata_version(asset_bundle_info) -> str | None:
+    version = asset_bundle_info.get("version")
+    return version.strip() if isinstance(version, str) and version.strip() else None
+
+
 async def _run_full_download_pipeline(
     cfg: ConfigLike,
     mode: str,
@@ -117,6 +122,7 @@ async def _run_full_download_pipeline(
             start_time,
             paths,
             fetch_result.asset_bundle_info.get("bundles", {}),
+            asset_metadata_version=_asset_metadata_version(fetch_result.asset_bundle_info),
         )
         return
 
@@ -131,6 +137,7 @@ async def _run_full_download_pipeline(
         start_time,
         paths,
         fetch_result.asset_bundle_info.get("bundles", {}),
+        asset_metadata_version=_asset_metadata_version(fetch_result.asset_bundle_info),
     )
 
 
@@ -149,7 +156,10 @@ async def _run_main(
         cfg.ASSET_BUNDLE_INFO_CACHE_PATH,
         cfg.GAME_VERSION_JSON_CACHE_PATH,
     )
-    active_cfg = cast(ConfigLike, _StatePathConfig(cfg, paths) if mode == "live2d" else cfg)
+    active_cfg = cast(
+        ConfigLike,
+        _StatePathConfig(cfg, paths) if mode in {"live2d", "live2d-associated"} else cfg,
+    )
 
     run_mode = "metadata-only" if update_asset_bundle_info_only else "full-pipeline"
     logger.info(

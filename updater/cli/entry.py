@@ -21,7 +21,7 @@ def cli():
     parser = argparse.ArgumentParser(description="Start the asset updater with given config.")
     parser.add_argument(
         "--mode",
-        choices=("assets", "live2d", "charts"),
+        choices=("assets", "live2d", "live2d-associated", "charts"),
         default="assets",
         help="Processing scope (default: assets).",
     )

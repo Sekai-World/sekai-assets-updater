@@ -423,6 +423,25 @@ def derive_live2d_state_paths(
     )
 
 
+def derive_live2d_associated_state_paths(
+    dl_list_cache_path: os.PathLike[str] | str,
+) -> StatePaths:
+    """Derive the independent bundle state set for the associated Live2D mode.
+
+    The associated mode consumes the same explicit ``live2d/`` bundle scope as
+    legacy Live2D, but its retry/metadata generation must not share the legacy
+    Live2D queue or the ordinary assets queue.
+    """
+
+    legacy_queue = Path(dl_list_cache_path).resolve(strict=False)
+    queue = legacy_queue.with_name("live2d_associated_dl_list.json")
+    return derive_state_paths(
+        queue,
+        queue.with_name("live2d_associated_asset_bundle_info.json"),
+        queue.with_name("live2d_associated_version.json"),
+    )
+
+
 def derive_active_state_paths(
     mode: str,
     dl_list_cache_path: os.PathLike[str] | str,
@@ -438,6 +457,8 @@ def derive_active_state_paths(
 
     if mode == "live2d":
         return derive_live2d_state_paths(dl_list_cache_path)
+    if mode == "live2d-associated":
+        return derive_live2d_associated_state_paths(dl_list_cache_path)
     return derive_state_paths(dl_list_cache_path, asset_metadata_path, game_version_path)
 
 

@@ -116,6 +116,11 @@ def live2d_state_path(config) -> StdPath:
     return StdPath(config.DL_LIST_CACHE_PATH).parent / "live2d_motion_state.json"
 
 
+def live2d_associated_state_path(config) -> StdPath:
+    """Return the independent Live2D-associated rollout state path."""
+    return StdPath(config.DL_LIST_CACHE_PATH).parent / "live2d_associated_state.json"
+
+
 def compute_motion_bundle_hashes(motion_source: StdPath) -> dict[str, str]:
     """Return ``{file_name: sha256_hex}`` over every file in *motion_source*."""
     result: dict[str, str] = {}

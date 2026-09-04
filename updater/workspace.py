@@ -38,9 +38,9 @@ def get_bundle_cache_path(config, bundle: Dict[str, Any]):
 def uses_aggregate_workspace(bundle: Dict[str, Any], config) -> bool:
     """Route only specialized bundle outputs into the run workspace."""
     enabled_modes = get_enabled_specialized_modes(getattr(config, "UPDATER_MODE", "assets"), config)
-    return ("live2d" in enabled_modes and is_live2d_bundle(bundle)) or (
-        "charts" in enabled_modes and is_chart_score_bundle(bundle)
-    )
+    return (
+        bool({"live2d", "live2d-associated"} & set(enabled_modes)) and is_live2d_bundle(bundle)
+    ) or ("charts" in enabled_modes and is_chart_score_bundle(bundle))
 
 
 def configured_path(value) -> Path | None:

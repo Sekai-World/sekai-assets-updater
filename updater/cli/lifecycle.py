@@ -176,6 +176,8 @@ async def _run_enabled_specialized_postprocess(
     cfg: ConfigLike,
     extracted_dir_is_temporary: bool,
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
+    *,
+    asset_metadata_version: str | None = None,
 ) -> None:
     enabled_modes = get_enabled_specialized_modes(mode, cfg)
     # Live2D post-processing in assets mode may run with no downloads (and its
@@ -183,13 +185,14 @@ async def _run_enabled_specialized_postprocess(
     # from the configured raw bundle cache instead of requiring this run to
     # download the model bundles again. Forced live2d mode keeps its existing
     # fail-fast behavior; optional assets mode follows skip_missing_sources.
-    if "live2d" in enabled_modes and live2d_bundles is not None:
+    if {"live2d", "live2d-associated"} & set(enabled_modes) and live2d_bundles is not None:
         try:
             await recover_live2d_model_outputs(cfg, live2d_bundles)
         except RuntimeError as exc:
             if mode != "assets":
                 raise
             logger.warning("Skipping optional Live2D cache recovery: %s", exc)
+    motion_outputs_ready = False
     for specialized_mode in enabled_modes:
         if specialized_mode == "charts":
             await run_specialized_postprocess(
@@ -199,13 +202,24 @@ async def _run_enabled_specialized_postprocess(
                 skip_missing_sources=mode == "assets",
                 score_include_list=cfg.DL_INCLUDE_LIST if mode == "assets" else None,
             )
-        else:
+        elif specialized_mode == "live2d-associated":
             await run_specialized_postprocess(
                 specialized_mode,
                 cfg,
                 extracted_dir_is_temporary=extracted_dir_is_temporary,
                 skip_missing_sources=mode == "assets",
+                motion_outputs_ready=motion_outputs_ready,
+                live2d_bundles=live2d_bundles,
+                asset_metadata_version=asset_metadata_version,
             )
+        else:
+            result = await run_specialized_postprocess(
+                specialized_mode,
+                cfg,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
+                skip_missing_sources=mode == "assets",
+            )
+            motion_outputs_ready = result is True
 
 
 async def _restore_pending_cache_on_failure(
@@ -268,6 +282,8 @@ async def _complete_with_empty_download_list(
     start_time: float,
     paths: StatePaths | None = None,
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
+    *,
+    asset_metadata_version: str | None = None,
 ) -> None:
     # An assets run can legitimately have no current downloads. Specialized
     # processors still need to run: Live2D may restore its inputs from the raw
@@ -291,12 +307,13 @@ async def _complete_with_empty_download_list(
     else:
         durable_unlink(paths.queue)
     if should_postprocess:
-        if live2d_bundles is None:
-            await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
-        else:
-            await _run_enabled_specialized_postprocess(
-                mode, cfg, extracted_dir_is_temporary, live2d_bundles
-            )
+        await _run_enabled_specialized_postprocess(
+            mode,
+            cfg,
+            extracted_dir_is_temporary,
+            live2d_bundles,
+            asset_metadata_version=asset_metadata_version,
+        )
     logger.info(_RUN_COMPLETED_LOG, time.monotonic() - start_time)
 
 
@@ -311,6 +328,8 @@ async def _complete_with_download_list(
     start_time: float,
     paths: StatePaths | None = None,
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
+    *,
+    asset_metadata_version: str | None = None,
 ) -> None:
     logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
 
@@ -331,11 +350,12 @@ async def _complete_with_download_list(
         await _cleanup_pending_cache_on_success(
             cfg, download_list, pending_items_outside_mode, paths
         )
-        if live2d_bundles is None:
-            await _run_enabled_specialized_postprocess(mode, cfg, extracted_dir_is_temporary)
-        else:
-            await _run_enabled_specialized_postprocess(
-                mode, cfg, extracted_dir_is_temporary, live2d_bundles
-            )
+        await _run_enabled_specialized_postprocess(
+            mode,
+            cfg,
+            extracted_dir_is_temporary,
+            live2d_bundles,
+            asset_metadata_version=asset_metadata_version,
+        )
 
     logger.info(_RUN_COMPLETED_LOG, time.monotonic() - start_time)
