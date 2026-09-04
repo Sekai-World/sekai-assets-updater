@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "fixture_status": "sanitized",
+  "sanitized": true,
+  "metadata_version": "6.8.0.10",
+  "provenance": {
+    "observed_counts": "Issue #46 and docs/streaming-live-glb-preprocessing-research.md",
+    "known_clip_names": "tests/fixtures/live2d/contracts_6.8.0.10.json",
+    "raw_proprietary_assets_included": false,
+    "generated_names_are_original_game_names": false,
+    "generated_motion3_documents_are_original_game_assets": false
+  },
+  "motion_sets": [
+    {
+      "character": "Ichika",
+      "motion_set_id": "ichika-base",
+      "observed": {
+        "facial_count": 73,
+        "motion_count": 271,
+        "constant_facial_count": 60,
+        "dynamic_facial_count": 13,
+        "known_clips": {
+          "motions": ["ichika_idle", "ichika_wave"],
+          "facials": ["ichika_blink_constant", "ichika_smile"]
+        }
+      },
+      "generation": {
+        "known_facial_curve_types": {
+          "constant": ["ichika_blink_constant"],
+          "dynamic": ["ichika_smile"]
+        },
+        "generated_placeholder_names": {
+          "facials": {
+            "constant": {
+              "prefix": "ichika_placeholder_facial_constant_",
+              "count": 59
+            },
+            "dynamic": {
+              "prefix": "ichika_placeholder_facial_dynamic_",
+              "count": 12
+            }
+          },
+          "motions": {
+            "prefix": "ichika_placeholder_motion_",
+            "count": 269
+          }
+        }
+      }
+    },
+    {
+      "character": "Mizuki",
+      "motion_set_id": "mizuki-base",
+      "observed": {
+        "facial_count": 76,
+        "motion_count": 278,
+        "constant_facial_count": 62,
+        "dynamic_facial_count": 14,
+        "known_clips": {
+          "motions": ["mizuki_idle", "mizuki_wave"],
+          "facials": ["mizuki_blink_constant", "mizuki_smile"]
+        }
+      },
+      "generation": {
+        "known_facial_curve_types": {
+          "constant": ["mizuki_blink_constant"],
+          "dynamic": ["mizuki_smile"]
+        },
+        "generated_placeholder_names": {
+          "facials": {
+            "constant": {
+              "prefix": "mizuki_placeholder_facial_constant_",
+              "count": 61
+            },
+            "dynamic": {
+              "prefix": "mizuki_placeholder_facial_dynamic_",
+              "count": 13
+            }
+          },
+          "motions": {
+            "prefix": "mizuki_placeholder_motion_",
+            "count": 276
+          }
+        }
+      }
+    }
+  ]
+}

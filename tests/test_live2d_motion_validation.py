@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from updater.live2d.motion_validation import validate_motion_output
+
+FIXTURE_PATH = Path(__file__).parent / "fixtures" / "live2d" / "motion_counts_6.8.0.10.json"
 
 
 def _motion3(
@@ -73,6 +76,53 @@ def _write_set(
         (root / "motion" / f"{name}.motion3.json").write_text(
             json.dumps(document), encoding="utf-8"
         )
+
+
+def _load_motion_count_fixture() -> dict[str, Any]:
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _placeholder_names(spec: dict[str, Any]) -> list[str]:
+    return [f"{spec['prefix']}{index:03d}" for index in range(1, spec["count"] + 1)]
+
+
+def _write_sanitized_count_set(
+    root: Path, motion_set: dict[str, Any]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    observed = motion_set["observed"]
+    known_clips = observed["known_clips"]
+    generation = motion_set["generation"]
+    known_curve_types = generation["known_facial_curve_types"]
+    placeholders = generation["generated_placeholder_names"]
+
+    constant_facials = [
+        *known_curve_types["constant"],
+        *_placeholder_names(placeholders["facials"]["constant"]),
+    ]
+    dynamic_facials = [
+        *known_curve_types["dynamic"],
+        *_placeholder_names(placeholders["facials"]["dynamic"]),
+    ]
+    expressions = [*constant_facials, *dynamic_facials]
+    motions = [
+        *known_clips["motions"],
+        *_placeholder_names(placeholders["motions"]),
+    ]
+    facial_documents = {
+        name: _motion3(
+            curve_id=f"Param{index}",
+            segments=[0, 7, 0, 1, 7] if name in constant_facials else [0, 0, 0, 1, 1],
+        )
+        for index, name in enumerate(expressions)
+    }
+    _write_set(
+        root,
+        expressions=expressions,
+        motions=motions,
+        facial_documents=facial_documents,
+        motion_documents={name: _motion3() for name in motions},
+    )
+    return expressions, motions, constant_facials, dynamic_facials
 
 
 def _codes(report) -> set[str]:
@@ -243,3 +293,61 @@ def test_manifest_traversal_name_is_rejected(tmp_path: Path) -> None:
     assert not report.ok
     assert "manifest_name_traversal" in _codes(report)
     assert not (tmp_path.parent / "outside.motion3.json").exists()
+
+
+def test_sanitized_roadmap_l2d2_counts_from_versioned_fixture(tmp_path: Path) -> None:
+    fixture = _load_motion_count_fixture()
+
+    assert fixture["fixture_status"] == "sanitized"
+    assert fixture["sanitized"] is True
+    assert fixture["metadata_version"] == "6.8.0.10"
+    assert fixture["provenance"]["raw_proprietary_assets_included"] is False
+
+    for motion_set in fixture["motion_sets"]:
+        character = motion_set["character"]
+        observed = motion_set["observed"]
+        expected_facials = observed["facial_count"]
+        expected_motions = observed["motion_count"]
+        expected_constant = observed["constant_facial_count"]
+        expected_dynamic = observed["dynamic_facial_count"]
+        root = tmp_path / character.lower()
+        facial_names, motion_names, constant_names, dynamic_names = _write_sanitized_count_set(
+            root, motion_set
+        )
+
+        assert set(observed["known_clips"]["facials"]) <= set(facial_names)
+        assert set(observed["known_clips"]["motions"]) <= set(motion_names)
+        assert len(facial_names) == expected_facials
+        assert len(motion_names) == expected_motions
+        assert len(constant_names) == expected_constant
+        assert len(dynamic_names) == expected_dynamic
+
+        report = validate_motion_output(
+            root,
+            expected_facials=expected_facials,
+            expected_motions=expected_motions,
+        )
+
+        assert report.ok, character
+        assert (report.facial_count, report.motion_count) == (
+            expected_facials,
+            expected_motions,
+        )
+        assert (
+            report.constant_curve_facial_count,
+            report.dynamic_curve_facial_count,
+        ) == (expected_constant, expected_dynamic)
+
+        manifest = json.loads((root / "BuildMotionData.json").read_text(encoding="utf-8"))
+        assert manifest["expressions"] == facial_names
+        assert manifest["motions"] == motion_names
+        facial_files = list((root / "facial").iterdir())
+        motion_files = list((root / "motion").iterdir())
+        assert {path.name.removesuffix(".motion3.json") for path in facial_files} == set(
+            facial_names
+        )
+        assert {path.name.removesuffix(".motion3.json") for path in motion_files} == set(
+            motion_names
+        )
+        assert all(path.name.endswith(".motion3.json") for path in facial_files)
+        assert not list(root.rglob("*.exp3.json"))
