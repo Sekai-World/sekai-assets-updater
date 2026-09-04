@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from updater.live2d.association import LIVE2D_TABLE_NAMES, build_live2d_index
@@ -103,6 +104,127 @@ def test_exact_costume_character_join_and_normal_candidate_provenance() -> None:
     assert all("Expressions" not in evidence.source_row for evidence in role_evidence)
     assert all("business facial clip" in evidence.rule for evidence in role_evidence)
     assert all(".exp3" in evidence.rule for evidence in role_evidence)
+
+
+def test_prefixed_character_asset_names_match_normal_candidates() -> None:
+    models, motions = fixture_records(
+        ("ichika-unit", "mizuki-unit"), ("ichika-base", "mizuki-base")
+    )
+    tables = business_tables()
+    for row in tables["character2ds"]:
+        if row.get("id") == 101:
+            row["assetName"] = "v2_01ichika"
+        elif row.get("id") == 202:
+            row["assetName"] = "v2_20mizuki"
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=models,
+        motion_sets=motions,
+        tables=tables,
+    )
+
+    assert {
+        model.model_output_id: [
+            (candidate.motion_set_id, candidate.status) for candidate in model.motion_sets
+        ]
+        for model in index.models
+    } == {
+        "ichika-unit": [("ichika-base", CandidateStatus.DERIVED.value)],
+        "mizuki-unit": [("mizuki-base", CandidateStatus.DERIVED.value)],
+    }
+
+
+def test_legacy_character_asset_names_match_normal_candidates() -> None:
+    models, motions = fixture_records(
+        ("ichika-unit", "mizuki-unit"), ("ichika-base", "mizuki-base")
+    )
+    model_names = {
+        "ichika-unit": "model/01ichika_unit",
+        "mizuki-unit": "model/20mizuki_unit",
+    }
+    motion_names = {
+        "ichika-base": "motion/01ichika_motion_base",
+        "mizuki-base": "motion/20mizuki_motion_base",
+    }
+    models = [
+        replace(
+            model, model_bundle=replace(model.model_bundle, name=model_names[model.model_output_id])
+        )
+        for model in models
+    ]
+    motions = [
+        replace(
+            motion,
+            motion_bundle=replace(motion.motion_bundle, name=motion_names[motion.motion_set_id]),
+        )
+        for motion in motions
+    ]
+    tables = business_tables()
+    character_asset_names = {101: "01ichika", 202: "20mizuki"}
+    costume_model_names = {101: "01ichika_unit", 202: "20mizuki_unit"}
+    for row in tables["character2ds"]:
+        if row.get("id") in character_asset_names:
+            row["assetName"] = character_asset_names[row["id"]]
+    for row in tables["costume2ds"]:
+        if row.get("character2dId") in costume_model_names:
+            row["assetName"] = costume_model_names[row["character2dId"]]
+
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=models,
+        motion_sets=motions,
+        tables=tables,
+    )
+
+    assert {
+        model.model_output_id: [
+            (candidate.motion_set_id, candidate.status) for candidate in model.motion_sets
+        ]
+        for model in index.models
+    } == {
+        "ichika-unit": [("ichika-base", CandidateStatus.DERIVED.value)],
+        "mizuki-unit": [("mizuki-base", CandidateStatus.DERIVED.value)],
+    }
+
+
+def test_legacy_joined_character_id_prefix_mismatch_is_auditable() -> None:
+    models, _ = fixture_records(("ichika-unit",), ())
+    legacy_model = replace(
+        models[0],
+        model_bundle=replace(models[0].model_bundle, name="model/01ichika_unit"),
+    )
+    mismatched_motion = synthetic_motion_set(
+        "ichika-legacy-wrong-prefix", "motion/01ichika_motion_base"
+    )
+    tables = business_tables()
+    tables["character2ds"] = [
+        {**row, "characterId": 20, "assetName": "01ichika"} if row.get("id") == 101 else row
+        for row in tables["character2ds"]
+    ]
+    tables["costume2ds"] = [
+        {**row, "assetName": "01ichika_unit"} if row.get("character2dId") == 101 else row
+        for row in tables["costume2ds"]
+    ]
+    index = build_live2d_index(
+        metadata_version="6.8.0.10",
+        master_db_version="6.8.0.10",
+        model_outputs=[legacy_model],
+        motion_sets=[mismatched_motion],
+        tables=tables,
+    )
+
+    assert index.models[0].motion_sets == ()
+    assert any(
+        diagnostic.code == DiagnosticCode.LIVE2D_MAPPING_AMBIGUOUS
+        and diagnostic.severity == "warning"
+        and diagnostic.details.get("reason") == "character_id_prefix_mismatch"
+        and diagnostic.details.get("character_id") == 20
+        and diagnostic.details.get("bundle_prefix") == "01"
+        for diagnostic in index.diagnostics
+    )
 
 
 def test_exact_bundle_name_costume_shape_is_supported() -> None:

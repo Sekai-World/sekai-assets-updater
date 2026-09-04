@@ -368,6 +368,10 @@ def _v2_prefix_parts(value: str) -> tuple[str, str] | None:
 
 
 def _model_variant_matches(model_leaf: str, asset_name: str) -> bool:
+    if model_leaf.startswith(f"{asset_name}_"):
+        return True
+    if asset_name.startswith("v2_"):
+        return False
     if not model_leaf.startswith("v2_"):
         return False
     parts = _v2_prefix_parts(model_leaf[3:])
@@ -376,9 +380,9 @@ def _model_variant_matches(model_leaf: str, asset_name: str) -> bool:
 
 def _motion_numeric_prefix(motion: SharedMotionSetRecord) -> str | None:
     leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
-    if not leaf.startswith("v2_"):
-        return None
-    parts = _v2_prefix_parts(leaf[3:])
+    if leaf.startswith("v2_"):
+        leaf = leaf[3:]
+    parts = _v2_prefix_parts(leaf)
     return parts[0] if parts else None
 
 
@@ -415,17 +419,33 @@ def _motion_match_kind(
     asset_name = _string_value(context.row, "assetName")
     if asset_name is None:
         return None
-    parts = _motion_v2_parts(motion)
-    if parts is None:
-        return None
-    numeric_prefix, tail = parts
-    if not tail.startswith(f"{asset_name}_"):
-        return None
+    leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
+    if leaf.startswith("v2_"):
+        parts = _motion_v2_parts(motion)
+        if parts is None:
+            return None
+        numeric_prefix, tail = parts
+        if asset_name.startswith("v2_"):
+            if not leaf.startswith(f"{asset_name}_"):
+                return None
+            rest = leaf[len(asset_name) :]
+        else:
+            if not tail.startswith(f"{asset_name}_"):
+                return None
+            rest = tail[len(asset_name) :]
+    else:
+        if not leaf.startswith(f"{asset_name}_"):
+            return None
+        numeric_prefix = _motion_numeric_prefix(motion)
+        rest = leaf[len(asset_name) :]
     expected_character_id = _numeric_character_id(context.character_id)
-    if expected_character_id is not None and int(numeric_prefix) != expected_character_id:
+    if (
+        numeric_prefix is not None
+        and expected_character_id is not None
+        and int(numeric_prefix) != expected_character_id
+    ):
         return "character_id_mismatch" if context.exact_join else None
 
-    rest = tail[len(asset_name) :]
     return _motion_variant_kind(rest)
 
 
