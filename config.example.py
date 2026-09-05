@@ -119,7 +119,21 @@ ASSET_LOCAL_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "bundle")
 LIVE2D_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "live2d-bundle")
 
 # Asset remote storage settings. Each target's type controls which pipeline
-# uploads to it: normal assets, Live2D post-processing, or charts.
+# uploads to it: normal assets, legacy Live2D output, associated Live2D viewer
+# assets, or charts.
+#
+# A "live2d-associated" target publishes only the latest public viewer assets
+# below the temporary standalone live2d-associated/v1/ namespace: model_list.json,
+# model/, motion/, and facial/ (selected paths may be nested). Its standalone,
+# new-pipeline model_list.json is legacy-shaped, adds resolved motion-set file
+# paths and clip filenames, and is uploaded after the assets as the ready marker.
+# Detailed association index data, evidence, rule codes, diagnostics, checksums,
+# source rows, and bundle metadata are only the latest local audit data; they are
+# never uploaded and are not used by the viewer. The active pipeline has no
+# candidates, history, current.json, candidate.json, rollout state, pointers,
+# rollback history, or remote revision history, locally or remotely.
+# This namespace is renamed to live2d when legacy retires; legacy output remains
+# untouched while both namespaces coexist.
 #
 # Two backends are supported for "normal" targets:
 # - subprocess (default): spawns `program` with `args`, replacing "src"/"dst".
@@ -154,15 +168,19 @@ ASSET_REMOTE_STORAGE = [
 # Optional post-processing in the default assets mode. Explicit --mode
 # live2d/live2d-associated/charts always runs its corresponding post-processor.
 # Deprecated: the legacy flag and live2d/model_list.json output remain available
-# for compatibility. Prefer the independently rolled out association index.
+# for compatibility. The associated pipeline generates its own model_list.json
+# under live2d-associated/v1/; the legacy live2d/ output remains untouched while
+# both namespaces coexist.
 ENABLE_LIVE2D_POSTPROCESS = False
 ENABLE_LIVE2D_ASSOCIATED_PIPELINE = False
 ENABLE_CHARTS_POSTPROCESS = False
-# Optional path to a pre-built, validated Live2DIndex JSON document. The
-# associated mode refuses to invent an index when this is unset.
+# Optional path to a pre-built, validated Live2DIndex JSON document for the
+# latest local audit data. The associated mode refuses to invent an index when
+# this is unset.
 LIVE2D_ASSOCIATION_INDEX_PATH = None
 # Optional path to an explicit Live2D association-selection manifest. When set,
-# it is used to build the index from the current run's Live2D bundle metadata.
+# it is used to build the latest local audit data from the run's Live2D bundle
+# metadata.
 LIVE2D_ASSOCIATION_SELECTIONS_PATH = None
 # Master-data server used to load chart metadata. Defaults to REGION; set this
 # when its repository name differs from the asset/cache region (for example,

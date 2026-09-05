@@ -37,6 +37,7 @@ from updater.live2d.contracts import (
 )
 from updater.live2d.keys import Live2DKeys, changed_keys, compute_keys
 from updater.live2d.publication import validate_live2d_outputs
+from updater.live2d.viewer_catalog import collect_viewer_asset_files, copy_viewer_assets
 
 LIVE2D_ASSOCIATED_NAMESPACE = "live2d-associated/v1"
 LIVE2D_ASSOCIATED_NAMESPACE_PARTS = ("live2d-associated", "v1")
@@ -120,6 +121,7 @@ __all__ = [
     "mark_uploaded_storages",
     "namespace_path",
     "publish_candidate",
+    "publish_latest_associated_index",
     "publish_index",
     "publish_live2d_associated_index",
     "record_uploaded_storages",
@@ -834,26 +836,14 @@ def _reject_legacy_index_references(index: Live2DIndex) -> None:
 
 
 def _copy_referenced_outputs(index: Live2DIndex, source_root: Path, candidate_root: Path) -> None:
-    directories = (
-        {record.output_path for record in index.model_outputs}
-        | {record.motion_output_path for record in index.motion_sets}
-        | {record.facial_output_path for record in index.motion_sets}
-    )
-    for directory in directories:
-        (candidate_root / directory).mkdir(parents=True, exist_ok=True)
-
-    for directory, relative in _referenced_files(index):
-        source = source_root / directory / relative
-        destination = candidate_root / directory / relative
-        if destination.is_symlink():
-            raise Live2DAssociatedRolloutError(f"candidate output is a symlink: {destination}")
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(source, destination)
-        except OSError as exc:
-            raise Live2DAssociatedRolloutError(
-                f"cannot copy referenced Live2D output {source}: {exc}"
-            ) from exc
+    try:
+        copy_viewer_assets(index, source_root, candidate_root)
+    except Exception as exc:
+        if isinstance(exc, Live2DAssociatedRolloutError):
+            raise
+        raise Live2DAssociatedRolloutError(
+            f"cannot stage referenced Live2D outputs: {exc}"
+        ) from exc
 
 
 def _file_checksum(path: Path) -> str:
@@ -868,11 +858,13 @@ def _file_checksum(path: Path) -> str:
 
 
 def _output_checksums(index: Live2DIndex, root: Path) -> dict[str, str]:
-    checksums: dict[str, str] = {}
-    for directory, relative in _referenced_files(index):
-        key = f"{directory}/{relative}"
-        checksums[key] = _file_checksum(root / directory / relative)
-    return dict(sorted(checksums.items()))
+    try:
+        files = collect_viewer_asset_files(index, root)
+    except Exception as exc:
+        if isinstance(exc, Live2DAssociatedRolloutError):
+            raise
+        raise Live2DAssociatedRolloutError(f"cannot inspect staged Live2D outputs: {exc}") from exc
+    return {relative: _file_checksum(path) for relative, path in files}
 
 
 def _pointer_for_index(index: Live2DIndex, candidate_id: str, root: Path) -> CandidatePointer:
@@ -1272,6 +1264,50 @@ def publish_candidate(
         target_state,
     )
     return current_pointer
+
+
+def _prepare_audit_namespace(namespace: Path) -> None:
+    """Prepare only the local audit namespace, without rollout subdirectories."""
+
+    try:
+        namespace_stat = namespace.lstat()
+    except FileNotFoundError:
+        namespace_stat = None
+    except OSError as exc:
+        raise Live2DAssociatedRolloutError(
+            f"cannot inspect associated audit namespace {namespace}: {exc}"
+        ) from exc
+    if namespace_stat is not None:
+        if stat.S_ISLNK(namespace_stat.st_mode) or not stat.S_ISDIR(namespace_stat.st_mode):
+            raise Live2DAssociatedRolloutError(
+                f"associated audit namespace must be a real directory: {namespace}"
+            )
+    try:
+        state.prepare_state_directory(namespace)
+    except state.StateError as exc:
+        raise Live2DAssociatedRolloutError(
+            f"cannot prepare associated audit namespace {namespace}: {exc}"
+        ) from exc
+
+
+def publish_latest_associated_index(
+    index: IndexInput,
+    output_root: PathInput,
+    namespace_root: PathInput,
+) -> Live2DIndex:
+    """Atomically write the latest local audit index without rollout history."""
+
+    validated = _validate_publishable_index(index)
+    source = _as_path(output_root, "output_root")
+    namespace = _as_path(namespace_root, "namespace_root")
+    _reject_legacy_index_references(validated)
+    try:
+        validate_live2d_outputs(validated, source)
+    except Exception as exc:
+        raise Live2DAssociatedRolloutError(f"referenced Live2D outputs are invalid: {exc}") from exc
+    _prepare_audit_namespace(namespace)
+    _atomic_write_contract(namespace / _INDEX_FILENAME, validated)
+    return validated
 
 
 def publish_live2d_associated_index(

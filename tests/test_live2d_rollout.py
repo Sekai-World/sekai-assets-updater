@@ -23,6 +23,7 @@ from updater.live2d.rollout import (
     live2d_associated_state_path,
     load_current_index,
     load_current_pointer,
+    load_live2d_index,
     load_rollout_state,
     publish_candidate,
     rollback_live2d_associated,
@@ -54,6 +55,10 @@ def materialize_outputs(root: Path, index: Live2DIndex) -> None:
     for record in index.model_outputs:
         directory = root / record.output_path
         directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{directory.name}.model3.json").write_text(
+            json.dumps({"Version": 3, "FileReferences": {"Moc": record.file_references.moc}}),
+            encoding="utf-8",
+        )
         references = record.file_references
         for relative in (
             references.moc,
@@ -169,6 +174,7 @@ def test_publish_copies_only_referenced_outputs_and_writes_atomic_current(
     assert (namespace / "index.json").read_bytes() == canonical_index_json_bytes(index)
     assert json.loads((namespace / "current.json").read_bytes())["index_sha256"]
     assert model_list.read_bytes() == b"legacy-authoritative\n"
+    assert list((namespace / "candidates" / pointer.candidate_id).rglob("*.model3.json"))
     assert not list((namespace / "candidates" / pointer.candidate_id).rglob("model_list.json"))
     assert not (namespace / "candidates" / pointer.candidate_id / "current.json").exists()
     assert load_rollout_state(state_path).current == pointer  # type: ignore[union-attr]
@@ -288,7 +294,7 @@ def test_associated_dispatch_accepts_explicit_mapping_without_calling_legacy_pro
 
     with (
         patch.object(dispatch, "_process_live2d", new=AsyncMock()) as legacy,
-        patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()) as upload,
+        patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()) as upload,
     ):
         asyncio.run(
             dispatch.run_specialized_postprocess(
@@ -302,8 +308,14 @@ def test_associated_dispatch_accepts_explicit_mapping_without_calling_legacy_pro
 
     legacy.assert_not_awaited()
     upload.assert_awaited_once()
+    assert upload.await_args.args[0] == index
+    assert Path(str(upload.await_args.args[1])) == source
     assert legacy_model_list.read_bytes() == b"legacy\n"
-    assert load_current_index(live2d_associated_namespace_path(tmp_path)) == index
+    namespace = live2d_associated_namespace_path(tmp_path)
+    assert load_live2d_index(namespace / "index.json") == index
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
+    assert not (config.DL_LIST_CACHE_PATH.parent / "live2d_associated_state.json").exists()
 
 
 def test_forced_associated_dispatch_rejects_missing_explicit_index(tmp_path: Path) -> None:
@@ -344,7 +356,7 @@ def test_standalone_associated_dispatch_restores_missing_motions_once(tmp_path: 
             "restore_live2d_motions",
             new=AsyncMock(side_effect=restore_missing_motions),
         ) as restore,
-        patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()) as upload,
+        patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()) as upload,
     ):
         asyncio.run(
             dispatch.run_specialized_postprocess(
@@ -360,7 +372,10 @@ def test_standalone_associated_dispatch_restores_missing_motions_once(tmp_path: 
     restore.assert_awaited_once()
     assert restore.await_args.kwargs["param_id_map"] == {"A": "B"}
     upload.assert_awaited_once()
-    assert load_current_index(live2d_associated_namespace_path(tmp_path)) == index
+    namespace = live2d_associated_namespace_path(tmp_path)
+    assert load_live2d_index(namespace / "index.json") == index
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
 
 
 def test_assets_new_flag_only_recovers_models_and_runs_associated_mode(tmp_path: Path) -> None:
@@ -437,8 +452,8 @@ def test_associated_pipeline_without_storage_refuses_local_only_publish(tmp_path
     assert not namespace.exists()
 
 
-def test_assets_upload_failure_is_not_swallowed_and_reports_partial_remote_divergence(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_assets_upload_failure_is_not_swallowed_and_leaves_no_local_audit(
+    tmp_path: Path,
 ) -> None:
     index = Live2DIndex.from_dict(publishable_index_data())
     source = tmp_path / "live2d"
@@ -453,7 +468,7 @@ def test_assets_upload_failure_is_not_swallowed_and_reports_partial_remote_diver
     upload_error = RuntimeError("second remote upload failed")
     with patch.object(
         dispatch,
-        "_upload_live2d_associated_candidate",
+        "_upload_live2d_associated_projection",
         new=AsyncMock(side_effect=[None, upload_error]),
     ) as upload:
         call = dispatch.run_specialized_postprocess(
@@ -468,54 +483,42 @@ def test_assets_upload_failure_is_not_swallowed_and_reports_partial_remote_diver
             asyncio.run(call)
 
     assert upload.await_count == 2
-    assert load_current_pointer(namespace) is None
-    assert any("remote divergence" in record.message for record in caplog.records)
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
+    assert not (namespace / "index.json").exists()
+    assert not (config.DL_LIST_CACHE_PATH.parent / "live2d_associated_state.json").exists()
 
 
-def test_upload_failure_surfaces_local_rollback_failure(tmp_path: Path) -> None:
-    first = Live2DIndex.from_dict(publishable_index_data())
+def test_upload_failure_does_not_create_local_rollout_history(tmp_path: Path) -> None:
+    index = Live2DIndex.from_dict(publishable_index_data())
     source = tmp_path / "live2d"
-    materialize_outputs(source, first)
+    materialize_outputs(source, index)
     namespace = live2d_associated_namespace_path(tmp_path)
     state_path = tmp_path / "cache" / "live2d_associated_state.json"
-    publish_candidate(first, source, namespace, state_path=state_path)
-
-    changed_data = publishable_index_data()
-    checksum = "sha256:" + ("7" * 64)
-    changed_data["model_outputs"][0]["model_bundle"]["checksum"] = checksum
-    changed_data["models"][0]["model_bundle"]["checksum"] = checksum
-    second = Live2DIndex.from_dict(changed_data)
     config = associated_config(tmp_path)
     from unittest.mock import AsyncMock, patch
 
-    with (
-        patch.object(
-            dispatch,
-            "_upload_live2d_associated_candidate",
-            new=AsyncMock(side_effect=RuntimeError("upload failed")),
-        ),
-        patch.object(
-            dispatch,
-            "rollback_live2d_associated",
-            side_effect=RuntimeError("rollback failed"),
-        ),
+    with patch.object(
+        dispatch,
+        "_upload_live2d_associated_projection",
+        new=AsyncMock(side_effect=RuntimeError("upload failed")),
     ):
         call = dispatch.run_specialized_postprocess(
             "live2d-associated",
             config,
-            association_index=second,
+            association_index=index,
             association_output_root=source,
             association_namespace_root=namespace,
+            association_state_path=state_path,
             skip_missing_sources=True,
         )
-        with pytest.raises(
-            Live2DAssociatedRolloutError,
-            match="upload failed.*rollback failed.*remote divergence",
-        ):
+        with pytest.raises(RuntimeError, match="upload failed"):
             asyncio.run(call)
+    assert not namespace.exists()
+    assert not state_path.exists()
 
 
-def test_unchanged_associated_candidate_skips_uploaded_storage_and_retries_changed_target(
+def test_associated_dispatch_always_uploads_latest_projection_to_each_storage(
     tmp_path: Path,
 ) -> None:
     index = Live2DIndex.from_dict(publishable_index_data())
@@ -525,7 +528,7 @@ def test_unchanged_associated_candidate_skips_uploaded_storage_and_retries_chang
     config = associated_config(tmp_path)
     from unittest.mock import AsyncMock, patch
 
-    with patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()) as upload:
+    with patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()) as upload:
         for _ in range(2):
             asyncio.run(
                 dispatch.run_specialized_postprocess(
@@ -536,7 +539,7 @@ def test_unchanged_associated_candidate_skips_uploaded_storage_and_retries_chang
                     association_namespace_root=namespace,
                 )
             )
-        assert upload.await_count == 1
+        assert upload.await_count == 2
 
         changed_target_config = associated_config(tmp_path, [associated_storage("remote/changed")])
         asyncio.run(
@@ -548,4 +551,4 @@ def test_unchanged_associated_candidate_skips_uploaded_storage_and_retries_chang
                 association_namespace_root=namespace,
             )
         )
-        assert upload.await_count == 2
+        assert upload.await_count == 3

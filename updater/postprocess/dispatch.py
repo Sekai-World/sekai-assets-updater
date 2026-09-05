@@ -15,17 +15,16 @@ from updater.live2d.publication import validate_live2d_outputs
 from updater.live2d.restore import collect_param_id_map, restore_live2d_motions
 from updater.live2d.rollout import (
     Live2DAssociatedRolloutError,
-    disable_live2d_associated,
     live2d_associated_namespace_path,
-    live2d_associated_state_path,
-    load_current_pointer,
     load_live2d_index,
-    load_rollout_state,
-    publish_live2d_associated_index,
-    record_uploaded_storages,
-    rollback_live2d_associated,
-    storage_receipt_key,
+    publish_latest_associated_index,
     validate_publishable_index,
+)
+from updater.live2d.viewer_catalog import (
+    PUBLIC_MODEL_LIST_FILENAME,
+    collect_viewer_asset_files,
+    stage_viewer_projection,
+    viewer_asset_directories,
 )
 from updater.postprocess.charts import (
     _render_charts,
@@ -156,35 +155,41 @@ async def _process_live2d(
     return True
 
 
-async def _upload_live2d_associated_candidate(
-    namespace_root: StdPath,
-    candidate_id: str,
+async def _upload_live2d_associated_projection(
+    index: Live2DIndex | Mapping[str, object],
+    source_root: StdPath,
     storage: dict,
     config,
 ) -> None:
-    """Upload only associated candidate material, never the legacy Live2D tree."""
+    """Upload the latest public viewer projection, never local rollout metadata."""
 
     _validate_live2d_storage(storage)
+    validated_index = validate_publishable_index(index)
     remote_root = Path(f"{str(storage['base']).rstrip('/')}/live2d-associated/v1")
-    candidate_root = namespace_root / "candidates" / candidate_id
-    await upload_directory(
-        Path(str(candidate_root)),
-        remote_root / "candidates" / candidate_id,
-        storage["program"],
-        storage["args"],
-        config=config,
-    )
 
-    # Remote directory uploads do not provide a portable atomic file-replace
-    # primitive. Upload the validated root manifests as ordinary files; the
-    # local current.json replacement remains the authoritative boundary.
     with tempfile.TemporaryDirectory(prefix="sekai-live2d-associated-root-") as temp_dir:
         root = StdPath(temp_dir) / "v1"
         root.mkdir()
-        for filename in ("index.json", "current.json"):
-            shutil.copy2(namespace_root / filename, root / filename)
+        stage_viewer_projection(validated_index, source_root, root)
+
+        # Upload assets first.  The model list is the only public commit marker
+        # and is therefore uploaded after every referenced asset directory.
+        for directory in viewer_asset_directories(validated_index):
+            await upload_directory(
+                Path(str(root / directory)),
+                remote_root / directory,
+                storage["program"],
+                storage["args"],
+                config=config,
+            )
+
+        model_list_upload = StdPath(temp_dir) / ".model-list-upload"
+        model_list_upload.mkdir()
+        shutil.copy2(
+            root / PUBLIC_MODEL_LIST_FILENAME, model_list_upload / PUBLIC_MODEL_LIST_FILENAME
+        )
         await upload_directory(
-            Path(str(root)),
+            Path(str(model_list_upload)),
             remote_root,
             storage["program"],
             storage["args"],
@@ -426,28 +431,6 @@ async def _ensure_associated_motion_outputs(
         ) from exc
 
 
-def _log_associated_remote_divergence(
-    candidate_id: str,
-    attempted_storage_keys: list[str],
-    successful_storage_keys: list[str],
-    *,
-    rollback_error: Exception | None = None,
-) -> None:
-    detail = (
-        "local rollback also failed: " + str(rollback_error)
-        if rollback_error is not None
-        else "local rollout was rolled back"
-    )
-    logger.error(
-        "Live2D-associated remote divergence is possible for candidate %s: %s; "
-        "attempted_storages=%s successful_storages=%s",
-        candidate_id,
-        detail,
-        attempted_storage_keys,
-        successful_storage_keys,
-    )
-
-
 def _validated_associated_storages(config) -> list[dict]:
     storages = get_specialized_storage(config, "live2d-associated")
     if not storages:
@@ -636,139 +619,51 @@ async def _prepare_associated_index(
     )
 
 
-async def _publish_associated_locally(
+async def _ensure_associated_outputs_for_dispatch(
     config,
+    validated_index: Live2DIndex,
     source_root: StdPath,
-    extracted_dir: StdPath,
-    validated_index,
-    association_namespace_root,
-    association_state_path,
-    motion_outputs_ready: bool,
-):
-    namespace_root = association_namespace_root or live2d_associated_namespace_path(extracted_dir)
-    state_path = association_state_path or live2d_associated_state_path(config)
-    previous = load_current_pointer(namespace_root)
-    previous_state = load_rollout_state(state_path)
-    await _ensure_associated_motion_outputs(
-        config,
-        validated_index,
-        StdPath(str(source_root)),
-        motion_outputs_ready=motion_outputs_ready,
-    )
-    pointer = publish_live2d_associated_index(
-        validated_index,
-        source_root,
-        namespace_root,
-        state_path=state_path,
-    )
-    return namespace_root, state_path, previous, previous_state, pointer
-
-
-async def _prepare_associated_rollout(
-    config,
-    source_root: StdPath,
-    extracted_dir: StdPath,
-    validated_index,
-    association_namespace_root,
-    association_state_path,
     motion_outputs_ready: bool,
     skip_missing_sources: bool,
-):
-    if not skip_missing_sources:
-        return await _publish_associated_locally(
-            config,
-            source_root,
-            extracted_dir,
-            validated_index,
-            association_namespace_root,
-            association_state_path,
-            motion_outputs_ready,
-        )
+) -> bool:
     try:
-        return await _publish_associated_locally(
+        await _ensure_associated_motion_outputs(
             config,
-            source_root,
-            extracted_dir,
             validated_index,
-            association_namespace_root,
-            association_state_path,
-            motion_outputs_ready,
+            source_root,
+            motion_outputs_ready=motion_outputs_ready,
         )
     except Live2DAssociatedRolloutError as exc:
-        logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, exc)
-        return None
+        if skip_missing_sources:
+            logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, exc)
+            return False
+        raise
+    return True
 
 
-def _associated_storages_to_upload(storages, previous, previous_state, pointer):
-    storage_entries = [(storage, storage_receipt_key(storage)) for storage in storages]
-    receipts = (
-        previous_state.uploaded_storages
-        if previous_state is not None
-        and previous is not None
-        and previous_state.current == previous
-        else {}
-    )
-    return [
-        (storage, storage_key)
-        for storage, storage_key in storage_entries
-        if receipts.get(storage_key) != pointer.candidate_id
-    ]
-
-
-async def _upload_associated_candidate_transaction(
+async def _upload_associated_projections(
     config,
-    namespace_root,
-    state_path,
-    previous,
-    pointer,
-    storages_to_upload,
-):
-    attempted_storage_keys: list[str] = []
-    successful_storage_keys: list[str] = []
-    try:
-        for storage, storage_key in storages_to_upload:
-            attempted_storage_keys.append(storage_key)
-            await _upload_live2d_associated_candidate(
-                StdPath(str(namespace_root)),
-                pointer.candidate_id,
+    validated_index: Live2DIndex,
+    source_root: StdPath,
+    storages: list[dict],
+) -> None:
+    """Upload the latest projection to every configured storage, without receipts."""
+
+    first_error: Exception | None = None
+    for storage in storages:
+        try:
+            await _upload_live2d_associated_projection(
+                validated_index,
+                source_root,
                 storage,
                 config,
             )
-            successful_storage_keys.append(storage_key)
-        record_uploaded_storages(
-            namespace_root,
-            pointer.candidate_id,
-            successful_storage_keys,
-            state_path=state_path,
-        )
-    except Exception as upload_error:
-        try:
-            if previous is None:
-                disable_live2d_associated(namespace_root, state_path=state_path)
-            else:
-                rollback_live2d_associated(
-                    namespace_root,
-                    previous.candidate_id,
-                    state_path=state_path,
-                )
-        except Exception as rollback_error:
-            _log_associated_remote_divergence(
-                pointer.candidate_id,
-                attempted_storage_keys,
-                successful_storage_keys,
-                rollback_error=rollback_error,
-            )
-            raise Live2DAssociatedRolloutError(
-                f"associated upload failed: {upload_error}; "
-                f"local rollback failed: {rollback_error}; remote divergence is possible"
-            ) from upload_error
-        if attempted_storage_keys:
-            _log_associated_remote_divergence(
-                pointer.candidate_id,
-                attempted_storage_keys,
-                successful_storage_keys,
-            )
-        raise
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            logger.error("Live2D-associated projection upload failed: %s", exc)
+    if first_error is not None:
+        raise first_error
 
 
 async def _process_live2d_associated(
@@ -785,7 +680,7 @@ async def _process_live2d_associated(
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
     asset_metadata_version: str | None = None,
 ) -> None:
-    """Build or load an explicit association index and publish it transactionally."""
+    """Build, upload, and locally audit the latest associated projection."""
 
     storages = _validated_associated_storages(config)
 
@@ -826,46 +721,35 @@ async def _process_live2d_associated(
     if validated_index is None:
         return
 
-    rollout = await _prepare_associated_rollout(
+    if not await _ensure_associated_outputs_for_dispatch(
         config,
-        source_root,
-        extracted_dir,
         validated_index,
-        association_namespace_root,
-        association_state_path,
+        StdPath(str(source_root)),
         motion_outputs_ready,
         skip_missing_sources,
-    )
-    if rollout is None:
+    ):
         return
-    namespace_root, state_path, previous, previous_state, pointer = rollout
-    storages_to_upload = _associated_storages_to_upload(
-        storages,
-        previous,
-        previous_state,
-        pointer,
-    )
-    if not storages_to_upload:
-        logger.info(
-            "Live2D-associated candidate %s is unchanged and has upload receipts for all "
-            "configured storages; skipping remote upload",
-            pointer.candidate_id,
-        )
-        return
+    try:
+        collect_viewer_asset_files(validated_index, StdPath(str(source_root)))
+    except Exception as exc:
+        mapped_error = Live2DAssociatedRolloutError(f"associated viewer outputs are invalid: {exc}")
+        if skip_missing_sources:
+            logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, mapped_error)
+            return
+        raise mapped_error from exc
 
-    await _upload_associated_candidate_transaction(
+    await _upload_associated_projections(
         config,
-        namespace_root,
-        state_path,
-        previous,
-        pointer,
-        storages_to_upload,
+        validated_index,
+        StdPath(str(source_root)),
+        storages,
     )
+
+    namespace_root = association_namespace_root or live2d_associated_namespace_path(extracted_dir)
+    publish_latest_associated_index(validated_index, source_root, namespace_root)
 
     logger.info(
-        "Live2D-associated index published at %s/current.json -> %s",
-        namespace_root,
-        pointer.candidate_id,
+        "Live2D-associated public viewer projection uploaded and latest local audit index stored"
     )
 
 

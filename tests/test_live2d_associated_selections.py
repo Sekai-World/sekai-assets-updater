@@ -17,7 +17,7 @@ from updater.live2d.contracts import Live2DIndex
 from updater.live2d.rollout import (
     Live2DAssociatedRolloutError,
     live2d_associated_namespace_path,
-    load_current_index,
+    load_live2d_index,
 )
 from updater.postprocess import dispatch
 from updater.postprocess.live2d_associated_selections import (
@@ -174,7 +174,7 @@ def test_dispatch_builds_manifest_index_and_publishes_to_associated_namespace(
     manifest_path.write_text(json.dumps(_manifest(master_root)), encoding="utf-8")
     config = _config(tmp_path, manifest_path)
 
-    with patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()) as upload:
+    with patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()) as upload:
         asyncio.run(
             dispatch.run_specialized_postprocess(
                 "live2d-associated",
@@ -184,12 +184,16 @@ def test_dispatch_builds_manifest_index_and_publishes_to_associated_namespace(
             )
         )
 
-    index = load_current_index(live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR))
+    namespace = live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR)
+    index = load_live2d_index(namespace / "index.json")
     assert index is not None
     assert index.metadata_version == "asset-v1"
     assert index.master_db_version == "master-v1"
     assert index.model_outputs[0].output_path == "model/selected"
     assert index.models[0].motion_sets[0].motion_set_id == "motion-id"
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
+    assert not (config.DL_LIST_CACHE_PATH.parent / "live2d_associated_state.json").exists()
     upload.assert_awaited_once()
 
 
@@ -220,7 +224,7 @@ def test_cold_manifest_dispatch_restores_selected_motion_before_build_and_publis
         events.append("build")
         return real_build(*args, **kwargs)
 
-    real_publish = dispatch.publish_live2d_associated_index
+    real_publish = dispatch.publish_latest_associated_index
 
     def publish_index(*args, **kwargs):
         events.append("publish")
@@ -234,8 +238,8 @@ def test_cold_manifest_dispatch_restores_selected_motion_before_build_and_publis
             new=AsyncMock(side_effect=restore_selected),
         ) as restore,
         patch.object(dispatch, "build_live2d_association_index", side_effect=build_index),
-        patch.object(dispatch, "publish_live2d_associated_index", side_effect=publish_index),
-        patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()),
+        patch.object(dispatch, "publish_latest_associated_index", side_effect=publish_index),
+        patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()),
     ):
         asyncio.run(
             dispatch.run_specialized_postprocess(
@@ -260,7 +264,7 @@ def test_explicit_prebuilt_index_path_takes_precedence_over_manifest(tmp_path: P
     index_path.write_bytes(index.canonical_json_bytes())
     config = _config(tmp_path, tmp_path / "manifest-does-not-exist.json")
 
-    with patch.object(dispatch, "_upload_live2d_associated_candidate", new=AsyncMock()):
+    with patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()):
         asyncio.run(
             dispatch.run_specialized_postprocess(
                 "live2d-associated",
@@ -271,10 +275,10 @@ def test_explicit_prebuilt_index_path_takes_precedence_over_manifest(tmp_path: P
             )
         )
 
-    assert (
-        load_current_index(live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR))
-        == index
-    )
+    namespace = live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR)
+    assert load_live2d_index(namespace / "index.json") == index
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
 
 
 @pytest.mark.parametrize("skip_missing_sources", [False, True])
