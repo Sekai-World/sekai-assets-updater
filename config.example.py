@@ -175,13 +175,28 @@ ENABLE_LIVE2D_POSTPROCESS = False
 ENABLE_LIVE2D_ASSOCIATED_PIPELINE = False
 ENABLE_CHARTS_POSTPROCESS = False
 # Optional path to a pre-built, validated Live2DIndex JSON document for the
-# latest local audit data. The associated mode refuses to invent an index when
-# this is unset.
+# latest local audit data. If neither this nor an explicit selection manifest
+# is set, associated mode discovers selections from current Bundle metadata.
 LIVE2D_ASSOCIATION_INDEX_PATH = None
 # Optional path to an explicit Live2D association-selection manifest. When set,
 # it is used to build the latest local audit data from the run's Live2D bundle
-# metadata.
+# metadata. It takes precedence over automatic discovery but not over an
+# explicit association index or index path supplied to the dispatcher.
 LIVE2D_ASSOCIATION_SELECTIONS_PATH = None
+# Local directory containing the six Live2D master-data JSON tables. Required
+# only when automatic association discovery is used; it takes precedence over
+# the online archive URL below.
+LIVE2D_ASSOCIATION_MASTER_DATA_DIR = None
+# Optional GitHub repository or direct archive URL for automatic discovery. If
+# the local directory above is unset, one latest branch archive is downloaded
+# per automatic association run; the master data is never uploaded.
+LIVE2D_ASSOCIATION_MASTER_DATA_URL = None
+# Branch used for a GitHub repository URL. This is a moving branch, not a pinned
+# revision; the default follows the repository's current main branch contents.
+LIVE2D_ASSOCIATION_MASTER_DATA_BRANCH = "main"
+# Stable local master-data version label used by automatic discovery. Online
+# mode uses latest:<branch> when this remains "local".
+LIVE2D_ASSOCIATION_MASTER_DB_VERSION = "local"
 # Master-data server used to load chart metadata. Defaults to REGION; set this
 # when its repository name differs from the asset/cache region (for example,
 # TC charts use "tc" while TC assets use the TW region).

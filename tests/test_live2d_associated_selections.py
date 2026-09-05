@@ -64,8 +64,8 @@ def _bundle_metadata() -> dict[str, dict[str, str]]:
     }
 
 
-def _write_motion_outputs(root: Path) -> None:
-    motion_bundle = root / "motion" / "base"
+def _write_motion_outputs(root: Path, relative_path: str = "motion/base") -> None:
+    motion_bundle = root / relative_path
     motion_bundle.mkdir(parents=True, exist_ok=True)
     (motion_bundle / "BuildMotionData.json").write_text(
         json.dumps({"motions": ["idle"], "expressions": ["smile"]}), encoding="utf-8"
@@ -100,6 +100,30 @@ def _write_outputs(root: Path) -> None:
     (model / "textures" / "selected.png").write_bytes(b"texture")
 
     _write_motion_outputs(root)
+
+
+def _write_automatic_outputs(root: Path) -> None:
+    model = root / "model" / "v1" / "main" / "model"
+    model.mkdir(parents=True, exist_ok=True)
+    (model / "model.model3.json").write_text(
+        json.dumps(
+            {
+                "Version": 3,
+                "FileReferences": {
+                    "Moc": "model.moc3",
+                    "Textures": ["textures/model.png"],
+                    "Physics": "model.physics3.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (model / "model.moc3").write_bytes(b"moc")
+    (model / "model.physics3.json").write_bytes(b"physics")
+    (model / "textures").mkdir()
+    (model / "textures" / "model.png").write_bytes(b"texture")
+
+    _write_motion_outputs(root, "motion/v2/main/base")
 
 
 def _config(root: Path, manifest_path: Path | None = None) -> SimpleNamespace:
@@ -195,6 +219,102 @@ def test_dispatch_builds_manifest_index_and_publishes_to_associated_namespace(
     assert not (namespace / "current.json").exists()
     assert not (config.DL_LIST_CACHE_PATH.parent / "live2d_associated_state.json").exists()
     upload.assert_awaited_once()
+
+
+def test_dispatch_automatically_discovers_current_bundles_without_manifest_or_index(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "extracted" / "live2d"
+    _write_automatic_outputs(source_root)
+    master_root = tmp_path / "master"
+    _write_master_tables(master_root)
+    config = _config(tmp_path)
+    config.LIVE2D_ASSOCIATION_MASTER_DATA_DIR = master_root
+    bundles = {
+        "model-key": {
+            "bundleName": "live2d/model/model",
+            "paths": ["StartApp/live2d/model/v1/main/model"],
+            "hash": "model-hash",
+        },
+        "motion-key": {
+            "bundleName": "live2d/motion/base",
+            "paths": ["StartApp/live2d/motion/v2/main/base"],
+            "hash": "motion-hash",
+        },
+        "ignored-key": {"bundleName": "live2d/other/not-selected", "hash": "ignored"},
+    }
+
+    with patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()) as upload:
+        asyncio.run(
+            dispatch.run_specialized_postprocess(
+                "live2d-associated",
+                config,
+                live2d_bundles=bundles,
+                asset_metadata_version="asset-v1",
+            )
+        )
+
+    namespace = live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR)
+    index = load_live2d_index(namespace / "index.json")
+    assert index is not None
+    assert [record.model_bundle.name for record in index.model_outputs] == ["live2d/model/model"]
+    assert index.model_outputs[0].output_path == "model/v1/main/model"
+    assert [record.motion_bundle.name for record in index.motion_sets] == ["live2d/motion/base"]
+    assert index.motion_sets[0].motion_output_path == "motion/v2/main/base/motion"
+    assert index.motion_sets[0].facial_output_path == "motion/v2/main/base/facial"
+    assert not (tmp_path / "selections.json").exists()
+    assert not (namespace / "candidates").exists()
+    assert not (namespace / "current.json").exists()
+    upload.assert_awaited_once()
+
+
+def test_automatic_dispatch_recovers_missing_models_before_index_build(tmp_path: Path) -> None:
+    source_root = tmp_path / "extracted" / "live2d"
+    _write_automatic_outputs(source_root)
+    shutil.rmtree(source_root / "model")
+    master_root = tmp_path / "master"
+    _write_master_tables(master_root)
+    config = _config(tmp_path)
+    config.LIVE2D_ASSOCIATION_MASTER_DATA_DIR = master_root
+    bundles = {
+        "model-key": {
+            "bundleName": "live2d/model/model",
+            "paths": ["StartApp/live2d/model/v1/main/model"],
+            "hash": "model-hash",
+        },
+        "motion-key": {
+            "bundleName": "live2d/motion/base",
+            "paths": ["StartApp/live2d/motion/v2/main/base"],
+            "hash": "motion-hash",
+        },
+    }
+    events: list[str] = []
+
+    async def recover_models(*_args, **_kwargs) -> None:
+        events.append("recover")
+        _write_automatic_outputs(source_root)
+
+    real_build = dispatch.build_live2d_association_index
+
+    def build_index(*args, **kwargs):
+        events.append("build")
+        return real_build(*args, **kwargs)
+
+    with (
+        patch.object(dispatch, "recover_live2d_model_outputs", new=recover_models),
+        patch.object(dispatch, "build_live2d_association_index", side_effect=build_index),
+        patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()),
+    ):
+        asyncio.run(
+            dispatch.run_specialized_postprocess(
+                "live2d-associated",
+                config,
+                live2d_bundles=bundles,
+                asset_metadata_version="asset-v1",
+            )
+        )
+
+    assert events == ["recover", "build"]
 
 
 def test_cold_manifest_dispatch_restores_selected_motion_before_build_and_publish(

@@ -79,6 +79,23 @@ Live2D has a separate, explicit boundary from the GLB collection pipeline:
   `model -> Character2D -> motion-set association -> known clips` relation,
   source evidence, and the exact join inputs. It does not claim a direct
   specific-model-variant-to-motion-Bundle field where the master data has none.
+- Association index and selection-manifest inputs are optional. The dispatcher
+  uses a directly supplied `association_index` first, then an
+  `association_index_path`, then the configured selection manifest, and falls
+  back to automatic discovery when none is supplied.
+- Automatic discovery selects exact `live2d/model/` and `live2d/motion/` Bundle
+  names from current metadata, derives output directories from their first
+  matching metadata `paths` entries, and requires either a configured local
+  directory containing the six named Live2D master-data JSON tables or an
+  online master-data archive URL. The local directory takes precedence. A
+  GitHub repository URL is resolved to one latest branch archive download per
+  automatic run (branch defaults to `main`); it does not use the GitHub API or
+  six raw-table requests, and downloaded master data is temporary and never
+  uploaded.
+- Latest branch mode intentionally follows upstream changes instead of pinning
+  a revision, so it trades reproducibility for current data. A local directory,
+  explicit index, or selection manifest remains available when repeatability is
+  required.
 - A shared motion set is never copied into every model output. Live2D does not
   use the GLB multi-Bundle collection dependency, and it does not create a
   physical logical package merely to associate model and motion outputs.
@@ -204,6 +221,15 @@ outputs. This detailed index is local audit data only: it is never uploaded,
 and the viewer does not use it. Only the latest audit data is retained; the
 active pipeline has no candidates, history, current-pointer files, rollout
 state, rollback history, or remote revision history.
+
+The dispatcher accepts either explicit latest-audit input or automatic input.
+The precedence is `association_index`, `association_index_path`, configured
+selection manifest, then automatic Bundle discovery. Automatic discovery uses
+the first matching `paths` entry for each selected model or motion Bundle and
+loads the six Live2D master-data tables from the configured local directory or
+from one run-scoped latest branch archive; no pre-built index or manifest is
+required. Explicit index and selection inputs never download the online master
+archive.
 
 ## 3. GLB dependency closure and reference validation
 

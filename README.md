@@ -134,8 +134,11 @@ Storage:
 - `ASSET_REMOTE_STORAGE`: upload targets after processing; set to `[]` to disable uploads. Each target uses `type` to select its pipeline: `normal` for extracted assets, `live2d` for deprecated legacy Live2D output, `live2d-associated` for the temporary standalone associated viewer namespace, or `charts` for rendered charts.
 - `ENABLE_LIVE2D_POSTPROCESS` and `ENABLE_CHARTS_POSTPROCESS` independently enable specialized post-processing in default `assets` mode.
 - `ENABLE_LIVE2D_POSTPROCESS` is deprecated but retained: it continues to own `live2d/model_list.json` and the legacy `live2d/` output. `ENABLE_LIVE2D_ASSOCIATED_PIPELINE` is independent and may be enabled at the same time.
-- `LIVE2D_ASSOCIATION_INDEX_PATH` optionally supplies a pre-built, validated `Live2DIndex` JSON document for the latest local association audit data. The associated pipeline never invents an empty index when this is unset.
-- `LIVE2D_ASSOCIATION_SELECTIONS_PATH` optionally supplies an explicit association-selection manifest. The manifest identifies master-data input, stable model/motion IDs, exact run bundle keys, and output paths; it is used to build the latest local audit data when no pre-built index is supplied.
+- `LIVE2D_ASSOCIATION_INDEX_PATH` optionally supplies a pre-built, validated `Live2DIndex` JSON document for the latest local association audit data.
+- `LIVE2D_ASSOCIATION_SELECTIONS_PATH` optionally supplies an explicit association-selection manifest. The manifest identifies master-data input, stable model/motion IDs, exact run bundle keys, and output paths.
+- When neither an explicit index nor an explicit selection manifest is supplied, the associated pipeline automatically discovers the exact `live2d/model/` and `live2d/motion/` Bundles from current metadata and builds the latest local audit data. Automatic discovery requires either `LIVE2D_ASSOCIATION_MASTER_DATA_DIR` containing the six Live2D master-data JSON tables or `LIVE2D_ASSOCIATION_MASTER_DATA_URL`; the local directory takes precedence. A GitHub repository URL is converted to one latest-branch archive download (no GitHub API or six raw-table requests), using `LIVE2D_ASSOCIATION_MASTER_DATA_BRANCH` (`main` by default), and the downloaded master data is temporary and never uploaded. `LIVE2D_ASSOCIATION_MASTER_DB_VERSION` remains the local version label and online mode defaults to `latest:<branch>` when it is left at `local`.
+- Online latest mode follows upstream branch changes and is therefore not reproducible by revision. Use a local directory, explicit validated index, or selection manifest when repeatability is required.
+- Association input precedence is: directly supplied `association_index`, supplied `association_index_path` (or configured `LIVE2D_ASSOCIATION_INDEX_PATH`), configured `LIVE2D_ASSOCIATION_SELECTIONS_PATH`, then automatic discovery.
 - Multiple targets of each `ASSET_REMOTE_STORAGE` type upload sequentially after successful processing.
 - Enabling Live2D automatically adds its required `live2d/` bundles to the download list; these automatic bundles are not removed by `DL_INCLUDE_LIST` or `DL_EXCLUDE_LIST` and are de-duplicated by `bundleName`.
 - Live2D always uses `LIVE2D_BUNDLE_CACHE_DIR`, never the normal bundle cache. Its `live2d/` bundles bypass user filters and use metadata plus cache existence checks to download only missing or changed bundles. With no Live2D cache configured, that cache is temporary and removed after the pipeline, post-processing, and upload.
@@ -172,11 +175,19 @@ The `live2d` mode constrains bundles to `live2d/`, ignores `DL_INCLUDE_LIST` and
 chart source fallback and then charts processing regardless of the enable flag.
 The `live2d-associated` mode uses the same explicit `live2d/` bundle scope and
 cache policy but publishes only the latest public viewer assets in the temporary
-standalone `live2d-associated/v1` namespace. It requires
-`LIVE2D_ASSOCIATION_INDEX_PATH` or `LIVE2D_ASSOCIATION_SELECTIONS_PATH` (or an
-explicit dispatcher API input) for the latest local audit data and fails closed
-rather than building a fake index. A directly supplied index takes precedence
-over an index path, which takes precedence over the selections manifest.
+standalone `live2d-associated/v1` namespace. It accepts an explicit validated
+index or selection manifest, and otherwise automatically builds the latest
+local audit data from current Live2D Bundle metadata and master data. A
+directly supplied `association_index` takes precedence over
+`association_index_path`, which takes precedence over the selections manifest;
+automatic discovery is the final fallback. Automatic mode requires either
+`LIVE2D_ASSOCIATION_MASTER_DATA_DIR` containing the six Live2D master-data JSON
+tables or `LIVE2D_ASSOCIATION_MASTER_DATA_URL` pointing to a GitHub repository
+or direct archive. The local directory takes precedence. Online mode downloads
+one latest `LIVE2D_ASSOCIATION_MASTER_DATA_BRANCH` archive per automatic run
+(default `main`), without GitHub API/raw-per-table requests, and does not upload
+the master data. Latest branch mode follows upstream changes; use local data or
+an explicit index/selection manifest when repeatability is required.
 
 ```bash
 uv run python main.py -c config.py --mode live2d

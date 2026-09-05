@@ -1,5 +1,6 @@
 """Mode dispatcher for specialized post-processing runs."""
 
+import asyncio
 import json
 import logging
 import shutil
@@ -9,8 +10,16 @@ from pathlib import Path as StdPath
 
 from anyio import Path
 
+from updater.live2d.automatic_selections import (
+    DEFAULT_AUTOMATIC_MASTER_DB_VERSION,
+    build_automatic_live2d_associated_selections,
+)
 from updater.live2d.contracts import Live2DIndex
 from updater.live2d.index_builder import build_live2d_association_index
+from updater.live2d.master_data import (
+    DEFAULT_MASTER_DATA_BRANCH,
+    prepare_online_master_data,
+)
 from updater.live2d.publication import validate_live2d_outputs
 from updater.live2d.restore import collect_param_id_map, restore_live2d_motions
 from updater.live2d.rollout import (
@@ -60,6 +69,7 @@ from updater.postprocess.live2d_models import (
     _remote_model_list,
     _upload_live2d_assets,
     _validate_live2d_storage,
+    recover_live2d_model_outputs,
 )
 from updater.state import atomic_write_json, prepare_state_directory
 from updater.storage.rclone import upload_directory
@@ -455,24 +465,26 @@ def _resolve_associated_index_path(
         raise ValueError(
             "live2d-associated accepts either association_index or association_index_path, not both"
         )
-    if (
-        association_index is None
-        and association_index_path is None
-        and configured_selections_path is None
-    ):
+    if association_index is not None:
+        return None
+    if association_index_path is not None:
+        return association_index_path
+    if configured_path is not None:
         return configured_path
-    return association_index_path
+    return None
 
 
 def _associated_index_source_is_missing(
     association_index,
     association_index_path,
     configured_selections_path,
+    configured_path=None,
 ) -> bool:
     return (
         association_index is None
         and association_index_path is None
         and configured_selections_path is None
+        and configured_path is None
     )
 
 
@@ -503,6 +515,113 @@ async def _build_associated_index_from_manifest(
     )
 
 
+def _automatic_model_outputs_exist(selections, source_root: StdPath) -> bool:
+    for selection in selections.model_outputs:
+        output_directory = source_root / selection.output_path
+        if output_directory.is_symlink() or not output_directory.is_dir():
+            return False
+        try:
+            model3_files = [
+                path
+                for path in output_directory.rglob("*.model3.json")
+                if path.is_file() and not path.is_symlink()
+            ]
+            if len(model3_files) != 1:
+                return False
+        except (OSError, RuntimeError):
+            return False
+    return True
+
+
+async def _build_associated_index_automatically(
+    config,
+    source_root: StdPath,
+    live2d_bundles,
+    asset_metadata_version,
+):
+    master_data_root = getattr(config, "LIVE2D_ASSOCIATION_MASTER_DATA_DIR", None)
+    master_data_url = getattr(config, "LIVE2D_ASSOCIATION_MASTER_DATA_URL", None)
+    master_data_branch = getattr(
+        config,
+        "LIVE2D_ASSOCIATION_MASTER_DATA_BRANCH",
+        DEFAULT_MASTER_DATA_BRANCH,
+    )
+    master_db_version = getattr(
+        config,
+        "LIVE2D_ASSOCIATION_MASTER_DB_VERSION",
+        DEFAULT_AUTOMATIC_MASTER_DB_VERSION,
+    )
+    prepared_master_data = None
+    if master_data_root is None and master_data_url is not None:
+        online_version = (
+            None if master_db_version == DEFAULT_AUTOMATIC_MASTER_DB_VERSION else master_db_version
+        )
+        # urllib/tarfile are synchronous stdlib APIs.  Prepare one run-scoped
+        # snapshot off the event loop, then use its local provider for all six
+        # tables in this index build.
+        prepared_master_data = await asyncio.to_thread(
+            prepare_online_master_data,
+            master_data_url,
+            branch=master_data_branch,
+            master_db_version=online_version,
+            timeout=getattr(config, "REQUEST_TIMEOUT", 180),
+        )
+        master_data_root = prepared_master_data.root
+        master_db_version = prepared_master_data.master_db_version
+
+    try:
+        selections = build_automatic_live2d_associated_selections(
+            live2d_bundles,
+            output_root=source_root,
+            master_data_root=master_data_root,
+            master_data_url=master_data_url,
+            master_data_branch=master_data_branch,
+            master_db_version=master_db_version,
+        )
+        if not isinstance(asset_metadata_version, str) or not asset_metadata_version.strip():
+            raise ValueError(
+                "automatic Live2D association generation requires a non-empty asset metadata version"
+            )
+
+        if not _automatic_model_outputs_exist(selections, source_root):
+            configured_extracted_dir = getattr(config, "ASSET_LOCAL_EXTRACTED_DIR", None)
+            recovery_root = (
+                None
+                if configured_extracted_dir is None
+                else StdPath(str(configured_extracted_dir)) / "live2d"
+            )
+            if recovery_root is None or recovery_root.resolve(strict=False) != source_root.resolve(
+                strict=False
+            ):
+                raise ValueError(
+                    "automatic Live2D association generation cannot recover model outputs into a "
+                    "custom association_output_root; use the configured extracted Live2D root"
+                )
+            recovery_bundles = (
+                live2d_bundles
+                if isinstance(live2d_bundles, dict)
+                else {
+                    metadata_key: dict(bundle)
+                    for metadata_key, bundle in live2d_bundles.items()
+                    if isinstance(bundle, Mapping)
+                }
+            )
+            await recover_live2d_model_outputs(config, recovery_bundles)
+
+        # This intentionally reuses the manifest restore path without writing a
+        # manifest.  Its output layout is the one documented by automatic_selections.py.
+        await _ensure_manifest_motion_outputs(config, selections, source_root)
+        return build_live2d_association_index(
+            provider=selections.provider,
+            metadata_version=asset_metadata_version,
+            model_outputs=selections.model_outputs,
+            motion_sets=selections.motion_sets,
+        )
+    finally:
+        if prepared_master_data is not None:
+            prepared_master_data.cleanup()
+
+
 async def _load_associated_index(
     config,
     source_root: StdPath,
@@ -516,11 +635,18 @@ async def _load_associated_index(
         index = association_index
     elif association_index_path is not None:
         index = load_live2d_index(association_index_path)
-    else:
+    elif configured_selections_path is not None:
         index = await _build_associated_index_from_manifest(
             config,
             source_root,
             configured_selections_path,
+            live2d_bundles,
+            asset_metadata_version,
+        )
+    else:
+        index = await _build_associated_index_automatically(
+            config,
+            source_root,
             live2d_bundles,
             asset_metadata_version,
         )
@@ -696,16 +822,12 @@ async def _process_live2d_associated(
         association_index,
         association_index_path,
         configured_selections_path,
+        configured_path,
     ):
-        message = (
-            "live2d-associated requires an explicit validated association index or "
-            "association-selection manifest "
-            "(association_index, association_index_path, or configured selections path)"
+        logger.info(
+            "No explicit Live2D association index or selection manifest configured; "
+            "using automatic bundle discovery"
         )
-        if skip_missing_sources:
-            logger.warning(_OPTIONAL_LIVE2D_ASSOCIATED_LOG, message)
-            return
-        raise ValueError(message)
 
     source_root = association_output_root or extracted_dir / "live2d"
     validated_index = await _prepare_associated_index(
