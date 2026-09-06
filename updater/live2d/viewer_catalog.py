@@ -193,11 +193,26 @@ def _validate_source_index(index: IndexInput, output_root: PathInput) -> tuple[L
     return validated, root
 
 
-def find_model3_file(output_root: PathInput, output_path: str) -> Path:
-    """Find the one regular model3 document beneath one selected output."""
+def find_model3_file(
+    output_root: PathInput,
+    output_path: str,
+    model3_path: str | None = None,
+) -> Path:
+    """Resolve a declared model3 document, with legacy one-file fallback."""
 
     root = _prepare_root(output_root)
     output_directory = _checked_directory(root, output_path, "model output")
+    if model3_path is not None:
+        if not model3_path.endswith(MODEL3_SUFFIX):
+            raise Live2DViewerCatalogError("model3_path: must name a .model3.json file")
+        model3_parts = _relative_parts(model3_path, "model3_path")
+        return _checked_entry(
+            root,
+            output_directory.relative_to(root.lexical).parts + model3_parts,
+            "model3_path",
+            "file",
+        )
+
     pending = [output_directory]
     found: list[Path] = []
     while pending:
@@ -255,9 +270,17 @@ def _asset_files(index: Live2DIndex, root: _Root) -> tuple[tuple[str, Path], ...
         files[key] = source
 
     for record in index.model_outputs:
-        model3 = find_model3_file(root.lexical, record.output_path)
+        model3 = find_model3_file(root.lexical, record.output_path, record.model3_path)
         model3_key = _public_relative(root, model3, "model3")
         add_file(model3_key, model3)
+        reference_directory = record.output_path
+        if record.model3_path is not None:
+            model3_parts = _relative_parts(
+                record.model3_path,
+                f"model_outputs[{record.model_output_id!r}].model3_path",
+            )
+            if len(model3_parts) > 1:
+                reference_directory = f"{record.output_path}/{'/'.join(model3_parts[:-1])}"
         references = record.file_references
         model_references = (
             references.moc,
@@ -267,7 +290,7 @@ def _asset_files(index: Live2DIndex, root: _Root) -> tuple[tuple[str, Path], ...
         for relative in model_references:
             source = _checked_file(
                 root,
-                record.output_path,
+                reference_directory,
                 relative,
                 f"model_outputs[{record.model_output_id!r}].file_references",
             )
@@ -509,7 +532,11 @@ def build_viewer_catalog(index: IndexInput, output_root: PathInput) -> list[dict
     result: list[dict[str, object]] = []
     for model_record in validated.model_outputs:
         association = association_by_id.get(model_record.model_output_id)
-        model3 = find_model3_file(root.lexical, model_record.output_path)
+        model3 = find_model3_file(
+            root.lexical,
+            model_record.output_path,
+            model_record.model3_path,
+        )
         model_path = Path(_public_relative(root, model3, "model3")).parent.as_posix()
         motion_entries: list[dict[str, object]] = []
         if association is not None:

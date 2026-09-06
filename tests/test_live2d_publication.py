@@ -78,6 +78,39 @@ def test_two_models_share_one_motion_set_without_copied_motion_files(tmp_path: P
     assert Live2DIndex.from_json_bytes(index_path.read_bytes()) == index
 
 
+def test_model_references_are_resolved_relative_to_selected_model3_parent(
+    tmp_path: Path,
+) -> None:
+    data = fixture_data()
+    model = data["model_outputs"][0]
+    model["model3_path"] = "nested/ichika.model3.json"
+    model["schema_version"] = 2
+    index = Live2DIndex.from_dict(data)
+    materialize_outputs(tmp_path, index)
+
+    model_root = tmp_path / model["output_path"] / "nested"
+    model_root.mkdir(parents=True, exist_ok=True)
+    (model_root / "ichika.model3.json").write_text(
+        json.dumps(
+            {
+                "Version": 3,
+                "FileReferences": {
+                    "Moc": "ichika.moc3",
+                    "Textures": ["textures/ichika_00.png"],
+                    "Physics": "ichika.physics3.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for relative in ("ichika.moc3", "textures/ichika_00.png", "ichika.physics3.json"):
+        path = model_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"nested-model-output")
+
+    assert publish_live2d_index(index, tmp_path, tmp_path / "association-index.json") == index
+
+
 def test_successful_publication_is_atomic_canonical_and_leaves_model_list_unchanged(
     tmp_path: Path,
 ) -> None:

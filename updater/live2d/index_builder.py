@@ -38,12 +38,18 @@ class Live2DIndexBuilderError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ModelOutputSelection:
-    """One caller-selected model output and its source Bundle metadata."""
+    """One caller-selected model output and its source Bundle metadata.
+
+    ``model3_path`` is relative to ``output_path``.  Explicit legacy manifests
+    may leave it unset; the output adapter then accepts the historical
+    exactly-one-model3 behavior and records the discovered path explicitly.
+    """
 
     output_root: PathInput
     output_path: str
     model_output_id: str
     bundle: BundleMetadata
+    model3_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +136,7 @@ def build_live2d_association_index(
         build_model_output_record(
             output_root=selection.output_root,
             output_path=selection.output_path,
+            model3_path=selection.model3_path,
             model_output_id=selection.model_output_id,
             bundle=selection.bundle,
             metadata_version=metadata_version,

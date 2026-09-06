@@ -55,17 +55,25 @@ def materialize_outputs(root: Path, index: Live2DIndex) -> None:
     for record in index.model_outputs:
         directory = root / record.output_path
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / f"{directory.name}.model3.json").write_text(
+        model3_relative = (
+            Path(record.model3_path)
+            if record.model3_path is not None
+            else Path(f"{directory.name}.model3.json")
+        )
+        model3_path = directory / model3_relative
+        model3_path.parent.mkdir(parents=True, exist_ok=True)
+        model3_path.write_text(
             json.dumps({"Version": 3, "FileReferences": {"Moc": record.file_references.moc}}),
             encoding="utf-8",
         )
+        reference_directory = model3_path.parent
         references = record.file_references
         for relative in (
             references.moc,
             *references.textures,
             *((references.physics,) if references.physics is not None else ()),
         ):
-            path = directory / relative
+            path = reference_directory / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(relative.encode("utf-8"))
     for record in index.motion_sets:
@@ -178,6 +186,65 @@ def test_publish_copies_only_referenced_outputs_and_writes_atomic_current(
     assert not list((namespace / "candidates" / pointer.candidate_id).rglob("model_list.json"))
     assert not (namespace / "candidates" / pointer.candidate_id / "current.json").exists()
     assert load_rollout_state(state_path).current == pointer  # type: ignore[union-attr]
+
+
+def test_publish_uses_declared_model3_parent_for_nested_references(tmp_path: Path) -> None:
+    data = publishable_index_data()
+    selected_model = next(
+        model for model in data["model_outputs"] if model["model_output_id"] == "ichika-april2025"
+    )
+    selected_model["model3_path"] = "nested/selected.model3.json"
+    selected_model["schema_version"] = 2
+    index = Live2DIndex.from_dict(data)
+    source = tmp_path / "live2d"
+    materialize_outputs(source, index)
+
+    record = next(record for record in index.model_outputs if record.model3_path is not None)
+    output_directory = source / record.output_path
+    (output_directory / "legacy.model3.json").write_text(
+        json.dumps({"Version": 3, "FileReferences": {"Moc": "wrong.moc3"}}),
+        encoding="utf-8",
+    )
+    namespace = live2d_associated_namespace_path(tmp_path)
+
+    pointer = publish_candidate(index, source, namespace)
+    candidate = namespace / "candidates" / pointer.candidate_id
+    nested = candidate / record.output_path / "nested"
+
+    assert (nested / "selected.model3.json").is_file()
+    assert (nested / record.file_references.moc).is_file()
+    assert not (candidate / record.output_path / "legacy.model3.json").exists()
+    assert not (candidate / record.output_path / record.file_references.moc).exists()
+
+
+def test_publish_copies_two_model_records_sharing_one_output_path(tmp_path: Path) -> None:
+    data = publishable_index_data()
+    shared_models = {
+        "ichika-unit": ("first.model3.json", "first.moc3"),
+        "ichika-april2025": ("second.model3.json", "second.moc3"),
+    }
+    for model in data["model_outputs"]:
+        model_output_id = model["model_output_id"]
+        if model_output_id not in shared_models:
+            continue
+        model3_name, moc_name = shared_models[model_output_id]
+        model["output_path"] = "model/shared"
+        model["model3_path"] = model3_name
+        model["schema_version"] = 2
+        model["file_references"] = {"Moc": moc_name, "Textures": []}
+
+    index = Live2DIndex.from_dict(data)
+    source = tmp_path / "live2d"
+    materialize_outputs(source, index)
+    namespace = live2d_associated_namespace_path(tmp_path)
+
+    pointer = publish_candidate(index, source, namespace)
+    candidate = namespace / "candidates" / pointer.candidate_id / "model" / "shared"
+
+    assert (candidate / "first.model3.json").is_file()
+    assert (candidate / "first.moc3").is_file()
+    assert (candidate / "second.model3.json").is_file()
+    assert (candidate / "second.moc3").is_file()
 
 
 def test_ambiguous_or_empty_index_is_rejected_before_namespace_mutation(tmp_path: Path) -> None:

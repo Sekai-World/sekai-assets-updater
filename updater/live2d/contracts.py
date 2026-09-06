@@ -20,7 +20,11 @@ from typing import Any, NoReturn, TypeAlias
 from updater.modes import is_live2d_bundle as _is_live2d_bundle
 
 CONTRACT_VERSION = 1
-MODEL_OUTPUT_SCHEMA_VERSION = 1
+LEGACY_MODEL_OUTPUT_SCHEMA_VERSION = 1
+# The index container remains v1; model-output records are independently
+# versioned so legacy indexes can still be parsed when their records omit
+# ``model3_path``.
+MODEL_OUTPUT_SCHEMA_VERSION = 2
 MOTION_SET_SCHEMA_VERSION = 1
 CANDIDATE_SCHEMA_VERSION = 1
 MODEL_ASSOCIATION_SCHEMA_VERSION = 1
@@ -225,6 +229,27 @@ def _require_fields(
 def _validate_schema_version(value: object, field_name: str, expected: int) -> int:
     if type(value) is not int or value != expected:
         _fail(field_name, f"unsupported schema version {value!r}; expected {expected}")
+    return value
+
+
+def _validate_model_output_schema_version(
+    value: object,
+    model3_path: object,
+    field_name: str = "model_output.schema_version",
+) -> int:
+    if type(value) is not int or value not in {
+        LEGACY_MODEL_OUTPUT_SCHEMA_VERSION,
+        MODEL_OUTPUT_SCHEMA_VERSION,
+    }:
+        _fail(
+            field_name,
+            f"unsupported schema version {value!r}; expected one of "
+            f"{LEGACY_MODEL_OUTPUT_SCHEMA_VERSION} or {MODEL_OUTPUT_SCHEMA_VERSION}",
+        )
+    if value == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION and model3_path is not None:
+        _fail("model_output.model3_path", "is not supported by schema version 1")
+    if value == MODEL_OUTPUT_SCHEMA_VERSION and model3_path is None:
+        _fail("model_output.model3_path", "is required by schema version 2")
     return value
 
 
@@ -451,11 +476,12 @@ def _validate_optional_entity_id(value: object, field_name: str) -> int | str | 
 
 def _validate_clip_name(value: object, field_name: str) -> str:
     name = _validate_safe_text(value, field_name, max_length=256)
+    # Internal whitespace is valid in source clip names; the generated output
+    # filename is the name plus the motion3 suffix.
     if (
         name in (".", "..")
         or "/" in name
         or "\\" in name
-        or any(char.isspace() for char in name)
         or name.casefold().endswith((".motion3.json", ".exp3.json"))
     ):
         _fail(field_name, "must be a clip name, not a path or output filename")
@@ -799,10 +825,15 @@ class ModelOutputRecord(_Contract):
     file_references: Model3FileReferences | Mapping[str, object]
     metadata_version: str
     schema_version: int = MODEL_OUTPUT_SCHEMA_VERSION
+    # Legacy serialized records may omit this additive field.  New records
+    # produced by the index adapter always populate it with the path selected
+    # relative to ``output_path``.
+    model3_path: str | None = None
 
     def __post_init__(self) -> None:
-        _validate_schema_version(
-            self.schema_version, "model_output.schema_version", MODEL_OUTPUT_SCHEMA_VERSION
+        _validate_model_output_schema_version(
+            self.schema_version,
+            self.model3_path,
         )
         _validate_identifier(self.model_output_id, "model_output.model_output_id")
         bundle = _coerce(self.model_bundle, BundleIdentity, "model_output.model_bundle")
@@ -812,6 +843,11 @@ class ModelOutputRecord(_Contract):
         object.__setattr__(self, "model_bundle", bundle)
         object.__setattr__(self, "file_references", references)
         _validate_relative_path(self.output_path, "model_output.output_path")
+        if self.model3_path is not None:
+            model3_path = _validate_relative_path(self.model3_path, "model_output.model3_path")
+            if not model3_path.endswith(".model3.json"):
+                _fail("model_output.model3_path", "must name a .model3.json file")
+            object.__setattr__(self, "model3_path", model3_path)
         _validate_version_label(self.metadata_version, "model_output.metadata_version")
 
     @classmethod
@@ -824,6 +860,7 @@ class ModelOutputRecord(_Contract):
                 "model_output_id",
                 "model_bundle",
                 "output_path",
+                "model3_path",
                 "file_references",
                 "metadata_version",
             },
@@ -840,17 +877,27 @@ class ModelOutputRecord(_Contract):
                 "metadata_version",
             ),
         )
+        model3_path = mapping.get("model3_path")
+        if "schema_version" not in mapping:
+            schema_version = (
+                MODEL_OUTPUT_SCHEMA_VERSION
+                if model3_path is not None
+                else LEGACY_MODEL_OUTPUT_SCHEMA_VERSION
+            )
+        else:
+            schema_version = mapping["schema_version"]
         return cls(
             model_output_id=mapping["model_output_id"],
             model_bundle=mapping["model_bundle"],
             output_path=mapping["output_path"],
+            model3_path=model3_path,
             file_references=mapping["file_references"],
             metadata_version=mapping["metadata_version"],
-            schema_version=mapping.get("schema_version", MODEL_OUTPUT_SCHEMA_VERSION),
+            schema_version=schema_version,
         )
 
     def to_dict(self) -> dict[str, JSONValue]:
-        return {
+        result: dict[str, JSONValue] = {
             "schema_version": self.schema_version,
             "model_output_id": self.model_output_id,
             "model_bundle": self.model_bundle.to_dict(),
@@ -858,6 +905,9 @@ class ModelOutputRecord(_Contract):
             "file_references": self.file_references.to_dict(),
             "metadata_version": self.metadata_version,
         }
+        if self.model3_path is not None:
+            result["model3_path"] = self.model3_path
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -1118,8 +1168,34 @@ def _validate_index_uniqueness(
 ) -> None:
     _validate_unique(model_outputs, "index.model_outputs", key=lambda item: item.model_output_id)
     _validate_unique(
-        model_outputs, "index.model_outputs bundles", key=lambda item: item.model_bundle.name
+        model_outputs,
+        "index.model_outputs selections",
+        key=lambda item: (item.output_path, item.model3_path),
     )
+    seen_model_bundle_records: dict[str, tuple[str, set[str] | None]] = {}
+    for record in model_outputs:
+        previous = seen_model_bundle_records.get(record.model_bundle.name)
+        if previous is None:
+            if record.model3_path is None:
+                seen_model_bundle_records[record.model_bundle.name] = (record.output_path, None)
+            else:
+                seen_model_bundle_records[record.model_bundle.name] = (
+                    record.output_path,
+                    {record.model3_path},
+                )
+            continue
+        if (
+            previous[0] != record.output_path
+            or record.model3_path is None
+            or previous[1] is None
+            or record.model3_path in previous[1]
+        ):
+            _fail(
+                "index.model_outputs bundles",
+                f"duplicate identity {record.model_bundle.name!r}",
+            )
+        assert previous[1] is not None
+        previous[1].add(record.model3_path)
     _validate_unique(motion_sets, "index.motion_sets", key=lambda item: item.motion_set_id)
     _validate_unique(
         motion_sets, "index.motion_sets bundles", key=lambda item: item.motion_bundle.name
@@ -1181,6 +1257,21 @@ def _validate_index_record_versions(
     for record in model_outputs:
         if record.metadata_version != metadata_version:
             _integrity_fail(f"model metadata version mismatch for {record.model_output_id!r}")
+        if record.schema_version == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION:
+            if record.model3_path is not None:
+                _integrity_fail(
+                    f"model output {record.model_output_id!r} has model3_path in schema version 1"
+                )
+        elif record.schema_version == MODEL_OUTPUT_SCHEMA_VERSION:
+            if record.model3_path is None:
+                _integrity_fail(
+                    f"model output {record.model_output_id!r} is missing model3_path in schema version 2"
+                )
+        else:  # pragma: no cover - ModelOutputRecord validates this first.
+            _integrity_fail(
+                f"model output {record.model_output_id!r} has unsupported schema version "
+                f"{record.schema_version!r}"
+            )
     for record in motion_sets:
         if record.metadata_version != metadata_version:
             _integrity_fail(f"motion metadata version mismatch for {record.motion_set_id!r}")
@@ -1190,11 +1281,15 @@ def _validate_index_bundle_names(
     model_outputs: tuple[ModelOutputRecord, ...],
     motion_sets: tuple[SharedMotionSetRecord, ...],
 ) -> None:
-    all_bundle_names = tuple(
-        [record.model_bundle.name for record in model_outputs]
-        + [record.motion_bundle.name for record in motion_sets]
-    )
-    _validate_unique(all_bundle_names, "index Bundle identities")
+    model_bundle_names = {record.model_bundle.name for record in model_outputs}
+    motion_bundle_names = tuple(record.motion_bundle.name for record in motion_sets)
+    _validate_unique(motion_bundle_names, "index Bundle identities")
+    overlapping_names = model_bundle_names.intersection(motion_bundle_names)
+    if overlapping_names:
+        _fail(
+            "index Bundle identities",
+            f"duplicate identity {sorted(overlapping_names)[0]!r}",
+        )
 
 
 @dataclass(frozen=True, slots=True)

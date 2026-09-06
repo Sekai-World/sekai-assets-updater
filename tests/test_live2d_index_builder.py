@@ -188,6 +188,42 @@ def test_builds_full_explicit_provider_adapter_association_path(tmp_path: Path) 
     assert motion_selections == original_motions
 
 
+def test_multiple_model_records_can_share_one_output_path(tmp_path: Path) -> None:
+    write_tables(tmp_path)
+    output = tmp_path / "shared-model"
+    write_model3(output, filename="first.model3.json")
+    write_model3(output, filename="second.model3.json")
+    bundle = {"bundleName": "arbitrary/model-shared", "hash": "model-shared-hash"}
+    models = [
+        ModelOutputSelection(
+            output_root=tmp_path,
+            output_path="shared-model",
+            model_output_id="model-first",
+            bundle=bundle,
+            model3_path="first.model3.json",
+        ),
+        ModelOutputSelection(
+            output_root=tmp_path,
+            output_path="shared-model",
+            model_output_id="model-second",
+            bundle=bundle,
+            model3_path="second.model3.json",
+        ),
+    ]
+    index = build_live2d_association_index(
+        provider=CountingProvider(snapshot=empty_snapshot()),
+        metadata_version=METADATA_VERSION,
+        model_outputs=models,
+        motion_sets=[],
+    )
+
+    assert [record.model3_path for record in index.model_outputs] == [
+        "first.model3.json",
+        "second.model3.json",
+    ]
+    assert {record.output_path for record in index.model_outputs} == {"shared-model"}
+
+
 def test_reordered_sequences_build_the_same_deterministic_index(tmp_path: Path) -> None:
     model_selections, motion_selections, provider = prepare_artifacts(tmp_path)
 

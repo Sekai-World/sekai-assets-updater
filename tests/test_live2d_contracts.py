@@ -11,6 +11,8 @@ import pytest
 from updater.live2d.contracts import (
     CANDIDATE_EVIDENCE_RULE_CODES,
     DIAGNOSTIC_CODES,
+    LEGACY_MODEL_OUTPUT_SCHEMA_VERSION,
+    MODEL_OUTPUT_SCHEMA_VERSION,
     BundleIdentity,
     CandidateEvidence,
     CandidateEvidenceRuleCode,
@@ -270,6 +272,25 @@ def test_statuses_and_diagnostic_vocabulary_are_validated() -> None:
 def test_unsafe_paths_duplicate_identities_and_malformed_clips_are_rejected() -> None:
     bundle = {"name": "model/base", "checksum": "sha256:abc"}
     refs = {"Moc": "model.moc3", "Textures": ["texture.png"]}
+    selected = ModelOutputRecord(
+        model_output_id="selected",
+        model_bundle=bundle,
+        output_path="model/root",
+        model3_path="nested/selected.model3.json",
+        file_references=refs,
+        metadata_version="6.8.0.10",
+    )
+    assert selected.to_dict()["model3_path"] == "nested/selected.model3.json"
+    assert selected.schema_version == MODEL_OUTPUT_SCHEMA_VERSION
+    with pytest.raises(ValueError, match="model3_path"):
+        ModelOutputRecord(
+            model_output_id="selected",
+            model_bundle=bundle,
+            output_path="model/root",
+            model3_path="nested/selected.txt",
+            file_references=refs,
+            metadata_version="6.8.0.10",
+        )
     with pytest.raises(ValueError, match="unsafe path"):
         ModelOutputRecord(
             model_output_id="model",
@@ -277,6 +298,7 @@ def test_unsafe_paths_duplicate_identities_and_malformed_clips_are_rejected() ->
             output_path="../outside",
             file_references=refs,
             metadata_version="6.8.0.10",
+            schema_version=LEGACY_MODEL_OUTPUT_SCHEMA_VERSION,
         )
     with pytest.raises(ValueError, match="relative POSIX path"):
         ModelOutputRecord(
@@ -285,6 +307,7 @@ def test_unsafe_paths_duplicate_identities_and_malformed_clips_are_rejected() ->
             output_path="/absolute",
             file_references=refs,
             metadata_version="6.8.0.10",
+            schema_version=LEGACY_MODEL_OUTPUT_SCHEMA_VERSION,
         )
     with pytest.raises(ValueError, match="must not be empty"):
         ModelOutputRecord(
@@ -293,9 +316,16 @@ def test_unsafe_paths_duplicate_identities_and_malformed_clips_are_rejected() ->
             output_path="",
             file_references=refs,
             metadata_version="6.8.0.10",
+            schema_version=LEGACY_MODEL_OUTPUT_SCHEMA_VERSION,
         )
     with pytest.raises(ValueError, match="duplicate identity"):
         KnownClips(motions=("idle", "idle"))
+    clips_with_internal_spaces = KnownClips(
+        motions=("walk fast",),
+        facials=("face_ worry_01",),
+    )
+    assert clips_with_internal_spaces.motions == ("walk fast",)
+    assert clips_with_internal_spaces.facials == ("face_ worry_01",)
     duplicate_data = load_fixture_data()
     duplicate_data["model_outputs"].append(copy.deepcopy(duplicate_data["model_outputs"][0]))
     with pytest.raises(ValueError, match="duplicate identity"):
@@ -358,6 +388,63 @@ def test_unsafe_paths_duplicate_identities_and_malformed_clips_are_rejected() ->
     assert future_row.source_row["databaseId"] == 42
     assert future_row.source_row["author"] == "sanitized"
     assert future_row.source_row["assetUri"] == "assets/live2d/model.json"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        " leading",
+        "trailing ",
+        ".",
+        "..",
+        "../escape",
+        "nested/name",
+        r"nested\name",
+        "name.motion3.json",
+        "name.exp3.json",
+        "name\nwith-control",
+    ],
+)
+def test_known_clip_names_reject_unsafe_boundaries(name: str) -> None:
+    with pytest.raises(ValueError, match="known_clips"):
+        KnownClips(facials=(name,))
+
+
+def test_model_output_schema_versions_are_explicit_and_compatible() -> None:
+    legacy_data = load_fixture_data()["model_outputs"][0]
+    legacy = ModelOutputRecord.from_dict(legacy_data)
+    assert legacy.schema_version == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION
+    assert legacy.model3_path is None
+    assert "model3_path" not in legacy.to_dict()
+
+    legacy_without_version = copy.deepcopy(legacy_data)
+    legacy_without_version.pop("schema_version")
+    assert (
+        ModelOutputRecord.from_dict(legacy_without_version).schema_version
+        == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION
+    )
+    null_schema = copy.deepcopy(legacy_data)
+    null_schema["schema_version"] = None
+    with pytest.raises(ValueError, match="unsupported schema version"):
+        ModelOutputRecord.from_dict(null_schema)
+
+    current_data = copy.deepcopy(legacy_data)
+    current_data["schema_version"] = MODEL_OUTPUT_SCHEMA_VERSION
+    current_data["model3_path"] = "nested/selected.model3.json"
+    current = ModelOutputRecord.from_dict(current_data)
+    assert current.schema_version == MODEL_OUTPUT_SCHEMA_VERSION
+    assert current.to_dict()["schema_version"] == MODEL_OUTPUT_SCHEMA_VERSION
+
+    old_schema_with_new_field = copy.deepcopy(current_data)
+    old_schema_with_new_field["schema_version"] = LEGACY_MODEL_OUTPUT_SCHEMA_VERSION
+    with pytest.raises(ValueError, match="schema version 1"):
+        ModelOutputRecord.from_dict(old_schema_with_new_field)
+
+    new_schema_without_field = copy.deepcopy(legacy_data)
+    new_schema_without_field["schema_version"] = MODEL_OUTPUT_SCHEMA_VERSION
+    with pytest.raises(ValueError, match="required by schema version 2"):
+        ModelOutputRecord.from_dict(new_schema_without_field)
 
 
 def test_shared_motion_and_facial_outputs_cannot_share_a_path() -> None:

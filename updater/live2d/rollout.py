@@ -24,7 +24,7 @@ import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TypeAlias
 
 from updater import state
@@ -803,8 +803,21 @@ def _read_json(path: Path, field_name: str) -> object:
 
 
 def _referenced_files(index: Live2DIndex) -> tuple[tuple[str, str], ...]:
+    """Return referenced files as ``(directory, relative_file)`` pairs.
+
+    Model3 references are relative to the selected model3 document's parent,
+    not necessarily the model output root.  Keeping that directory in the
+    pair makes this helper agree with the publication and viewer projections;
+    legacy records without ``model3_path`` retain their output-root layout.
+    """
+
     references: list[tuple[str, str]] = []
     for record in index.model_outputs:
+        directory = record.output_path
+        if record.model3_path is not None:
+            model3_parent = PurePosixPath(record.model3_path).parent.as_posix()
+            if model3_parent != ".":
+                directory = f"{directory}/{model3_parent}"
         for relative in (
             record.file_references.moc,
             *record.file_references.textures,
@@ -814,7 +827,7 @@ def _referenced_files(index: Live2DIndex) -> tuple[tuple[str, str], ...]:
                 else ()
             ),
         ):
-            references.append((record.output_path, relative))
+            references.append((directory, relative))
     for record in index.motion_sets:
         references.extend(
             (record.motion_output_path, f"{clip}.motion3.json")

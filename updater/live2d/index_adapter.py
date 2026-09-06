@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TypeAlias, cast
 
 from updater.live2d.contracts import (
+    MODEL_OUTPUT_SCHEMA_VERSION,
     BundleIdentity,
     KnownClips,
     Model3FileReferences,
@@ -28,6 +29,7 @@ from updater.net.plan import get_bundle_checksum
 
 PathInput: TypeAlias = str | os.PathLike[str]
 BundleMetadata: TypeAlias = Mapping[str, object]
+_MODEL3_SUFFIX = ".model3.json"
 
 __all__ = [
     "BundleMetadata",
@@ -166,13 +168,22 @@ def _inspect_entry_components(
     parts: tuple[str, ...],
     field_name: str,
     expected: str,
-) -> tuple[Path, int]:
+    *,
+    case_insensitive: bool = False,
+) -> tuple[Path, int, tuple[str, ...]]:
     relative = "/".join(parts)
     current = root.lexical
     final_mode: int | None = None
+    actual_parts: list[str] = []
     for index, part in enumerate(parts):
-        current /= part
-        mode = _entry_mode(current, relative, field_name, expected)
+        current, mode = _resolve_entry_component(
+            current,
+            part,
+            relative,
+            field_name,
+            expected,
+            case_insensitive=case_insensitive,
+        )
         if stat.S_ISLNK(mode):
             raise Live2DIndexAdapterError(
                 f"{field_name}: symlink path components are not allowed: {current}"
@@ -182,9 +193,46 @@ def _inspect_entry_components(
                 f"{field_name}: path component is not a directory: {relative!r}"
             )
         final_mode = mode
+        actual_parts.append(current.name)
 
     assert final_mode is not None
-    return current, final_mode
+    return current, final_mode, tuple(actual_parts)
+
+
+def _resolve_entry_component(
+    current: Path,
+    part: str,
+    relative: str,
+    field_name: str,
+    expected: str,
+    *,
+    case_insensitive: bool,
+) -> tuple[Path, int]:
+    candidate = current / part
+    if not case_insensitive:
+        return candidate, _entry_mode(candidate, relative, field_name, expected)
+
+    # ``lstat`` on a case-insensitive filesystem can succeed for a differently
+    # cased spelling.  Enumerating the real directory first lets automatic
+    # discovery recover the on-disk spelling instead of retaining metadata's
+    # spelling.  Exact entry names still win, preserving the strict path rule.
+    try:
+        with os.scandir(current) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError:
+        return candidate, _entry_mode(candidate, relative, field_name, expected)
+
+    exact_matches = [name for name in names if name == part]
+    if not exact_matches:
+        matches = [name for name in names if name.casefold() == part.casefold()]
+        if len(matches) > 1:
+            raise Live2DIndexAdapterError(
+                f"{field_name}: ambiguous case-insensitive path component {part!r} "
+                f"under {current}: {', '.join(matches)}"
+            )
+        if matches:
+            candidate = current / matches[0]
+    return candidate, _entry_mode(candidate, relative, field_name, expected)
 
 
 def _validate_entry_type(
@@ -205,20 +253,40 @@ def _checked_entry(
     parts: tuple[str, ...],
     field_name: str,
     expected: str,
+    *,
+    case_insensitive: bool = False,
 ) -> _CheckedEntry:
     if not parts:
         if expected != "directory":  # pragma: no cover - all generated files have a name
             raise Live2DIndexAdapterError(f"{field_name}: expected a path below the output root")
         return _CheckedEntry(root.lexical, root.resolved, parts)
 
-    current, final_mode = _inspect_entry_components(root, parts, field_name, expected)
+    current, final_mode, actual_parts = _inspect_entry_components(
+        root,
+        parts,
+        field_name,
+        expected,
+        case_insensitive=case_insensitive,
+    )
     resolved = _ensure_physical_containment(root, current, field_name)
-    _validate_entry_type(final_mode, parts, field_name, expected)
-    return _CheckedEntry(current, resolved, parts)
+    _validate_entry_type(final_mode, actual_parts, field_name, expected)
+    return _CheckedEntry(current, resolved, actual_parts)
 
 
-def _checked_directory(root: _Root, value: str, field_name: str) -> _CheckedEntry:
-    return _checked_entry(root, _relative_parts(value, field_name), field_name, "directory")
+def _checked_directory(
+    root: _Root,
+    value: str,
+    field_name: str,
+    *,
+    case_insensitive: bool = False,
+) -> _CheckedEntry:
+    return _checked_entry(
+        root,
+        _relative_parts(value, field_name),
+        field_name,
+        "directory",
+        case_insensitive=case_insensitive,
+    )
 
 
 def _checked_explicit_directory(
@@ -319,6 +387,64 @@ def _scan_model3_files(
     return sorted(found, key=lambda path: path.as_posix())
 
 
+def _discover_model3_paths(
+    output_root: PathInput,
+    output_path: str,
+) -> tuple[str, tuple[str, ...]]:
+    """Return an actual output path and safe model3 paths beneath it.
+
+    Automatic metadata paths are allowed to differ from the extracted tree only
+    by component case.  The resolved lexical path is returned so later strict
+    publication and viewer validation uses the spelling that exists on disk.
+    """
+
+    root = _prepare_root(output_root, "output_root")
+    output_directory = _checked_directory(
+        root,
+        output_path,
+        "output_path",
+        case_insensitive=True,
+    )
+    model3_files = _scan_model3_files(root, output_directory, "model output")
+    actual_output_path = "/".join(output_directory.relative_parts)
+    return actual_output_path, tuple(
+        path.relative_to(output_directory.lexical).as_posix() for path in model3_files
+    )
+
+
+def _select_model3_file(
+    root: _Root,
+    output_directory: _CheckedEntry,
+    model3_path: str | None,
+) -> tuple[Path, str]:
+    if model3_path is None:
+        model3_files = _scan_model3_files(root, output_directory, "model output")
+        if not model3_files:
+            raise Live2DIndexAdapterError(
+                f"model output: no *{_MODEL3_SUFFIX} file found under "
+                f"{'/'.join(output_directory.relative_parts)!r}"
+            )
+        if len(model3_files) != 1:
+            paths = ", ".join(path.as_posix() for path in model3_files)
+            raise Live2DIndexAdapterError(
+                f"model output: expected exactly one *{_MODEL3_SUFFIX} file, "
+                f"found {len(model3_files)}: {paths}"
+            )
+        selected = model3_files[0]
+        return selected, selected.relative_to(output_directory.lexical).as_posix()
+
+    if not model3_path.endswith(_MODEL3_SUFFIX):
+        raise Live2DIndexAdapterError("model3_path: must name a .model3.json file")
+    model3_parts = _relative_parts(model3_path, "model3_path")
+    selected = _checked_entry(
+        root,
+        output_directory.relative_parts + model3_parts,
+        "model3_path",
+        "file",
+    )
+    return selected.lexical, "/".join(model3_parts)
+
+
 def _read_json(path: Path, field_name: str) -> object:
     try:
         text = path.read_text(encoding="utf-8")
@@ -373,33 +499,28 @@ def build_model_output_record(
     model_output_id: str,
     bundle: BundleMetadata,
     metadata_version: str,
+    model3_path: str | None = None,
 ) -> ModelOutputRecord:
-    """Build one model record from one explicitly selected output directory."""
+    """Build one model record from one explicitly selected model3 document."""
 
     root = _prepare_root(output_root, "output_root")
     output_directory = _checked_directory(root, output_path, "output_path")
-    model3_paths = _scan_model3_files(root, output_directory, "model output")
-    if not model3_paths:
-        raise Live2DIndexAdapterError(
-            f"model output: no *.model3.json file found under {output_path!r}"
-        )
-    if len(model3_paths) != 1:
-        paths = ", ".join(path.as_posix() for path in model3_paths)
-        raise Live2DIndexAdapterError(
-            f"model output: expected exactly one *.model3.json file, found {len(model3_paths)}: {paths}"
-        )
-
-    model3_path = model3_paths[0]
-    _ensure_physical_containment(root, model3_path, "model output")
-    references = _model_references(model3_path)
+    selected_model3, selected_model3_path = _select_model3_file(
+        root,
+        output_directory,
+        model3_path,
+    )
+    references = _model_references(selected_model3)
     model_bundle = _bundle_identity(bundle, "model bundle")
     try:
         return ModelOutputRecord(
             model_output_id=model_output_id,
             model_bundle=model_bundle,
             output_path=output_path,
+            model3_path=selected_model3_path,
             file_references=references,
             metadata_version=metadata_version,
+            schema_version=MODEL_OUTPUT_SCHEMA_VERSION,
         )
     except (TypeError, ValueError) as exc:
         raise Live2DIndexAdapterError(f"model output record is invalid: {exc}") from exc

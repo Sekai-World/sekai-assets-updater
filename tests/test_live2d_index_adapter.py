@@ -7,9 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from updater.live2d.contracts import ModelOutputRecord, SharedMotionSetRecord
+from updater.live2d.contracts import (
+    MODEL_OUTPUT_SCHEMA_VERSION,
+    ModelOutputRecord,
+    SharedMotionSetRecord,
+)
 from updater.live2d.index_adapter import (
     Live2DIndexAdapterError,
+    _discover_model3_paths,
     build_model_output_record,
     build_shared_motion_set_record,
 )
@@ -63,12 +68,78 @@ def test_builds_model_record_from_one_recursive_model3_and_preserves_selection(
     assert isinstance(record, ModelOutputRecord)
     assert record.model_output_id == "caller-model-id"
     assert record.output_path == "chosen-output"
+    assert record.model3_path == "nested/model.model3.json"
+    assert record.schema_version == MODEL_OUTPUT_SCHEMA_VERSION
     assert record.model_bundle.name == "live2d/model/ichika"
     assert record.model_bundle.checksum == "hash:manifest-hash"
     assert record.file_references.moc == "model.moc3"
     assert record.file_references.textures == ("texture_0.png", "texture_1.png")
     assert record.file_references.physics == "model.physics3.json"
     assert record.metadata_version == METADATA_VERSION
+
+
+def test_explicit_adapter_path_matching_remains_case_sensitive(tmp_path: Path) -> None:
+    write_model3(tmp_path / "Actual-Output")
+
+    exact = build_model_output_record(
+        output_root=tmp_path,
+        output_path="Actual-Output",
+        model_output_id="exact",
+        bundle=model_bundle(),
+        metadata_version=METADATA_VERSION,
+    )
+    assert exact.output_path == "Actual-Output"
+
+    with pytest.raises(Live2DIndexAdapterError, match="referenced directory is missing"):
+        build_model_output_record(
+            output_root=tmp_path,
+            output_path="actual_output",
+            model_output_id="case-sensitive",
+            bundle=model_bundle(),
+            metadata_version=METADATA_VERSION,
+        )
+
+
+def test_automatic_path_discovery_rejects_ambiguous_casefold_matches(tmp_path: Path) -> None:
+    (tmp_path / "model").mkdir()
+    with pytest.raises(Live2DIndexAdapterError, match="referenced directory is missing"):
+        _discover_model3_paths(tmp_path, "model/missing")
+
+    (tmp_path / "model" / "FOO").mkdir(parents=True)
+    try:
+        (tmp_path / "model" / "Foo").mkdir()
+    except FileExistsError:
+        pytest.skip("case-insensitive filesystems cannot represent an ambiguous collision")
+
+    with pytest.raises(Live2DIndexAdapterError, match="ambiguous case-insensitive path component"):
+        _discover_model3_paths(tmp_path, "model/foo")
+
+
+def test_declared_sibling_model3_paths_share_one_output_directory(tmp_path: Path) -> None:
+    output = tmp_path / "model"
+    write_model3(output, name="first.model3.json")
+    write_model3(output, name="second.model3.json")
+    bundle = model_bundle()
+
+    first = build_model_output_record(
+        output_root=tmp_path,
+        output_path="model",
+        model_output_id="first",
+        model3_path="first.model3.json",
+        bundle=bundle,
+        metadata_version=METADATA_VERSION,
+    )
+    second = build_model_output_record(
+        output_root=tmp_path,
+        output_path="model",
+        model_output_id="second",
+        model3_path="second.model3.json",
+        bundle=bundle,
+        metadata_version=METADATA_VERSION,
+    )
+
+    assert first.model3_path == "first.model3.json"
+    assert second.model3_path == "second.model3.json"
 
 
 def test_hash_is_preferred_and_crc_is_used_when_hash_is_unusable(tmp_path: Path) -> None:
@@ -193,6 +264,31 @@ def test_builds_motion_record_from_build_motion_data_and_listed_files(tmp_path: 
     assert record.facial_output_path == "facial-files"
     assert record.known_clips.motions == ("idle", "walk")
     assert record.known_clips.facials == ("smile",)
+
+
+def test_motion_record_accepts_internal_spaces_in_clip_filenames(tmp_path: Path) -> None:
+    (tmp_path / "bundle").mkdir()
+    (tmp_path / "motion").mkdir()
+    (tmp_path / "facial").mkdir()
+    (tmp_path / "bundle" / "BuildMotionData.json").write_text(
+        json.dumps({"motions": ["walk fast"], "expressions": ["face_ worry_01"]}),
+        encoding="utf-8",
+    )
+    (tmp_path / "motion" / "walk fast.motion3.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "facial" / "face_ worry_01.motion3.json").write_text("{}", encoding="utf-8")
+
+    record = build_shared_motion_set_record(
+        output_root=tmp_path,
+        motion_bundle_output_path="bundle",
+        motion_output_path="motion",
+        facial_output_path="facial",
+        motion_set_id="spaces",
+        bundle=motion_bundle(),
+        metadata_version=METADATA_VERSION,
+    )
+
+    assert record.known_clips.motions == ("walk fast",)
+    assert record.known_clips.facials == ("face_ worry_01",)
 
 
 @pytest.mark.parametrize(

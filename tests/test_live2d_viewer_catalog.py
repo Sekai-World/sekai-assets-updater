@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -61,6 +62,49 @@ def test_public_catalog_has_only_viewer_fields_and_resolves_model3_and_motion_pa
                 key in motion_set
                 for key in ("status", "evidence", "rule_code", "checksum", "diagnostics")
             )
+
+
+def test_public_catalog_uses_declared_model3_path_with_sibling_documents(
+    tmp_path: Path,
+) -> None:
+    from updater.live2d.contracts import Live2DIndex
+
+    data = publishable_index_data()
+    model = data["model_outputs"][0]
+    model["model3_path"] = "nested/selected.model3.json"
+    model["schema_version"] = 2
+    model["file_references"] = {
+        "Moc": "selected.moc3",
+        "Textures": ["textures/selected.png"],
+        "Physics": "selected.physics3.json",
+    }
+    index = Live2DIndex.from_dict(data)
+    source = tmp_path / "live2d"
+    materialize_outputs(source, index)
+    model_root = source / model["output_path"] / "nested"
+    model_root.mkdir(parents=True, exist_ok=True)
+    (model_root / "selected.model3.json").write_text(
+        json.dumps(
+            {
+                "Version": 3,
+                "FileReferences": {
+                    "Moc": "selected.moc3",
+                    "Textures": ["textures/selected.png"],
+                    "Physics": "selected.physics3.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for relative in ("selected.moc3", "textures/selected.png", "selected.physics3.json"):
+        path = model_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"nested-output")
+
+    catalog = build_viewer_catalog(index, source)
+    selected = next(entry for entry in catalog if entry["modelFile"] == "selected.model3.json")
+    assert selected["modelPath"] == f"{model['output_path']}/nested"
+    assert selected["modelBase"] == "nested"
 
 
 @pytest.mark.parametrize("model3_count", [0, 2])

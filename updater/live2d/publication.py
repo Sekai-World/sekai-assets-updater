@@ -241,7 +241,7 @@ def _validate_output_directory_aliases(
     for directory in directories:
         resolved = directory.checked.resolved
         previous = seen.get(resolved)
-        if previous is not None:
+        if previous is not None and not (previous.role == directory.role == "model"):
             raise Live2DPublicationError(
                 f"{directory.field_name}: physical output directory {resolved} is already "
                 f"used by {previous.field_name}; output directories must be distinct"
@@ -333,23 +333,34 @@ def _collect_motion_output_directories(
 def _validate_model_record_references(root: _OutputRoot, record: ModelOutputRecord) -> None:
     field = f"model_outputs[{record.model_output_id!r}]"
     references = record.file_references
+    reference_directory = record.output_path
+    if record.model3_path is not None:
+        _checked_file(
+            root,
+            record.output_path,
+            record.model3_path,
+            f"{field}.model3_path",
+        )
+        model3_parts = _relative_parts(record.model3_path, f"{field}.model3_path")
+        if len(model3_parts) > 1:
+            reference_directory = f"{record.output_path}/{'/'.join(model3_parts[:-1])}"
     _checked_file(
         root,
-        record.output_path,
+        reference_directory,
         references.moc,
         f"{field}.file_references.Moc",
     )
     for texture_index, texture in enumerate(references.textures):
         _checked_file(
             root,
-            record.output_path,
+            reference_directory,
             texture,
             f"{field}.file_references.Textures[{texture_index}]",
         )
     if references.physics is not None:
         _checked_file(
             root,
-            record.output_path,
+            reference_directory,
             references.physics,
             f"{field}.file_references.Physics",
         )
