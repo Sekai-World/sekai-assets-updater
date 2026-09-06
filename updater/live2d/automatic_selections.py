@@ -3,9 +3,9 @@
 Automatic discovery is deliberately narrower than the general ``live2d/``
 namespace.  It selects only model and motion bundles from the current asset
 metadata, then reuses the existing explicit selection and index-builder
-contracts.  Output directories come from the first matching ``paths`` entry in
-the bundle metadata.  Restored motion bundles use the path layout already
-produced by ``restore_live2d_motions``::
+contracts.  Model output directories come from every matching ``paths`` entry;
+motion output directories use the first matching entry.  Restored motion bundles
+use the path layout already produced by ``restore_live2d_motions``::
 
     <output_root>/motion/<metadata-path-suffix>/BuildMotionData.json
     <output_root>/motion/<metadata-path-suffix>/motion/*.motion3.json
@@ -152,20 +152,21 @@ def _safe_bundle_suffix(bundle_name: str, prefix: str) -> str:
     return "/".join(components)
 
 
-def _metadata_relative_name(
+def _metadata_relative_names(
     bundle: Mapping[str, object],
     *,
     bundle_name: str,
     kind: str,
-) -> str:
+    all_matching: bool,
+) -> tuple[str, ...]:
     paths = bundle.get("paths")
     if not isinstance(paths, (list, tuple)):
         raise Live2DAutomaticSelectionsError(
             f"automatic Live2D discovery found missing metadata paths for {kind} bundle "
             f"{bundle_name!r}"
         )
-
     prefixes = tuple(f"{root}{kind}/" for root in _LIVE2D_METADATA_ROOTS)
+    relative_names: list[str] = []
     for path in paths:
         if not isinstance(path, str):
             continue
@@ -204,12 +205,33 @@ def _metadata_relative_name(
                     f"automatic Live2D discovery found an unsafe metadata path for "
                     f"{kind} bundle {bundle_name!r}: {path!r}"
                 )
-            return "/".join(components)
+            relative_names.append("/".join(components))
+            if not all_matching:
+                return (relative_names[-1],)
+
+    if relative_names:
+        return tuple(relative_names)
 
     raise Live2DAutomaticSelectionsError(
         f"automatic Live2D discovery found no matching metadata path for {kind} bundle "
         f"{bundle_name!r}"
     )
+
+
+def _metadata_relative_name(
+    bundle: Mapping[str, object],
+    *,
+    bundle_name: str,
+    kind: str,
+) -> str:
+    """Return the first matching metadata path, preserving motion behavior."""
+
+    return _metadata_relative_names(
+        bundle,
+        bundle_name=bundle_name,
+        kind=kind,
+        all_matching=False,
+    )[0]
 
 
 def _selection_id(kind: str, relative_name: str) -> str:
@@ -238,6 +260,7 @@ def _discover_bundles(
     *,
     prefix: str,
     kind: str,
+    all_matching_metadata_paths: bool = False,
 ) -> tuple[_BundleSelection, ...]:
     if not isinstance(live2d_bundles, Mapping):
         raise Live2DAutomaticSelectionsError(
@@ -267,38 +290,52 @@ def _discover_bundles(
                 f"{bundle_name!r} (metadata keys {previous.metadata_key!r} and "
                 f"{metadata_key!r})"
             )
-        relative_name = _metadata_relative_name(
-            bundle,
-            bundle_name=bundle_name,
-            kind=kind,
-        )
-        selection = _BundleSelection(
-            bundle=bundle,
-            bundle_name=bundle_name,
-            relative_name=relative_name,
-            metadata_key=metadata_key,
-        )
-        seen_names[bundle_name] = selection
-
-        path_key = selection.relative_name.casefold()
-        previous = seen_paths.get(path_key)
-        if previous is not None:
-            raise Live2DAutomaticSelectionsError(
-                f"automatic Live2D discovery found colliding {kind} output paths "
-                f"{previous.relative_name!r} and {selection.relative_name!r}"
+        if all_matching_metadata_paths:
+            relative_names = _metadata_relative_names(
+                bundle,
+                bundle_name=bundle_name,
+                kind=kind,
+                all_matching=True,
             )
-        seen_paths[path_key] = selection
-
-        selection_id = _selection_id(kind, selection.relative_name)
-        id_key = selection_id.casefold()
-        previous = seen_ids.get(id_key)
-        if previous is not None:
-            raise Live2DAutomaticSelectionsError(
-                f"automatic Live2D discovery found colliding {kind} selection IDs "
-                f"{_selection_id(kind, previous.relative_name)!r} and {selection_id!r}"
+        else:
+            relative_names = (
+                _metadata_relative_name(
+                    bundle,
+                    bundle_name=bundle_name,
+                    kind=kind,
+                ),
             )
-        seen_ids[id_key] = selection
-        discovered.append(selection)
+        selections = tuple(
+            _BundleSelection(
+                bundle=bundle,
+                bundle_name=bundle_name,
+                relative_name=relative_name,
+                metadata_key=metadata_key,
+            )
+            for relative_name in relative_names
+        )
+        seen_names[bundle_name] = selections[0]
+
+        for selection in selections:
+            path_key = selection.relative_name.casefold()
+            previous = seen_paths.get(path_key)
+            if previous is not None:
+                raise Live2DAutomaticSelectionsError(
+                    f"automatic Live2D discovery found colliding {kind} output paths "
+                    f"{previous.relative_name!r} and {selection.relative_name!r}"
+                )
+            seen_paths[path_key] = selection
+
+            selection_id = _selection_id(kind, selection.relative_name)
+            id_key = selection_id.casefold()
+            previous = seen_ids.get(id_key)
+            if previous is not None:
+                raise Live2DAutomaticSelectionsError(
+                    f"automatic Live2D discovery found colliding {kind} selection IDs "
+                    f"{_selection_id(kind, previous.relative_name)!r} and {selection_id!r}"
+                )
+            seen_ids[id_key] = selection
+        discovered.extend(selections)
 
     return tuple(discovered)
 
@@ -333,7 +370,9 @@ def _reject_generated_output_collisions(
 
     for index, (kind, bundle_name, path) in enumerate(generated):
         for _other_kind, other_bundle_name, other_path in generated[index + 1 :]:
-            if bundle_name == other_bundle_name or not _path_overlaps(path, other_path):
+            if not _path_overlaps(path, other_path):
+                continue
+            if kind == _other_kind == "motion" and bundle_name == other_bundle_name:
                 continue
             raise Live2DAutomaticSelectionsError(
                 f"automatic Live2D discovery found colliding {kind} output paths for "
@@ -384,6 +423,7 @@ def build_automatic_live2d_associated_selections(
         live2d_bundles,
         prefix=MODEL_BUNDLE_PREFIX,
         kind="model",
+        all_matching_metadata_paths=True,
     )
     motion_bundles = _discover_bundles(
         live2d_bundles,

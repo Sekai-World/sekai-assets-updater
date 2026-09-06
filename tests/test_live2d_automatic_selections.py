@@ -123,6 +123,19 @@ def test_automatic_discovery_filters_and_sorts_exact_bundle_names(tmp_path: Path
         ),
         (
             {
+                "shared": {
+                    "bundleName": "live2d/model/shared",
+                    "paths": [
+                        "StartApp/live2d/model/v1/shared",
+                        "StartApp/live2d/model/v1/shared/nested",
+                    ],
+                    "hash": "shared",
+                }
+            },
+            "colliding model output paths",
+        ),
+        (
+            {
                 "base": {
                     "bundleName": "live2d/motion/a",
                     "paths": ["StartApp/live2d/motion/v2/a"],
@@ -191,7 +204,7 @@ def test_automatic_discovery_rejects_missing_or_empty_metadata_paths(
         )
 
 
-def test_automatic_discovery_uses_first_matching_metadata_path_and_rejects_ambiguous_outputs(
+def test_automatic_discovery_emits_each_matching_model_path_and_rejects_ambiguous_outputs(
     tmp_path: Path,
 ) -> None:
     master_root = tmp_path / "master"
@@ -205,12 +218,30 @@ def test_automatic_discovery_uses_first_matching_metadata_path_and_rejects_ambig
         ],
         "hash": "first",
     }
+    motion = {
+        "bundleName": "live2d/motion/shared",
+        "paths": [
+            "StartApp/live2d/motion/v1/main/first",
+            "StartApp/live2d/motion/v1/main/second",
+        ],
+        "hash": "motion",
+    }
     selections = build_automatic_live2d_associated_selections(
-        {"first": first},
+        {"first": first, "motion": motion},
         output_root=tmp_path / "output",
         master_data_root=master_root,
     )
-    assert selections.model_outputs[0].output_path == "model/v1/main/first"
+    assert [selection.output_path for selection in selections.model_outputs] == [
+        "model/v1/main/first",
+        "model/v1/main/second",
+    ]
+    assert [selection.model_output_id for selection in selections.model_outputs] == [
+        "model-v1-main-first",
+        "model-v1-main-second",
+    ]
+    assert [selection.motion_bundle_output_path for selection in selections.motion_sets] == [
+        "motion/v1/main/first"
+    ]
 
     duplicate_output = {
         "bundleName": "live2d/model/second",
