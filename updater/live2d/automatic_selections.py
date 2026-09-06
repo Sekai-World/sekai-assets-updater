@@ -4,16 +4,20 @@ Automatic discovery is deliberately narrower than the general ``live2d/``
 namespace.  It selects only model and motion bundles from the current asset
 metadata, then reuses the existing explicit selection and index-builder
 contracts.  Model output directories come from every matching ``paths`` entry;
-motion output directories use the first matching entry.  Restored motion bundles
-use the path layout already produced by ``restore_live2d_motions``::
+motion output directories use the unique versioned entry when metadata also
+contains the bundle-root alias, otherwise preserving the first-entry behavior.
+Restored motion bundles use the path layout already produced by
+``restore_live2d_motions``::
 
     <output_root>/motion/<metadata-path-suffix>/BuildMotionData.json
     <output_root>/motion/<metadata-path-suffix>/motion/*.motion3.json
     <output_root>/motion/<metadata-path-suffix>/facial/*.motion3.json
 
 Bundle names and metadata path suffixes are normalized and checked before they
-are used.  Selection IDs are derived from the normalized metadata path, rather
-than using an arbitrary metadata key or an absolute filesystem path.
+are used.  Model metadata paths are reduced to shallow roots before extracted
+outputs exist; each materialized root is then expanded to its model3 files.
+Selection IDs are derived from the normalized metadata path, rather than using
+an arbitrary metadata key or an absolute filesystem path.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias
 
+from updater.live2d.index_adapter import _discover_model3_paths
 from updater.live2d.index_builder import (
     ModelOutputSelection,
     SharedMotionSetSelection,
@@ -57,6 +62,7 @@ __all__ = [
     "build_automatic_live2d_associated_selections",
     "build_live2d_automatic_associated_selections",
     "build_live2d_automatic_selections",
+    "expand_automatic_live2d_model_selections",
 ]
 
 
@@ -224,14 +230,53 @@ def _metadata_relative_name(
     bundle_name: str,
     kind: str,
 ) -> str:
-    """Return the first matching metadata path, preserving motion behavior."""
+    """Return the safe metadata path selected for one automatic bundle."""
 
-    return _metadata_relative_names(
+    relative_names = _metadata_relative_names(
         bundle,
         bundle_name=bundle_name,
         kind=kind,
-        all_matching=False,
-    )[0]
+        all_matching=kind == "motion",
+    )
+    if kind != "motion":
+        return relative_names[0]
+
+    # A motion Bundle can be listed once at its root and once at the versioned
+    # path used by BuildMotionData.  The root alias is not where restoration
+    # materializes that real-data bundle.  Prefer the one non-root candidate,
+    # but fail closed if metadata offers more than one such candidate instead
+    # of silently choosing an arbitrary path.
+    root_alias = bundle_name.removeprefix(MOTION_BUNDLE_PREFIX)
+    root_candidates = tuple(
+        name for name in relative_names if name.rpartition("/")[2] == root_alias
+    )
+    if not root_candidates:
+        return relative_names[0]
+    versioned_names = tuple(name for name in root_candidates if name != root_alias)
+    if len(versioned_names) > 1:
+        raise Live2DAutomaticSelectionsError(
+            f"automatic Live2D discovery found ambiguous versioned metadata paths for "
+            f"motion bundle {bundle_name!r}: {', '.join(versioned_names)}"
+        )
+    return versioned_names[0] if versioned_names else root_alias
+
+
+def _reduce_shallow_model_paths(relative_names: tuple[str, ...]) -> tuple[str, ...]:
+    """Keep deterministic shallow roots while suppressing descendants."""
+
+    ordered = sorted(set(relative_names), key=lambda value: (value.casefold(), value))
+    roots: list[tuple[str, tuple[str, ...]]] = []
+    seen_casefold: set[str] = set()
+    for relative_name in ordered:
+        casefolded_name = relative_name.casefold()
+        if casefolded_name in seen_casefold:
+            continue
+        seen_casefold.add(casefolded_name)
+        parts = tuple(component.casefold() for component in relative_name.split("/"))
+        if any(parts[: len(root_parts)] == root_parts for _root, root_parts in roots):
+            continue
+        roots.append((relative_name, parts))
+    return tuple(root for root, _parts in roots)
 
 
 def _selection_id(kind: str, relative_name: str) -> str:
@@ -297,6 +342,8 @@ def _discover_bundles(
                 kind=kind,
                 all_matching=True,
             )
+            if kind == "model":
+                relative_names = _reduce_shallow_model_paths(relative_names)
         else:
             relative_names = (
                 _metadata_relative_name(
@@ -456,6 +503,69 @@ def build_automatic_live2d_associated_selections(
         provider=provider,
         model_outputs=model_outputs,
         motion_sets=motion_sets,
+    )
+
+
+def expand_automatic_live2d_model_selections(
+    selections: Live2DAutomaticSelections,
+) -> Live2DAutomaticSelections:
+    """Expand materialized automatic model roots into one selection per model3 file.
+
+    Automatic metadata discovery intentionally runs before extracted outputs are
+    guaranteed to exist.  Callers invoke this function after materialization;
+    the shared adapter scanner then supplies safe, deterministic model3 paths.
+    """
+
+    if not isinstance(selections, Live2DAutomaticSelections):
+        raise Live2DAutomaticSelectionsError("automatic selections must be validated selections")
+
+    expanded: list[ModelOutputSelection] = []
+    seen_ids: set[str] = set()
+    for selection in selections.model_outputs:
+        if selection.model3_path is None:
+            try:
+                actual_output_path, model3_paths = _discover_model3_paths(
+                    selection.output_root,
+                    selection.output_path,
+                )
+            except Exception as exc:
+                raise Live2DAutomaticSelectionsError(
+                    f"automatic Live2D discovery could not inspect model output "
+                    f"{selection.output_path!r}: {exc}"
+                ) from exc
+        else:
+            actual_output_path = selection.output_path
+            model3_paths = (selection.model3_path,)
+        if not model3_paths:
+            raise Live2DAutomaticSelectionsError(
+                f"automatic Live2D discovery found no model3 files under {selection.output_path!r}"
+            )
+
+        root_name = actual_output_path
+        if root_name.startswith("model/"):
+            root_name = root_name.removeprefix("model/")
+        for model3_path in model3_paths:
+            model_output_id = _selection_id("model", f"{root_name}/{model3_path}")
+            if model_output_id in seen_ids:
+                raise Live2DAutomaticSelectionsError(
+                    f"automatic Live2D discovery found duplicate model selection ID "
+                    f"{model_output_id!r}"
+                )
+            seen_ids.add(model_output_id)
+            expanded.append(
+                ModelOutputSelection(
+                    output_root=selection.output_root,
+                    output_path=actual_output_path,
+                    model_output_id=model_output_id,
+                    bundle=selection.bundle,
+                    model3_path=model3_path,
+                )
+            )
+
+    return Live2DAutomaticSelections(
+        provider=selections.provider,
+        model_outputs=tuple(expanded),
+        motion_sets=selections.motion_sets,
     )
 
 

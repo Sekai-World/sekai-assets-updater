@@ -13,7 +13,12 @@ import pytest
 
 from updater.cli import lifecycle, runner
 from updater.live2d.association import LIVE2D_TABLE_NAMES
+from updater.live2d.automatic_selections import (
+    build_automatic_live2d_associated_selections,
+    expand_automatic_live2d_model_selections,
+)
 from updater.live2d.contracts import Live2DIndex
+from updater.live2d.index_builder import build_live2d_association_index
 from updater.live2d.rollout import (
     Live2DAssociatedRolloutError,
     live2d_associated_namespace_path,
@@ -102,7 +107,41 @@ def _write_outputs(root: Path) -> None:
     _write_motion_outputs(root)
 
 
-def _write_automatic_outputs(root: Path) -> None:
+def test_manifest_motion_readiness_accepts_internal_spaces_and_rejects_unsafe_names(
+    tmp_path: Path,
+) -> None:
+    motion_directory = tmp_path / "motion"
+    facial_directory = tmp_path / "facial"
+    motion_directory.mkdir()
+    facial_directory.mkdir()
+    motion_name = "walk fast"
+    facial_name = "face_ worry_01"
+    (motion_directory / f"{motion_name}.motion3.json").write_text("{}", encoding="utf-8")
+    (facial_directory / f"{facial_name}.motion3.json").write_text("{}", encoding="utf-8")
+
+    assert dispatch._manifest_motion_clips_exist(
+        {"motions": [motion_name], "expressions": [facial_name]},
+        motion_directory,
+        facial_directory,
+    )
+    for unsafe_name in (
+        " leading",
+        "trailing ",
+        ".",
+        "..",
+        "../escape",
+        r"nested\name",
+        "name.motion3.json",
+        "name.exp3.json",
+        "name\x00with-control",
+    ):
+        assert not dispatch._manifest_motion_clip_name_is_safe(unsafe_name)
+
+
+def _write_automatic_outputs(
+    root: Path,
+    motion_relative_path: str = "motion/v2/main/base",
+) -> None:
     model = root / "model" / "v1" / "main" / "model"
     model.mkdir(parents=True, exist_ok=True)
     (model / "model.model3.json").write_text(
@@ -123,7 +162,7 @@ def _write_automatic_outputs(root: Path) -> None:
     (model / "textures").mkdir()
     (model / "textures" / "model.png").write_bytes(b"texture")
 
-    _write_motion_outputs(root, "motion/v2/main/base")
+    _write_motion_outputs(root, motion_relative_path)
 
 
 def _config(root: Path, manifest_path: Path | None = None) -> SimpleNamespace:
@@ -315,6 +354,126 @@ def test_automatic_dispatch_recovers_missing_models_before_index_build(tmp_path:
         )
 
     assert events == ["recover", "build"]
+
+
+def test_automatic_dispatch_uses_restored_versioned_motion_path(
+    tmp_path: Path,
+) -> None:
+    versioned_motion_path = "motion/v1/collabo/21_miku/clb01_21miku_motion_base"
+    source_root = tmp_path / "extracted" / "live2d"
+    _write_automatic_outputs(source_root, versioned_motion_path)
+    shutil.rmtree(source_root / "motion")
+    master_root = tmp_path / "master"
+    _write_master_tables(master_root)
+    config = _config(tmp_path)
+    config.LIVE2D_ASSOCIATION_MASTER_DATA_DIR = master_root
+    selected_cache = tmp_path / "bundle-cache" / "live2d" / "motion" / "clb01_21miku_motion_base"
+    selected_cache.parent.mkdir(parents=True)
+    selected_cache.write_bytes(b"cached-motion")
+    bundles = {
+        "model-key": {
+            "bundleName": "live2d/model/model",
+            "paths": ["StartApp/live2d/model/v1/main/model"],
+            "hash": "model-hash",
+        },
+        "motion-key": {
+            "bundleName": "live2d/motion/clb01_21miku_motion_base",
+            "paths": [
+                "StartApp/live2d/motion/clb01_21miku_motion_base",
+                "StartApp/live2d/" + versioned_motion_path,
+            ],
+            "hash": "motion-hash",
+        },
+    }
+
+    async def restore_selected(*_args, **kwargs) -> None:
+        assert kwargs["bundle_paths"] == [selected_cache]
+        _write_motion_outputs(source_root, versioned_motion_path)
+
+    with (
+        patch.object(dispatch, "collect_param_id_map", new=AsyncMock(return_value={})),
+        patch.object(
+            dispatch,
+            "restore_live2d_motions",
+            new=AsyncMock(side_effect=restore_selected),
+        ) as restore,
+        patch.object(dispatch, "_upload_live2d_associated_projection", new=AsyncMock()),
+    ):
+        asyncio.run(
+            dispatch.run_specialized_postprocess(
+                "live2d-associated",
+                config,
+                live2d_bundles=bundles,
+                asset_metadata_version="asset-v1",
+            )
+        )
+
+    namespace = live2d_associated_namespace_path(config.ASSET_LOCAL_EXTRACTED_DIR)
+    index = load_live2d_index(namespace / "index.json")
+    assert index is not None
+    restore.assert_awaited_once()
+    assert index.motion_sets[0].motion_output_path == f"{versioned_motion_path}/motion"
+    assert index.motion_sets[0].facial_output_path == f"{versioned_motion_path}/facial"
+
+
+def test_associated_dispatch_restores_indexed_versioned_motion_bundle(
+    tmp_path: Path,
+) -> None:
+    versioned_motion_path = "motion/v1/collabo/21_miku/clb01_21miku_motion_base"
+    source_root = tmp_path / "extracted" / "live2d"
+    _write_automatic_outputs(source_root, versioned_motion_path)
+    master_root = tmp_path / "master"
+    _write_master_tables(master_root)
+    config = _config(tmp_path)
+    selected_cache = tmp_path / "bundle-cache" / "live2d" / "motion" / "clb01_21miku_motion_base"
+    selected_cache.parent.mkdir(parents=True)
+    selected_cache.write_bytes(b"cached-motion")
+    bundles = {
+        "model-key": {
+            "bundleName": "live2d/model/model",
+            "paths": ["StartApp/live2d/model/v1/main/model"],
+            "hash": "model-hash",
+        },
+        "motion-key": {
+            "bundleName": "live2d/motion/clb01_21miku_motion_base",
+            "paths": [
+                "StartApp/live2d/motion/clb01_21miku_motion_base",
+                "StartApp/live2d/" + versioned_motion_path,
+            ],
+            "hash": "motion-hash",
+        },
+    }
+    selections = build_automatic_live2d_associated_selections(
+        bundles,
+        output_root=source_root,
+        master_data_root=master_root,
+    )
+    selections = expand_automatic_live2d_model_selections(selections)
+    index = build_live2d_association_index(
+        provider=selections.provider,
+        metadata_version="asset-v1",
+        model_outputs=selections.model_outputs,
+        motion_sets=selections.motion_sets,
+    )
+    shutil.rmtree(source_root / "motion")
+
+    async def restore_selected(*_args, **kwargs) -> None:
+        assert kwargs["bundle_paths"] == [selected_cache]
+        _write_motion_outputs(source_root, versioned_motion_path)
+
+    with (
+        patch.object(dispatch, "collect_param_id_map", new=AsyncMock(return_value={})),
+        patch.object(
+            dispatch,
+            "restore_live2d_motions",
+            new=AsyncMock(side_effect=restore_selected),
+        ) as restore,
+    ):
+        asyncio.run(dispatch._ensure_associated_motion_outputs(config, index, source_root))
+
+    restore.assert_awaited_once()
+    assert (source_root / versioned_motion_path / "motion" / "idle.motion3.json").is_file()
+    assert not (source_root / "motion" / "clb01_21miku_motion_base").exists()
 
 
 def test_cold_manifest_dispatch_restores_selected_motion_before_build_and_publish(

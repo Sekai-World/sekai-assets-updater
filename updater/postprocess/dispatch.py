@@ -12,9 +12,12 @@ from anyio import Path
 
 from updater.live2d.automatic_selections import (
     DEFAULT_AUTOMATIC_MASTER_DB_VERSION,
+    MOTION_BUNDLE_PREFIX,
     build_automatic_live2d_associated_selections,
+    expand_automatic_live2d_model_selections,
 )
 from updater.live2d.contracts import Live2DIndex
+from updater.live2d.index_adapter import _discover_model3_paths
 from updater.live2d.index_builder import build_live2d_association_index
 from updater.live2d.master_data import (
     DEFAULT_MASTER_DATA_BRANCH,
@@ -32,6 +35,7 @@ from updater.live2d.rollout import (
 from updater.live2d.viewer_catalog import (
     PUBLIC_MODEL_LIST_FILENAME,
     collect_viewer_asset_files,
+    find_model3_file,
     stage_viewer_projection,
     viewer_asset_directories,
 )
@@ -220,12 +224,17 @@ def _validate_associated_storage(storage: dict) -> None:
 def _associated_model_outputs_exist(index: Live2DIndex, source_root: StdPath) -> bool:
     for record in index.model_outputs:
         references = record.file_references
+        try:
+            model3_path = find_model3_file(source_root, record.output_path, record.model3_path)
+        except Exception:
+            return False
+        model_directory = model3_path.parent
         for relative in (
             references.moc,
             *references.textures,
             *((references.physics,) if references.physics is not None else ()),
         ):
-            path = source_root / record.output_path / relative
+            path = model_directory / relative
             if path.is_symlink() or not path.is_file():
                 return False
     return True
@@ -332,10 +341,12 @@ def _manifest_motion_clip_name_is_safe(clip_name) -> bool:
     return (
         isinstance(clip_name, str)
         and bool(clip_name)
+        and clip_name == clip_name.strip()
         and clip_name not in {".", ".."}
         and "/" not in clip_name
         and "\\" not in clip_name
-        and not any(char.isspace() for char in clip_name)
+        and not any(ord(char) < 0x20 or ord(char) == 0x7F for char in clip_name)
+        and not clip_name.casefold().endswith((".motion3.json", ".exp3.json"))
     )
 
 
@@ -385,6 +396,7 @@ async def _ensure_associated_motion_outputs(
     source_root: StdPath,
     *,
     motion_outputs_ready: bool = False,
+    allow_cache_scan: bool = False,
 ) -> None:
     """Ensure the explicit index's motion files exist without duplicate restore work."""
 
@@ -419,6 +431,40 @@ async def _ensure_associated_motion_outputs(
         ) from validation_error
 
     try:
+        # The index already contains the selected output paths (including the
+        # automatic versioned-path preference).  Restore only the corresponding
+        # bundle identities instead of globbing the cache and allowing an
+        # unselected root alias to materialize.
+        bundle_paths: list[StdPath] = []
+        missing: list[str] = []
+        for record in index.motion_sets:
+            bundle_name = record.motion_bundle.name
+            if not bundle_name.startswith(MOTION_BUNDLE_PREFIX):
+                missing.append(f"{bundle_name!r} (cache path unavailable)")
+                continue
+            bundle_path = get_bundle_cache_path(config, {"bundleName": bundle_name})
+            if bundle_path is None:
+                missing.append(f"{bundle_name!r} (cache path unavailable)")
+                continue
+            path = StdPath(str(bundle_path))
+            if path.is_symlink() or not path.is_file():
+                missing.append(f"{bundle_name!r} ({path})")
+                continue
+            bundle_paths.append(path)
+
+        if missing:
+            if not allow_cache_scan:
+                raise FileNotFoundError(
+                    "selected Live2D motion bundle cache is missing: " + ", ".join(missing)
+                )
+            # Older explicit indexes stored only the logical motion name (for
+            # example ``motion/v2_01ichika_motion_base``), not the current
+            # metadata Bundle name.  Keep their historical behavior: restore
+            # from every file in the local motion cache.  Automatic and
+            # manifest-driven paths never opt into this fallback, so an
+            # unselected root alias cannot be materialized there.
+            bundle_paths = None
+
         param_id_map = await collect_param_id_map(Path(str(model_dir)))
         await restore_live2d_motions(
             Path(str(motion_source)),
@@ -427,6 +473,7 @@ async def _ensure_associated_motion_outputs(
             config.UNITY_VERSION,
             config=config,
             param_id_map=param_id_map,
+            bundle_paths=bundle_paths,
         )
     except Exception as exc:
         raise Live2DAssociatedRolloutError(
@@ -517,18 +564,14 @@ async def _build_associated_index_from_manifest(
 
 def _automatic_model_outputs_exist(selections, source_root: StdPath) -> bool:
     for selection in selections.model_outputs:
-        output_directory = source_root / selection.output_path
-        if output_directory.is_symlink() or not output_directory.is_dir():
-            return False
         try:
-            model3_files = [
-                path
-                for path in output_directory.rglob("*.model3.json")
-                if path.is_file() and not path.is_symlink()
-            ]
-            if len(model3_files) != 1:
+            _actual_output_path, model3_files = _discover_model3_paths(
+                source_root,
+                selection.output_path,
+            )
+            if not model3_files:
                 return False
-        except (OSError, RuntimeError):
+        except Exception:
             return False
     return True
 
@@ -611,6 +654,7 @@ async def _build_associated_index_automatically(
         # This intentionally reuses the manifest restore path without writing a
         # manifest.  Its output layout is the one documented by automatic_selections.py.
         await _ensure_manifest_motion_outputs(config, selections, source_root)
+        selections = expand_automatic_live2d_model_selections(selections)
         return build_live2d_association_index(
             provider=selections.provider,
             metadata_version=asset_metadata_version,
@@ -751,6 +795,7 @@ async def _ensure_associated_outputs_for_dispatch(
     source_root: StdPath,
     motion_outputs_ready: bool,
     skip_missing_sources: bool,
+    allow_cache_scan: bool,
 ) -> bool:
     try:
         await _ensure_associated_motion_outputs(
@@ -758,6 +803,7 @@ async def _ensure_associated_outputs_for_dispatch(
             validated_index,
             source_root,
             motion_outputs_ready=motion_outputs_ready,
+            allow_cache_scan=allow_cache_scan,
         )
     except Live2DAssociatedRolloutError as exc:
         if skip_missing_sources:
@@ -843,12 +889,18 @@ async def _process_live2d_associated(
     if validated_index is None:
         return
 
+    # A prebuilt explicit index predates the metadata-driven selection flow and
+    # may contain only logical motion names.  Let that legacy path retain its
+    # cache-scanning behavior, while automatic and manifest-driven indexes stay
+    # restricted to their selected Bundle metadata.
+    allow_cache_scan = association_index_path is not None or association_index is not None
     if not await _ensure_associated_outputs_for_dispatch(
         config,
         validated_index,
         StdPath(str(source_root)),
         motion_outputs_ready,
         skip_missing_sources,
+        allow_cache_scan,
     ):
         return
     try:

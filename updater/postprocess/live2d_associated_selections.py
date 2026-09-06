@@ -41,6 +41,7 @@ class _ModelOutputManifestEntry:
     model_output_id: str
     bundle_key: str
     output_path: str
+    model3_path: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +129,7 @@ def _sequence(value: object, field_name: str) -> tuple[object, ...]:
 def _parse_model_entry(value: object, index: int) -> _ModelOutputManifestEntry:
     field_name = f"model_outputs[{index}]"
     mapping = _mapping(value, field_name)
-    _reject_unknown_keys(mapping, {"id", "bundle", "output_path"}, field_name)
+    _reject_unknown_keys(mapping, {"id", "bundle", "output_path", "model3_path"}, field_name)
     for required in ("id", "bundle", "output_path"):
         if required not in mapping:
             raise Live2DAssociatedSelectionsError(f"{field_name}.{required} is required")
@@ -136,6 +137,11 @@ def _parse_model_entry(value: object, index: int) -> _ModelOutputManifestEntry:
         model_output_id=_identifier(mapping["id"], f"{field_name}.id"),
         bundle_key=_text(mapping["bundle"], f"{field_name}.bundle", max_length=1024),
         output_path=_relative_path(mapping["output_path"], f"{field_name}.output_path"),
+        model3_path=(
+            None
+            if "model3_path" not in mapping
+            else _relative_path(mapping["model3_path"], f"{field_name}.model3_path")
+        ),
     )
 
 
@@ -309,6 +315,7 @@ def build_live2d_associated_selections(
             output_path=entry.output_path,
             model_output_id=entry.model_output_id,
             bundle=_bundle_metadata(live2d_bundles, entry.bundle_key, f"model_outputs[{index}]"),
+            model3_path=entry.model3_path,
         )
         for index, entry in enumerate(manifest.model_outputs)
     )
