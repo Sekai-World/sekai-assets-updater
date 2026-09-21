@@ -18,6 +18,7 @@ from tests.test_live2d_rollout import (
 from updater.live2d.viewer_catalog import (
     Live2DViewerCatalogError,
     build_viewer_catalog,
+    validate_viewer_catalog,
 )
 from updater.postprocess import dispatch
 
@@ -37,11 +38,28 @@ def test_public_catalog_has_only_viewer_fields_and_resolves_model3_and_motion_pa
     assert [entry["modelPath"] for entry in catalog] == sorted(
         entry["modelPath"] for entry in catalog
     )
+    expected_character_ids = {
+        "ichika-unit": (1, 101),
+        "ichika-april2025": (None, None),
+        "mizuki-unit": (20, 202),
+    }
     for entry in catalog:
-        assert set(entry) == {"modelName", "modelBase", "modelPath", "modelFile", "motionSets"}
+        assert set(entry) == {
+            "modelName",
+            "modelBase",
+            "modelPath",
+            "modelFile",
+            "motionSets",
+            "characterId",
+            "character2dId",
+        }
         model_file = source / entry["modelPath"] / entry["modelFile"]
         assert model_file.is_file()
         assert entry["modelFile"].endswith(".model3.json")
+        model_output_id = Path(entry["modelPath"]).name
+        assert (entry["characterId"], entry["character2dId"]) == expected_character_ids[
+            model_output_id
+        ]
         for motion_set in entry["motionSets"]:
             assert set(motion_set) == {
                 "motionSetId",
@@ -62,6 +80,73 @@ def test_public_catalog_has_only_viewer_fields_and_resolves_model3_and_motion_pa
                 key in motion_set
                 for key in ("status", "evidence", "rule_code", "checksum", "diagnostics")
             )
+
+
+def test_public_catalog_joins_duplicate_model_names_by_model_output_identity(
+    tmp_path: Path,
+) -> None:
+    from updater.live2d.contracts import Live2DIndex
+
+    data = publishable_index_data()
+    for model in data["model_outputs"][:2]:
+        model["schema_version"] = 2
+        model["model3_path"] = "duplicate.model3.json"
+    index = Live2DIndex.from_dict(data)
+    source = tmp_path / "live2d"
+    materialize_outputs(source, index)
+
+    catalog = build_viewer_catalog(index, source)
+    duplicate_entries = [entry for entry in catalog if entry["modelName"] == "duplicate"]
+
+    assert {
+        (entry["modelPath"], entry["characterId"], entry["character2dId"])
+        for entry in duplicate_entries
+    } == {
+        ("model/ichika-april2025", None, None),
+        ("model/ichika-unit", 1, 101),
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("characterId", "1"),
+        ("character2dId", -1),
+        ("characterId", True),
+    ],
+)
+def test_validate_viewer_catalog_rejects_malformed_character_mapping(
+    field: str, value: object
+) -> None:
+    entry = {
+        "modelName": "model",
+        "modelBase": "model",
+        "modelPath": "model",
+        "modelFile": "model.model3.json",
+        "motionSets": [],
+        "characterId": None,
+        "character2dId": None,
+    }
+    entry[field] = value
+
+    with pytest.raises(Live2DViewerCatalogError, match=field):
+        validate_viewer_catalog([entry])
+
+
+def test_validate_viewer_catalog_rejects_unknown_fields() -> None:
+    entry = {
+        "modelName": "model",
+        "modelBase": "model",
+        "modelPath": "model",
+        "modelFile": "model.model3.json",
+        "motionSets": [],
+        "characterId": None,
+        "character2dId": None,
+        "unexpected": "value",
+    }
+
+    with pytest.raises(Live2DViewerCatalogError, match="fields must be exactly"):
+        validate_viewer_catalog([entry])
 
 
 def test_public_catalog_uses_declared_model3_path_with_sibling_documents(

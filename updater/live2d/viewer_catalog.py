@@ -417,6 +417,22 @@ def _safe_identifier(value: object, field_name: str) -> str:
     return value
 
 
+def _public_character_id(value: object) -> int | None:
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+def _validate_public_character_id(value: object, field_name: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise Live2DViewerCatalogError(f"{field_name}: expected a non-negative integer or null")
+    return value
+
+
 def _validate_motion_entry(value: object, field_name: str) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise Live2DViewerCatalogError(f"{field_name}: expected an object")
@@ -459,7 +475,15 @@ def validate_viewer_catalog(value: object) -> list[dict[str, object]]:
         field_name = f"catalog[{index}]"
         if not isinstance(item, Mapping):
             raise Live2DViewerCatalogError(f"{field_name}: expected an object")
-        expected = {"modelName", "modelBase", "modelPath", "modelFile", "motionSets"}
+        expected = {
+            "modelName",
+            "modelBase",
+            "modelPath",
+            "modelFile",
+            "motionSets",
+            "characterId",
+            "character2dId",
+        }
         if set(item) != expected:
             raise Live2DViewerCatalogError(
                 f"{field_name}: fields must be exactly {sorted(expected)!r}"
@@ -488,6 +512,12 @@ def validate_viewer_catalog(value: object) -> list[dict[str, object]]:
                 "modelFile": model_file,
                 "motionSets": sorted(
                     normalized_motion_sets, key=lambda entry: entry["motionSetId"]
+                ),
+                "characterId": _validate_public_character_id(
+                    item["characterId"], f"{field_name}.characterId"
+                ),
+                "character2dId": _validate_public_character_id(
+                    item["character2dId"], f"{field_name}.character2dId"
                 ),
             }
         )
@@ -564,6 +594,12 @@ def build_viewer_catalog(index: IndexInput, output_root: PathInput) -> list[dict
                 "modelPath": model_path,
                 "modelFile": model3.name,
                 "motionSets": motion_entries,
+                "characterId": _public_character_id(
+                    association.character_id if association is not None else None
+                ),
+                "character2dId": _public_character_id(
+                    association.character2d_id if association is not None else None
+                ),
             }
         )
     return validate_viewer_catalog(result)
