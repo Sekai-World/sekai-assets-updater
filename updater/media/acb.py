@@ -33,10 +33,7 @@ def _validate_cue_name(cue_name: str) -> None:
 
 def _requested_output_names(cue_name: str, extensions: list[str]) -> list[str]:
     _validate_cue_name(cue_name)
-    if any(
-        "/" in ext or "\\" in ext or ":" in ext or "\x00" in ext
-        for ext in extensions
-    ):
+    if any("/" in ext or "\\" in ext or ":" in ext or "\x00" in ext for ext in extensions):
         raise ValueError("decoder returned an unsafe output extension")
     return [
         f"{cue_name}.{extension}" if index == 1 else f"{cue_name}-{index}.{extension}"
@@ -62,15 +59,9 @@ def _resolve_decoded_output(output: str, target_dir: Path) -> Path:
     return resolved
 
 
-def _rename_decoded_outputs(
-    outputs: list[str], target_dir: str, cue_name: str
-) -> list[str]:
-    target_path = Path(target_dir)
-    target_root = target_path.resolve()
-    sources = [_resolve_decoded_output(output, target_path) for output in outputs]
-    extensions = [source.suffix.lstrip(".") or "wav" for source in sources]
-    filenames = _requested_output_names(cue_name, extensions)
-    destinations = [target_root / filename for filename in filenames]
+def _validate_and_group_destinations(
+    sources: list[Path], destinations: list[Path]
+) -> dict[Path, list[Path]]:
     if len(set(destinations)) != len(destinations):
         raise ValueError("requested ACB output filenames are not unique")
 
@@ -84,47 +75,82 @@ def _rename_decoded_outputs(
     destination_groups: dict[Path, list[Path]] = {}
     for source, destination in zip(sources, destinations, strict=True):
         destination_groups.setdefault(source, []).append(destination)
+    return destination_groups
+
+
+def _stage_decoded_outputs(
+    destination_groups: dict[Path, list[Path]],
+    target_root: Path,
+    staged: dict[Path, Path],
+) -> None:
+    for source in destination_groups:
+        fd, temporary_name = tempfile.mkstemp(prefix=".acb-", dir=target_root)
+        os.close(fd)
+        temporary_path = Path(temporary_name)
+        try:
+            os.replace(source, temporary_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+            raise
+        staged[source] = temporary_path
+
+
+def _move_staged_outputs(
+    destination_groups: dict[Path, list[Path]],
+    staged: dict[Path, Path],
+    moved_destinations: list[tuple[Path, Path]],
+    copied_destinations: list[Path],
+) -> None:
+    for source, group in destination_groups.items():
+        temporary_path = staged[source]
+        destination = group[0]
+        os.replace(temporary_path, destination)
+        moved_destinations.append((destination, temporary_path))
+        for duplicate_destination in group[1:]:
+            shutil.copy2(destination, duplicate_destination)
+            copied_destinations.append(duplicate_destination)
+
+
+def _rollback_decoded_outputs(
+    staged: dict[Path, Path],
+    moved_destinations: list[tuple[Path, Path]],
+    copied_destinations: list[Path],
+) -> None:
+    for destination in reversed(copied_destinations):
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+    for destination, temporary_path in reversed(moved_destinations):
+        try:
+            os.replace(destination, temporary_path)
+        except OSError:
+            pass
+    for source, temporary_path in staged.items():
+        if temporary_path.exists():
+            try:
+                os.replace(temporary_path, source)
+            except OSError:
+                pass
+
+
+def _rename_decoded_outputs(outputs: list[str], target_dir: str, cue_name: str) -> list[str]:
+    target_path = Path(target_dir)
+    target_root = target_path.resolve()
+    sources = [_resolve_decoded_output(output, target_path) for output in outputs]
+    extensions = [source.suffix.lstrip(".") or "wav" for source in sources]
+    filenames = _requested_output_names(cue_name, extensions)
+    destinations = [target_root / filename for filename in filenames]
+    destination_groups = _validate_and_group_destinations(sources, destinations)
 
     staged: dict[Path, Path] = {}
     moved_destinations: list[tuple[Path, Path]] = []
     copied_destinations: list[Path] = []
     try:
-        for source in destination_groups:
-            fd, temporary_name = tempfile.mkstemp(prefix=".acb-", dir=target_root)
-            os.close(fd)
-            temporary_path = Path(temporary_name)
-            try:
-                os.replace(source, temporary_path)
-            except Exception:
-                temporary_path.unlink(missing_ok=True)
-                raise
-            staged[source] = temporary_path
-
-        for source, group in destination_groups.items():
-            temporary_path = staged[source]
-            destination = group[0]
-            os.replace(temporary_path, destination)
-            moved_destinations.append((destination, temporary_path))
-            for duplicate_destination in group[1:]:
-                shutil.copy2(destination, duplicate_destination)
-                copied_destinations.append(duplicate_destination)
+        _stage_decoded_outputs(destination_groups, target_root, staged)
+        _move_staged_outputs(destination_groups, staged, moved_destinations, copied_destinations)
     except Exception:
-        for destination in reversed(copied_destinations):
-            try:
-                destination.unlink()
-            except OSError:
-                pass
-        for destination, temporary_path in reversed(moved_destinations):
-            try:
-                os.replace(destination, temporary_path)
-            except OSError:
-                pass
-        for source, temporary_path in staged.items():
-            if temporary_path.exists():
-                try:
-                    os.replace(temporary_path, source)
-                except OSError:
-                    pass
+        _rollback_decoded_outputs(staged, moved_destinations, copied_destinations)
         raise
 
     return [os.fspath(target_path / filename) for filename in filenames]

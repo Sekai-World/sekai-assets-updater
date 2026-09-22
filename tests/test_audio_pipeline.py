@@ -75,21 +75,22 @@ class ExtractAcbTests(unittest.TestCase):
 
             expected_paths = [tmp_path / "requested.wav", tmp_path / "requested-2.wav"]
             self.assertEqual(outputs, [path.as_posix() for path in expected_paths])
-            self.assertEqual([path.read_bytes() for path in expected_paths], [b"track-a", b"track-b"])
+            self.assertEqual(
+                [path.read_bytes() for path in expected_paths], [b"track-a", b"track-b"]
+            )
             self.assertFalse(any(path.exists() for path in decoded_paths))
 
     def test_extract_acb_raises_when_decoder_returns_no_tracks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             acb_path = Path(tmp_dir) / "voice.acb"
             acb_path.write_bytes(b"acb")
+            acb_stream = BytesIO(b"ignored")
+            target_dir = tmp_dir
+            acb_file_path = acb_path.as_posix()
+            cue_name = "requested"
             with patch("updater.media.acb.cridecoder.decode_acb_to_wav", return_value=[]):
                 with self.assertRaisesRegex(ValueError, "no tracks"):
-                    extract_acb(
-                        BytesIO(b"ignored"),
-                        tmp_dir,
-                        acb_path.as_posix(),
-                        cue_name="requested",
-                    )
+                    extract_acb(acb_stream, target_dir, acb_file_path, cue_name=cue_name)
 
     def test_decode_acb_bytes_uses_requested_name_without_filtering(self) -> None:
         tracks = [
@@ -118,16 +119,21 @@ class ExtractAcbTests(unittest.TestCase):
         self.assertEqual(outputs, [("generated.wav", b"track")])
 
     def test_acb_decoders_raise_when_no_tracks_are_returned(self) -> None:
+        acb_data = b"acb"
+        cue_name = "requested"
         with patch("updater.media.acb.cridecoder.decode_acb_to_wav_bytes", return_value=[]):
             with self.assertRaisesRegex(ValueError, "no tracks"):
-                decode_acb_bytes(b"acb", cue_name="requested")
+                decode_acb_bytes(acb_data, cue_name=cue_name)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             acb_path = Path(tmp_dir) / "voice.acb"
             acb_path.write_bytes(b"acb")
+            acb_stream = BytesIO(b"ignored")
+            target_dir = tmp_dir
+            acb_file_path = acb_path.as_posix()
             with patch("updater.media.acb.cridecoder.decode_acb_to_wav", return_value=[]):
                 with self.assertRaisesRegex(ValueError, "no tracks"):
-                    extract_acb(BytesIO(b"ignored"), tmp_dir, acb_path.as_posix())
+                    extract_acb(acb_stream, target_dir, acb_file_path)
 
 
 class ProcessExtractedAudioFileTests(unittest.IsolatedAsyncioTestCase):
