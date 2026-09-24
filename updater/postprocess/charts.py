@@ -152,6 +152,18 @@ def has_local_chart_sources(extracted_dir: StdPath, include_list: list[str] | No
     return bool(collect_score_files(extracted_dir, include_list))
 
 
+def _missing_chart_sources_reason(extracted_dir: StdPath, include_list: list[str] | None) -> str:
+    """Explain whether storage lacked scores or the download scope excluded them."""
+    if include_list:
+        score_dirs = {path.parent.name for path in collect_score_files(extracted_dir)}
+        if score_dirs:
+            return (
+                f"storage provided {len(score_dirs)} music/music_score directories, but "
+                "DL_INCLUDE_LIST matches none of them"
+            )
+    return "storage did not provide any chart .txt files"
+
+
 def needs_temporary_chart_source(
     extracted_dir: StdPath,
     configured_extracted_dir,
@@ -219,7 +231,7 @@ async def fetch_chart_sources_from_storage(
         try:
             await _copy_chart_sources_from_one_storage(storage, target_dir, config)
             if not has_local_chart_sources(extracted_dir, include_list):
-                raise RuntimeError("storage did not provide any chart .txt files")
+                raise RuntimeError(_missing_chart_sources_reason(extracted_dir, include_list))
             logger.info("Loaded chart sources from normal storage %s", storage["base"])
             return
         except Exception as exc:

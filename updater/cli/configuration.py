@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import shutil
 from typing import Any, Optional
 
@@ -76,6 +77,30 @@ def _validate_external_process_timeout(cfg: ConfigLike, errors: list[str]) -> No
         valid_timeout = False
     if not valid_timeout:
         errors.append(f"EXTERNAL_PROCESS_TIMEOUT must be a positive number (got {timeout!r})")
+
+
+_UNITY_VERSION_PATTERN = re.compile(r"(\d+)\.\d+\.\d+[abfpxt]\d+")
+
+
+def _is_released_unity_major(major: int) -> bool:
+    # Unity moved from 5.x to year-numbered 2017-2023 releases, then to 6000.x.
+    return 3 <= major <= 5 or 2017 <= major <= 2023 or major >= 6000
+
+
+def _validate_unity_version(cfg: ConfigLike, errors: list[str]) -> None:
+    # unity-rs selects serialized object layouts from this value when bundles
+    # strip their engine version, so a nonexistent release silently misparses.
+    unity_version = getattr(cfg, "UNITY_VERSION", None)
+    if unity_version is None or unity_version == "":
+        return
+    match = (
+        _UNITY_VERSION_PATTERN.fullmatch(unity_version) if isinstance(unity_version, str) else None
+    )
+    if match is None or not _is_released_unity_major(int(match.group(1))):
+        errors.append(
+            "UNITY_VERSION must be a released Unity version such as 2022.3.21f1 "
+            f"or 6000.0.23f1 (got {unity_version!r})"
+        )
 
 
 def _validate_encryption_settings(cfg: ConfigLike, errors: list[str]) -> None:
@@ -153,6 +178,7 @@ def validate_config(cfg: ConfigLike, mode: str = "assets") -> None:
         errors.append("ENABLE_MODEL3D_FBX_EXPORT must be a bool")
     _validate_positive_settings(cfg, errors)
     _validate_external_process_timeout(cfg, errors)
+    _validate_unity_version(cfg, errors)
     _validate_encryption_settings(cfg, errors)
     _validate_program_settings(cfg, mode, errors)
     if errors:
