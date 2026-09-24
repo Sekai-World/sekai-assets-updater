@@ -349,7 +349,7 @@ def test_upload_stage_isolates_same_relative_output_and_content(
 
 
 def test_upload_failure_cleans_temporary_root_and_records_failure(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     failing = pipeline.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "a"))
     sibling = pipeline.PipelineArtifact("b", {"bundleName": "b"}, AnyioPath(tmp_path / "b"))
@@ -381,9 +381,10 @@ def test_upload_failure_cleans_temporary_root_and_records_failure(
     assert not asyncio.run(failing_root.exists())
     assert not asyncio.run(sibling_root.exists())
     assert failures == [("a", {"bundleName": "a"})]
+    assert "stage=upload | item=a | error=RuntimeError: upload failed" in caplog.text
 
 
-def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -> None:
+def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch, caplog) -> None:
     failing = pipeline.PipelineArtifact("a", {"bundleName": "a"}, AnyioPath(tmp_path / "a"))
     sibling = pipeline.PipelineArtifact("b", {"bundleName": "b"}, AnyioPath(tmp_path / "b"))
     failing_root = None
@@ -420,6 +421,7 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -
 
     asyncio.run(run())
     assert failures == [("a", {"bundleName": "a"})]
+    assert "stage=extract | item=a | error=RuntimeError: extract failed" in caplog.text
     assert failing_root is not None
     assert not asyncio.run(failing_root.exists())
     sibling_out = upload_queue.get_nowait()
