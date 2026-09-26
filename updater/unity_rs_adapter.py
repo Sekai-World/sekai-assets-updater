@@ -258,6 +258,18 @@ def _read_native_image(reader: Callable[[], Any]) -> RenderedImage:
         raise
 
 
+def _texture_supersedes(texture: UnityRsObject, other: UnityRsObject) -> bool:
+    """Whether a Texture2D keeps its container path against a same-path Sprite.
+
+    A PNG imported as a Sprite is listed twice under one path: the Texture2D
+    and a Sprite made from it. The Sprite renders only its tight texture rect,
+    which drops the transparent margin and the image's offset in its canvas
+    (``bonds_honor/character/chr_sd_*`` came out 140x110 instead of 160x136).
+    RawImage consumers draw the whole texture, so export the texture.
+    """
+    return texture.class_id == 28 and other.class_id == 213
+
+
 class UnityRsEnvironment:
     """Loaded bundle collection with the narrow interface used by extraction."""
 
@@ -292,13 +304,18 @@ class UnityRsEnvironment:
                     continue
                 target = self._by_identity.get(identity)
                 if target is not None:
-                    self.container[container_path] = target
+                    current = self.container.get(container_path)
+                    if current is None or not _texture_supersedes(current, target):
+                        self.container[container_path] = target
                     self._container_paths[identity] = container_path
 
     def _load_object_containers(self) -> None:
         for obj in self.objects:
-            if obj.container is not None:
-                self.container.setdefault(obj.container, obj)
+            if obj.container is None:
+                continue
+            current = self.container.get(obj.container)
+            if current is None or _texture_supersedes(obj, current):
+                self.container[obj.container] = obj
 
     @property
     def studio(self) -> unity_rs.UnityRs:
