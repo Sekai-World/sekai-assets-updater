@@ -70,8 +70,9 @@ def test_scheduler_skips_capped_media_artifacts_for_light_ones() -> None:
 
         blocked = asyncio.create_task(scheduler.claim())
         await asyncio.sleep(0.01)
+        shielded = asyncio.shield(blocked)
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(blocked), timeout=0.05)
+            await asyncio.wait_for(shielded, timeout=0.05)
 
         await scheduler.release(media_one)
         assert await asyncio.wait_for(blocked, timeout=1) is media_two
@@ -92,8 +93,9 @@ def test_scheduler_put_blocks_while_pending_queue_is_full() -> None:
 
         blocked_put = asyncio.create_task(scheduler.put(second))
         await asyncio.sleep(0.01)
+        shielded_put = asyncio.shield(blocked_put)
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(blocked_put), timeout=0.05)
+            await asyncio.wait_for(shielded_put, timeout=0.05)
 
         claimed = await scheduler.claim()
         assert claimed is first
@@ -110,8 +112,9 @@ def test_scheduler_close_drains_pending_artifacts_then_exits_workers() -> None:
         await scheduler.put(artifact)
         await scheduler.close()
 
+        unsent = _artifact("b")
         with pytest.raises(RuntimeError, match="closed"):
-            await scheduler.put(_artifact("b"))
+            await scheduler.put(unsent)
 
         claimed = await scheduler.claim()
         assert claimed is artifact
@@ -130,8 +133,9 @@ def test_scheduler_wait_idle_resolves_only_after_release() -> None:
 
         idle = asyncio.create_task(scheduler.wait_idle())
         await asyncio.sleep(0.01)
+        shielded_idle = asyncio.shield(idle)
         with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(idle), timeout=0.05)
+            await asyncio.wait_for(shielded_idle, timeout=0.05)
 
         await scheduler.release(claimed)
         await asyncio.wait_for(idle, timeout=1)
@@ -163,8 +167,9 @@ def test_run_pipeline_rejects_unknown_scheduler_mode(tmp_path: Path) -> None:
     config = pipeline_config(tmp_path / "extracted")
     config.EXTRACT_SCHEDULER_MODE = "turbo"
 
+    run_coro = pipeline.run_pipeline([("url", {"bundleName": "b"})], config, {})
     with pytest.raises(ValueError, match="scheduler mode"):
-        asyncio.run(pipeline.run_pipeline([("url", {"bundleName": "b"})], config, {}))
+        asyncio.run(run_coro)
 
 
 def test_adaptive_mode_limits_media_concurrency_and_keeps_light_moving(

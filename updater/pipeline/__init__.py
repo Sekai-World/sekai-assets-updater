@@ -936,6 +936,93 @@ async def _sample_queue_depths(
         await asyncio.sleep(interval)
 
 
+def _create_extract_stage(config) -> tuple[int, asyncio.Queue | ExtractionScheduler, int]:
+    """Resolve the extract stage worker count, pending queue, and queue bound."""
+
+    if get_extract_scheduler_mode(config) == "adaptive":
+        worker_count = get_adaptive_extract_worker_count(config)
+        queue_bound = get_stage_queue_size(config, worker_count)
+        scheduler = ExtractionScheduler(
+            capacity=queue_bound,
+            media_slots=get_adaptive_media_slots(config, worker_count),
+            media_hints=get_media_bundle_hints(config),
+        )
+        return worker_count, scheduler, queue_bound
+    worker_count = get_extract_stage_concurrency(config)
+    queue_bound = get_stage_queue_size(config, worker_count)
+    return worker_count, asyncio.Queue(maxsize=queue_bound), queue_bound
+
+
+def _start_extract_stage(
+    pipeline_id: str,
+    extract_queue: asyncio.Queue | ExtractionScheduler,
+    upload_queue: asyncio.Queue,
+    config,
+    failed_tasks: List[DownloadItem],
+    failed_lock: asyncio.Lock,
+    profiler: ExtractionProfiler,
+    worker_count: int,
+) -> List[asyncio.Task]:
+    if isinstance(extract_queue, ExtractionScheduler):
+        return [
+            asyncio.create_task(
+                _adaptive_extract_stage(
+                    pipeline_id,
+                    f"extract_worker-{worker_id}",
+                    extract_queue,
+                    upload_queue,
+                    config,
+                    failed_tasks,
+                    failed_lock,
+                    profiler,
+                )
+            )
+            for worker_id in range(worker_count)
+        ]
+    return [
+        asyncio.create_task(
+            _extract_stage(
+                pipeline_id,
+                f"extract_worker-{worker_id}",
+                extract_queue,
+                upload_queue,
+                config,
+                failed_tasks,
+                failed_lock,
+                profiler,
+            )
+        )
+        for worker_id in range(worker_count)
+    ]
+
+
+async def _await_extract_stage_completion(
+    extract_queue: asyncio.Queue | ExtractionScheduler,
+    worker_count: int,
+    worker_monitor: asyncio.Task,
+) -> None:
+    """Wait until every extract worker has finished its stage work."""
+
+    if isinstance(extract_queue, ExtractionScheduler):
+        await _await_with_worker_monitor(extract_queue.wait_idle(), worker_monitor)
+        await _await_with_worker_monitor(extract_queue.close(), worker_monitor)
+        return
+    await _await_with_worker_monitor(_put_sentinels(extract_queue, worker_count), worker_monitor)
+    await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
+
+
+async def _cleanup_aborted_extract_stage(
+    extract_queue: asyncio.Queue | ExtractionScheduler,
+) -> None:
+    """Release durable artifacts left in the extract stage by a cancelled run."""
+
+    if isinstance(extract_queue, ExtractionScheduler):
+        for artifact in await extract_queue.drain_for_cleanup():
+            await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
+        return
+    await _cleanup_queued_artifacts(extract_queue)
+
+
 async def run_pipeline(
     dl_list: List[DownloadItem],
     config,
@@ -950,25 +1037,11 @@ async def run_pipeline(
     )
     total_items = len(dl_list)
     download_concurrency = get_download_stage_concurrency(config)
-    scheduler_mode = get_extract_scheduler_mode(config)
-    if scheduler_mode == "adaptive":
-        extract_concurrency = get_adaptive_extract_worker_count(config)
-    else:
-        extract_concurrency = get_extract_stage_concurrency(config)
+    extract_concurrency, extract_queue, extract_queue_size = _create_extract_stage(config)
     upload_concurrency = get_upload_stage_concurrency(config)
-    extract_queue_size = get_stage_queue_size(config, extract_concurrency)
     upload_queue_size = get_stage_queue_size(config, upload_concurrency)
 
     download_queue: asyncio.Queue = asyncio.Queue()
-    extract_queue: asyncio.Queue | ExtractionScheduler
-    if scheduler_mode == "adaptive":
-        extract_queue = ExtractionScheduler(
-            capacity=extract_queue_size,
-            media_slots=get_adaptive_media_slots(config, extract_concurrency),
-            media_hints=get_media_bundle_hints(config),
-        )
-    else:
-        extract_queue = asyncio.Queue(maxsize=extract_queue_size)
     upload_queue: asyncio.Queue = asyncio.Queue(maxsize=upload_queue_size)
     failed_tasks: List[DownloadItem] = []
     failed_lock = asyncio.Lock()
@@ -1011,38 +1084,16 @@ async def run_pipeline(
             )
             for worker_id in range(download_concurrency)
         ]
-        if isinstance(extract_queue, ExtractionScheduler):
-            extract_tasks = [
-                asyncio.create_task(
-                    _adaptive_extract_stage(
-                        pipeline_id,
-                        f"extract_worker-{worker_id}",
-                        extract_queue,
-                        upload_queue,
-                        config,
-                        failed_tasks,
-                        failed_lock,
-                        profiler,
-                    )
-                )
-                for worker_id in range(extract_concurrency)
-            ]
-        else:
-            extract_tasks = [
-                asyncio.create_task(
-                    _extract_stage(
-                        pipeline_id,
-                        f"extract_worker-{worker_id}",
-                        extract_queue,
-                        upload_queue,
-                        config,
-                        failed_tasks,
-                        failed_lock,
-                        profiler,
-                    )
-                )
-                for worker_id in range(extract_concurrency)
-            ]
+        extract_tasks = _start_extract_stage(
+            pipeline_id,
+            extract_queue,
+            upload_queue,
+            config,
+            failed_tasks,
+            failed_lock,
+            profiler,
+            extract_concurrency,
+        )
         upload_tasks = [
             asyncio.create_task(
                 _upload_stage(
@@ -1063,15 +1114,9 @@ async def run_pipeline(
         try:
             await _await_with_worker_monitor(download_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
-            if isinstance(extract_queue, ExtractionScheduler):
-                await _await_with_worker_monitor(extract_queue.wait_idle(), worker_monitor)
-                await _await_with_worker_monitor(extract_queue.close(), worker_monitor)
-            else:
-                await _await_with_worker_monitor(
-                    _put_sentinels(extract_queue, extract_concurrency),
-                    worker_monitor,
-                )
-                await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
+            await _await_extract_stage_completion(
+                extract_queue, extract_concurrency, worker_monitor
+            )
             logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
             await _await_with_worker_monitor(
                 _put_sentinels(upload_queue, upload_concurrency),
@@ -1088,11 +1133,7 @@ async def run_pipeline(
                 task.cancel()
             worker_monitor.cancel()
             await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=True)
-            if isinstance(extract_queue, ExtractionScheduler):
-                for artifact in await extract_queue.drain_for_cleanup():
-                    await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
-            else:
-                await _cleanup_queued_artifacts(extract_queue)
+            await _cleanup_aborted_extract_stage(extract_queue)
             await _cleanup_queued_artifacts(upload_queue)
             profiler.finish("aborted")
             raise
