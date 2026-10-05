@@ -56,6 +56,7 @@ def _run_extract_stage(
             config,
             failures,
             asyncio.Lock(),
+            pipeline.ExtractionProfiler("phase2", None),
         )
 
     asyncio.run(run())
@@ -416,6 +417,7 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch) -
             _config(None),
             failures,
             asyncio.Lock(),
+            pipeline.ExtractionProfiler("phase2", None),
         )
 
     asyncio.run(run())
@@ -450,7 +452,14 @@ def test_extract_cancellation_cleans_owned_temporary_artifacts(tmp_path: Path, m
     async def run() -> None:
         task = asyncio.create_task(
             pipeline._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
+                "phase2",
+                "extract",
+                extract_queue,
+                upload_queue,
+                _config(None),
+                [],
+                asyncio.Lock(),
+                pipeline.ExtractionProfiler("phase2", None),
             )
         )
         await started.wait()
@@ -491,7 +500,14 @@ def test_extract_cancellation_while_put_blocked_cleans_owned_root(
     async def run() -> None:
         task = asyncio.create_task(
             pipeline._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
+                "phase2",
+                "extract",
+                extract_queue,
+                upload_queue,
+                _config(None),
+                [],
+                asyncio.Lock(),
+                pipeline.ExtractionProfiler("phase2", None),
             )
         )
         await started.wait()

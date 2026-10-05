@@ -71,6 +71,18 @@ MAX_CONCURRENCY_USM_DEMUXES = MAX_CONCURRENCY_VIDEO_TRANSCODES
 USM_IN_MEMORY_MAX_BYTES = 64 * 1024 * 1024
 # Maximum number of concurrent uploads
 MAX_CONCURRENCY_UPLOADS = 10
+
+# Extraction profiling (extraction-worker roadmap Phase 0, see
+# docs/EXTRACTION_PROFILING.md). Aggregate extraction metrics are always logged;
+# EXTRACTION_PROFILING=True additionally writes a JSON-lines profile with one
+# record per bundle plus a run summary. Profiling is advisory and never changes
+# extraction behavior.
+EXTRACTION_PROFILING = False
+# Explicit output path for the JSON-lines profile. Defaults to
+# extraction-profile-<pipeline_id>.jsonl next to ASSET_LOCAL_EXTRACTED_DIR, or
+# in the working directory when no local extracted dir is configured.
+EXTRACTION_PROFILE_PATH = None
+
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 # libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than
