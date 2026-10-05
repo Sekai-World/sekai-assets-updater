@@ -170,7 +170,14 @@ def test_worker_rejects_precreated_extraction_root_symlink(tmp_path: Path) -> No
 
     async def run() -> None:
         await pipeline._extract_stage(
-            "test", "extract", extract_queue, upload_queue, config, failed_tasks, asyncio.Lock()
+            "test",
+            "extract",
+            extract_queue,
+            upload_queue,
+            config,
+            failed_tasks,
+            asyncio.Lock(),
+            pipeline.ExtractionProfiler("test", None),
         )
 
     asyncio.run(run())

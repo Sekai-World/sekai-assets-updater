@@ -15,11 +15,14 @@ binding here would silently activate similarly-shaped patches.
 """
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path as StdPath
 from typing import Any, Dict, List
 
 import aiohttp
@@ -51,6 +54,11 @@ logger = logging.getLogger("asset_updater")
 
 
 _QUEUE_SENTINEL = object()
+
+# Extraction-worker roadmap Phase 0: queue-depth sampling cadence and the
+# versioned extraction profile record format (docs/EXTRACTION_PROFILING.md).
+_QUEUE_DEPTH_SAMPLE_INTERVAL_SEC = 1.0
+_EXTRACTION_PROFILE_VERSION = 1
 
 
 def _reserve_temporary_bundle_path() -> str:
@@ -115,6 +123,186 @@ def get_stage_queue_size(config, downstream_concurrency: int) -> int:
     )
 
 
+def _resolve_extraction_profile_path(config, pipeline_id: str) -> StdPath | None:
+    """Return the JSON-lines extraction profile path, or None when disabled."""
+
+    if not getattr(config, "EXTRACTION_PROFILING", False):
+        return None
+    explicit = getattr(config, "EXTRACTION_PROFILE_PATH", None)
+    if explicit:
+        return StdPath(os.fspath(explicit))
+    configured_root = _configured_path(getattr(config, "ASSET_LOCAL_EXTRACTED_DIR", None))
+    file_name = f"extraction-profile-{pipeline_id}.jsonl"
+    if configured_root is not None:
+        return StdPath(configured_root.as_posix()) / file_name
+    return StdPath(file_name)
+
+
+class ExtractionProfiler:
+    """Aggregate extraction metrics for one pipeline run.
+
+    Aggregation and the per-bundle DEBUG timing logs are always active; setting
+    ``EXTRACTION_PROFILING=True`` additionally appends one JSON record per
+    bundle plus a run summary record to the profile file. Profile writing is
+    advisory: any IO failure degrades to a warning and never affects extraction
+    correctness (extraction-worker roadmap Phase 0, docs/EXTRACTION_PROFILING.md).
+    """
+
+    def __init__(self, pipeline_id: str, profile_path: StdPath | None) -> None:
+        self.pipeline_id = pipeline_id
+        self.profile_path = profile_path
+        self.bundle_count = 0
+        self.failed_count = 0
+        self.total_extraction_sec = 0.0
+        self.total_idle_sec = 0.0
+        self.output_count = 0
+        self.output_bytes = 0
+        self.queue_depth_samples: List[int] = []
+        self._profile_file = None
+        self._profile_broken = False
+        self._finished = False
+
+    def record_bundle(
+        self,
+        label: str,
+        duration_sec: float,
+        output_count: int,
+        output_bytes: int,
+    ) -> None:
+        self.bundle_count += 1
+        self.total_extraction_sec += duration_sec
+        self.output_count += output_count
+        self.output_bytes += output_bytes
+        self._write_record(
+            {
+                "record": "bundle",
+                "version": _EXTRACTION_PROFILE_VERSION,
+                "pipeline_id": self.pipeline_id,
+                "ts": round(time.time(), 3),
+                "item": label,
+                "status": "ok",
+                "duration_sec": round(duration_sec, 6),
+                "output_count": output_count,
+                "output_bytes": output_bytes,
+            }
+        )
+
+    def record_bundle_failure(self, label: str, duration_sec: float, error: BaseException) -> None:
+        self.bundle_count += 1
+        self.failed_count += 1
+        self.total_extraction_sec += duration_sec
+        # Only the exception class is recorded; messages can embed URLs or paths.
+        self._write_record(
+            {
+                "record": "bundle",
+                "version": _EXTRACTION_PROFILE_VERSION,
+                "pipeline_id": self.pipeline_id,
+                "ts": round(time.time(), 3),
+                "item": label,
+                "status": "error",
+                "duration_sec": round(duration_sec, 6),
+                "output_count": 0,
+                "output_bytes": 0,
+                "error_class": type(error).__name__,
+            }
+        )
+
+    def record_worker_idle(self, idle_sec: float) -> None:
+        self.total_idle_sec += idle_sec
+
+    def record_queue_depth(self, depth: int) -> None:
+        self.queue_depth_samples.append(depth)
+
+    def queue_depth_avg(self) -> float:
+        if not self.queue_depth_samples:
+            return 0.0
+        return sum(self.queue_depth_samples) / len(self.queue_depth_samples)
+
+    def queue_depth_max(self) -> int:
+        return max(self.queue_depth_samples, default=0)
+
+    def log_summary(self) -> None:
+        logger.info(
+            "PIPELINE | id=%s | stage=extract | status=summary | bundles=%d | failed=%d | extraction_sec=%.3f | idle_sec=%.3f | outputs=%d | output_bytes=%d | queue_depth_avg=%.2f | queue_depth_max=%d",
+            self.pipeline_id,
+            self.bundle_count,
+            self.failed_count,
+            self.total_extraction_sec,
+            self.total_idle_sec,
+            self.output_count,
+            self.output_bytes,
+            self.queue_depth_avg(),
+            self.queue_depth_max(),
+        )
+
+    def finish(self, status: str) -> None:
+        """Append the summary record and release the profile file. Never raises."""
+
+        if self._finished:
+            return
+        self._finished = True
+        summary = {
+            "record": "summary",
+            "version": _EXTRACTION_PROFILE_VERSION,
+            "pipeline_id": self.pipeline_id,
+            "ts": round(time.time(), 3),
+            "status": status,
+            "bundles": self.bundle_count,
+            "failed": self.failed_count,
+            "total_extraction_sec": round(self.total_extraction_sec, 6),
+            "total_idle_sec": round(self.total_idle_sec, 6),
+            "output_count": self.output_count,
+            "output_bytes": self.output_bytes,
+            "queue_depth_avg": round(self.queue_depth_avg(), 4),
+            "queue_depth_max": self.queue_depth_max(),
+        }
+        try:
+            handle = self._open_profile_file()
+            if handle is not None:
+                handle.write(json.dumps(summary) + "\n")
+                handle.flush()
+        except OSError:
+            logger.warning(
+                "PIPELINE | id=%s | stage=extract | status=profile_write_failed | item=%s",
+                self.pipeline_id,
+                self.profile_path,
+            )
+        finally:
+            if self._profile_file is not None:
+                self._profile_file.close()
+                self._profile_file = None
+
+    def _open_profile_file(self):
+        if self._profile_broken or self.profile_path is None:
+            return None
+        if self._profile_file is None:
+            self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            self._profile_file = open(self.profile_path, "a", encoding="utf-8")
+        return self._profile_file
+
+    def _write_record(self, record: Dict[str, Any]) -> None:
+        if self.profile_path is None or self._finished:
+            return
+        try:
+            handle = self._open_profile_file()
+            if handle is not None:
+                handle.write(json.dumps(record) + "\n")
+                handle.flush()
+        except OSError:
+            self._profile_broken = True
+            if self._profile_file is not None:
+                try:
+                    self._profile_file.close()
+                except OSError:
+                    pass
+                self._profile_file = None
+            logger.warning(
+                "PIPELINE | id=%s | stage=extract | status=profile_write_failed | item=%s",
+                self.pipeline_id,
+                self.profile_path,
+            )
+
+
 def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
     """Return an optional manifest size only for disk-space reservation."""
     for field in ("fileSize", "size"):
@@ -140,6 +328,39 @@ def _validate_artifact_outputs(extracted_root: Path, exported_paths: List[Path])
         relative_path = candidate.resolve().relative_to(root_std).as_posix()
         validated.append(Path(validate_contained_file(root_std, relative_path).as_posix()))
     return validated
+
+
+async def extract_single_bundle(artifact: PipelineArtifact, config) -> PipelineArtifact:
+    """Extract one downloaded artifact into its own staging directory.
+
+    This is the single-bundle extraction boundary (extraction-worker roadmap
+    Phase 1): the artifact must have ``bundle_save_path`` populated, and it is
+    returned with ``extracted_save_path`` and ``exported_list`` populated.
+    Queue management, failure tracking, and cleanup policy stay with callers
+    so the staged pipeline and future extraction-worker scheduling share the
+    same boundary without nested pipeline queues.
+    """
+
+    configured_bundle_cache_root = _configured_path(get_bundle_cache_root(config, artifact.bundle))
+    bundle_cache_root = (
+        None
+        if configured_bundle_cache_root is None
+        else Path(prepare_secure_directory(configured_bundle_cache_root).as_posix())
+    )
+    artifact.extracted_save_path = _prepare_extraction_destination(artifact, config)
+    extracted_outputs = await extract_asset_bundle(
+        artifact.bundle_save_path,
+        artifact.bundle,
+        artifact.extracted_save_path,
+        unity_version=config.UNITY_VERSION,
+        config=config,
+        bundle_cache_root=bundle_cache_root,
+    )
+    artifact.exported_list = _validate_artifact_outputs(
+        artifact.extracted_save_path,
+        extracted_outputs,
+    )
+    return artifact
 
 
 async def _cleanup_artifact(
@@ -424,6 +645,17 @@ def _prepare_extraction_destination(artifact: PipelineArtifact, config) -> Path:
     return Path(tmp_extracted_save_dir.name)
 
 
+async def _total_output_bytes(exported_list: List[Path] | None) -> int:
+    total = 0
+    for path in exported_list or []:
+        try:
+            stat = await path.stat()
+        except OSError:
+            continue
+        total += stat.st_size
+    return total
+
+
 async def _extract_one_artifact(
     pipeline_id: str,
     name: str,
@@ -432,6 +664,7 @@ async def _extract_one_artifact(
     config,
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
+    profiler: ExtractionProfiler,
 ) -> None:
     label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
     logger.debug(
@@ -441,28 +674,22 @@ async def _extract_one_artifact(
         label,
     )
     handed_to_upload = False
+    loop = asyncio.get_running_loop()
+    extract_started = loop.time()
     try:
-        configured_bundle_cache_root = _configured_path(
-            get_bundle_cache_root(config, artifact.bundle)
+        await extract_single_bundle(artifact, config)
+        duration_sec = loop.time() - extract_started
+        output_bytes = await _total_output_bytes(artifact.exported_list)
+        logger.debug(
+            "PIPELINE | id=%s | worker=%s | stage=extract | action=bundle_timing | item=%s | duration_sec=%.3f | outputs=%d | output_bytes=%d",
+            pipeline_id,
+            name,
+            label,
+            duration_sec,
+            len(artifact.exported_list or []),
+            output_bytes,
         )
-        bundle_cache_root = (
-            None
-            if configured_bundle_cache_root is None
-            else Path(prepare_secure_directory(configured_bundle_cache_root).as_posix())
-        )
-        artifact.extracted_save_path = _prepare_extraction_destination(artifact, config)
-        extracted_outputs = await extract_asset_bundle(
-            artifact.bundle_save_path,
-            artifact.bundle,
-            artifact.extracted_save_path,
-            unity_version=config.UNITY_VERSION,
-            config=config,
-            bundle_cache_root=bundle_cache_root,
-        )
-        artifact.exported_list = _validate_artifact_outputs(
-            artifact.extracted_save_path,
-            extracted_outputs,
-        )
+        profiler.record_bundle(label, duration_sec, len(artifact.exported_list or []), output_bytes)
         logger.debug(
             "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
             pipeline_id,
@@ -478,6 +705,7 @@ async def _extract_one_artifact(
             await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
         raise
     except Exception as exc:
+        profiler.record_bundle_failure(label, loop.time() - extract_started, exc)
         logger.error(
             "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s | error=%s",
             pipeline_id,
@@ -502,9 +730,13 @@ async def _extract_stage(
     config,
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
+    profiler: ExtractionProfiler,
 ) -> None:
+    loop = asyncio.get_running_loop()
     while True:
+        claim_started = loop.time()
         item = await extract_queue.get()
+        profiler.record_worker_idle(loop.time() - claim_started)
         try:
             if item is _QUEUE_SENTINEL:
                 return
@@ -517,6 +749,7 @@ async def _extract_stage(
                 config,
                 failed_tasks,
                 failed_lock,
+                profiler,
             )
         finally:
             extract_queue.task_done()
@@ -620,6 +853,18 @@ async def _upload_stage(
             upload_queue.task_done()
 
 
+async def _sample_queue_depths(
+    profiler: ExtractionProfiler,
+    extract_queue: asyncio.Queue,
+    interval: float = _QUEUE_DEPTH_SAMPLE_INTERVAL_SEC,
+) -> None:
+    """Sample the extraction queue depth at a fixed interval until cancelled."""
+
+    while True:
+        profiler.record_queue_depth(extract_queue.qsize())
+        await asyncio.sleep(interval)
+
+
 async def run_pipeline(
     dl_list: List[DownloadItem],
     config,
@@ -629,6 +874,9 @@ async def run_pipeline(
 ) -> List[DownloadItem]:
     start_time = asyncio.get_running_loop().time()
     pipeline_id = uuid.uuid4().hex[:8]
+    profiler = ExtractionProfiler(
+        pipeline_id, _resolve_extraction_profile_path(config, pipeline_id)
+    )
     total_items = len(dl_list)
     download_concurrency = get_download_stage_concurrency(config)
     extract_concurrency = get_extract_stage_concurrency(config)
@@ -690,6 +938,7 @@ async def run_pipeline(
                     config,
                     failed_tasks,
                     failed_lock,
+                    profiler,
                 )
             )
             for worker_id in range(extract_concurrency)
@@ -710,6 +959,7 @@ async def run_pipeline(
 
         all_tasks = download_tasks + extract_tasks + upload_tasks
         worker_monitor = asyncio.create_task(_monitor_worker_failures(all_tasks))
+        profile_sampler = asyncio.create_task(_sample_queue_depths(profiler, extract_queue))
         try:
             await _await_with_worker_monitor(download_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
@@ -728,13 +978,21 @@ async def run_pipeline(
 
             await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=False)
         except BaseException:
+            profile_sampler.cancel()
+            await asyncio.gather(profile_sampler, return_exceptions=True)
             for task in all_tasks:
                 task.cancel()
             worker_monitor.cancel()
             await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=True)
             await _cleanup_queued_artifacts(extract_queue)
             await _cleanup_queued_artifacts(upload_queue)
+            profiler.finish("aborted")
             raise
+
+        profile_sampler.cancel()
+        await asyncio.gather(profile_sampler, return_exceptions=True)
+        profiler.log_summary()
+        profiler.finish("completed")
 
     succeeded = total_items - len(failed_tasks)
     logger.info(

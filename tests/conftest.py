@@ -13,14 +13,71 @@ import sys
 import threading
 from collections.abc import Callable, Generator, Mapping
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from aiohttp import web
+from anyio import Path as AnyioPath
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from updater import pipeline  # noqa: E402  (requires PROJECT_ROOT on sys.path)
+
+
+def pipeline_config(extracted_root: Path | None) -> SimpleNamespace:
+    """Minimal single-worker pipeline stage configuration for integration tests."""
+
+    return SimpleNamespace(
+        ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
+        ASSET_LOCAL_EXTRACTED_DIR=AnyioPath(extracted_root) if extracted_root else None,
+        ASSET_REMOTE_STORAGE=[
+            {"type": "normal", "base": "remote", "program": "uploader", "args": []}
+        ],
+        UNITY_VERSION=None,
+        MAX_CONCURRENCY_DOWNLOADS=1,
+        MAX_CONCURRENCY_EXTRACTS=1,
+        MAX_CONCURRENCY_UPLOAD_STAGE=1,
+        PIPELINE_STAGE_QUEUE_SIZE=1,
+        MAX_CONCURRENCY_UPLOADS=1,
+        REQUEST_TIMEOUT=1,
+    )
+
+
+def install_pipeline_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    contents: dict[str, bytes],
+    uploads: list[tuple[str, Path, Path, bytes]],
+    *,
+    failing_url: str | None = None,
+) -> None:
+    """Replace the download, extract, and upload seams with in-memory fakes."""
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        await root.joinpath(relative).write_bytes(b"synthetic bundle")
+
+    async def fake_extract(bundle_path, bundle, output_root, **_kwargs):
+        output = output_root / "shared.txt"
+        await output.write_bytes(contents[bundle["bundleName"]])
+        return [output]
+
+    async def fake_upload(files, root, *_args, **_kwargs):
+        assert len(files) == 1
+        exported_file = files[0]
+        root_path = Path((await root.resolve()).as_posix())
+        exported_path = Path((await exported_file.resolve()).as_posix())
+        assert exported_path.parent == root_path
+        data = await exported_file.read_bytes()
+        uploads.append((exported_path.name, root_path, exported_path, data))
+        if uploads[-1][1].name and failing_url is not None:
+            if data == contents["failed"]:
+                raise RuntimeError("synthetic upload failure")
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
 
 
 class LocalAiohttpServer:

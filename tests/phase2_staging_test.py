@@ -56,10 +56,39 @@ def _run_extract_stage(
             config,
             failures,
             asyncio.Lock(),
+            pipeline.ExtractionProfiler("phase2", None),
         )
 
     asyncio.run(run())
     return upload_queue.get_nowait(), failures
+
+
+def _run_cancelled_extract_stage(
+    extract_queue: asyncio.Queue,
+    upload_queue: asyncio.Queue,
+    started: asyncio.Event,
+) -> None:
+    """Run the extract stage and cancel it once the test signals readiness."""
+
+    async def run() -> None:
+        task = asyncio.create_task(
+            pipeline._extract_stage(
+                "phase2",
+                "extract",
+                extract_queue,
+                upload_queue,
+                _config(None),
+                [],
+                asyncio.Lock(),
+                pipeline.ExtractionProfiler("phase2", None),
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
 
 
 def test_extract_stage_passes_configured_bundle_cache_root(tmp_path: Path, monkeypatch) -> None:
@@ -417,6 +446,7 @@ def test_extraction_failure_cleans_temporary_root(tmp_path: Path, monkeypatch, c
             _config(None),
             failures,
             asyncio.Lock(),
+            pipeline.ExtractionProfiler("phase2", None),
         )
 
     asyncio.run(run())
@@ -449,18 +479,7 @@ def test_extract_cancellation_cleans_owned_temporary_artifacts(tmp_path: Path, m
     upload_queue: asyncio.Queue = asyncio.Queue()
     extract_queue.put_nowait(artifact)
 
-    async def run() -> None:
-        task = asyncio.create_task(
-            pipeline._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
-            )
-        )
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(run())
+    _run_cancelled_extract_stage(extract_queue, upload_queue, started)
     assert artifact.extracted_save_path is not None
     assert not asyncio.run(artifact.extracted_save_path.exists())
     assert not asyncio.run(artifact.bundle_save_path.exists())
@@ -490,18 +509,7 @@ def test_extract_cancellation_while_put_blocked_cleans_owned_root(
     upload_queue = BlockingQueue()
     extract_queue.put_nowait(artifact)
 
-    async def run() -> None:
-        task = asyncio.create_task(
-            pipeline._extract_stage(
-                "phase2", "extract", extract_queue, upload_queue, _config(None), [], asyncio.Lock()
-            )
-        )
-        await started.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    asyncio.run(run())
+    _run_cancelled_extract_stage(extract_queue, upload_queue, started)
     assert artifact.extracted_save_path is not None
     assert not asyncio.run(artifact.extracted_save_path.exists())
     assert not asyncio.run(artifact.bundle_save_path.exists())

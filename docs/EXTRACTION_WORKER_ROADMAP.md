@@ -152,6 +152,9 @@ feature flag and does not change pipeline semantics until explicitly enabled.
   that writes a JSON-lines profile to the staging directory.
 - Document the profiling output format.
 
+The profiling output format is documented in
+[`docs/EXTRACTION_PROFILING.md`](EXTRACTION_PROFILING.md).
+
 **Acceptance criteria:**
 
 - A standard `assets` run produces per-bundle timing logs with bundle name, duration,
