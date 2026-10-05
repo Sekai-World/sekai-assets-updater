@@ -4,10 +4,9 @@ Bundles flow through three bounded stages (fetch -> plan happens in
 updater.net, post-processing in updater.postprocess): the download stage
 streams and deobfuscates bundles, the extract stage fans out to the
 process pool and media jobs, and the upload stage pushes artifacts to the
-configured storage backends. When the adaptive extraction-worker roadmap
-lands, this module becomes the updater/pipeline/ package (engine.py +
-scheduler.py); that is new code with new tests, not part of the structural
-refactor that created this file.
+configured storage backends. This is the staged engine of the
+updater/pipeline/ package; the adaptive extraction-worker roadmap Phase 2
+scheduler lives in updater/pipeline/scheduler.py.
 
 Note: never import refresh_cookie into this namespace — historic tests
 patched a nonexistent "worker.refresh_cookie" as a no-op, and a real
@@ -18,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -33,6 +33,7 @@ from updater.net.disk_space import DownloadDiskSpaceGate
 from updater.net.download import download_deobfuscate_bundle
 from updater.net.http import build_cdn_headers, get_download_http_session_options
 from updater.net.plan import DownloadItem
+from updater.pipeline.scheduler import ExtractionScheduler
 from updater.sanitize import sanitize_log_label
 from updater.security import prepare_secure_directory, resolve_secure_path, validate_contained_file
 from updater.storage.opendal import upload_to_storage_opendal
@@ -106,6 +107,41 @@ def get_extract_stage_concurrency(config) -> int:
             getattr(config, "MAX_CONCURRENCY", 1),
         )
     )
+
+
+def get_extract_scheduler_mode(config) -> str:
+    """Resolve the extraction scheduling mode (extraction-worker roadmap Phase 2)."""
+
+    mode = getattr(config, "EXTRACT_SCHEDULER_MODE", "fixed")
+    if mode not in ("fixed", "adaptive"):
+        raise ValueError(f"Unsupported extract scheduler mode: {mode!r}")
+    return mode
+
+
+def get_adaptive_extract_worker_count(config) -> int:
+    """Adaptive extract workers never exceed EXTRACT_MAX_WORKERS or the fixed width."""
+
+    extract_concurrency = get_extract_stage_concurrency(config)
+    configured = getattr(config, "EXTRACT_MAX_WORKERS", None)
+    if configured is None:
+        return extract_concurrency
+    return min(extract_concurrency, _sanitize_concurrency(configured, extract_concurrency))
+
+
+def get_adaptive_media_slots(config, worker_count: int) -> int:
+    """Concurrent media-classified extraction slots; at least one light slot is kept."""
+
+    configured = getattr(config, "EXTRACT_ADAPTIVE_MEDIA_SLOTS", None)
+    if configured is None:
+        return max(1, worker_count // 2)
+    return min(worker_count, max(1, _sanitize_concurrency(configured, worker_count)))
+
+
+def get_media_bundle_hints(config) -> tuple[re.Pattern[str], ...]:
+    """Compile the advisory media bundle-name hints; invalid patterns fail fast."""
+
+    patterns = getattr(config, "EXTRACT_MEDIA_BUNDLE_HINTS", None) or ()
+    return tuple(re.compile(pattern) for pattern in patterns)
 
 
 def get_upload_stage_concurrency(config) -> int:
@@ -755,6 +791,41 @@ async def _extract_stage(
             extract_queue.task_done()
 
 
+async def _adaptive_extract_stage(
+    pipeline_id: str,
+    name: str,
+    scheduler: ExtractionScheduler,
+    upload_queue: asyncio.Queue,
+    config,
+    failed_tasks: List[DownloadItem],
+    failed_lock: asyncio.Lock,
+    profiler: ExtractionProfiler,
+) -> None:
+    """Extract stage worker dispatched by the Phase 2 admission scheduler."""
+
+    loop = asyncio.get_running_loop()
+    while True:
+        claim_started = loop.time()
+        artifact = await scheduler.claim()
+        profiler.record_worker_idle(loop.time() - claim_started)
+        if artifact is None:
+            return
+
+        try:
+            await _extract_one_artifact(
+                pipeline_id,
+                name,
+                artifact,
+                upload_queue,
+                config,
+                failed_tasks,
+                failed_lock,
+                profiler,
+            )
+        finally:
+            await scheduler.release(artifact)
+
+
 async def _upload_artifact_to_storages(artifact: PipelineArtifact, config, label: str) -> None:
     if not config.ASSET_REMOTE_STORAGE:
         return
@@ -879,13 +950,25 @@ async def run_pipeline(
     )
     total_items = len(dl_list)
     download_concurrency = get_download_stage_concurrency(config)
-    extract_concurrency = get_extract_stage_concurrency(config)
+    scheduler_mode = get_extract_scheduler_mode(config)
+    if scheduler_mode == "adaptive":
+        extract_concurrency = get_adaptive_extract_worker_count(config)
+    else:
+        extract_concurrency = get_extract_stage_concurrency(config)
     upload_concurrency = get_upload_stage_concurrency(config)
     extract_queue_size = get_stage_queue_size(config, extract_concurrency)
     upload_queue_size = get_stage_queue_size(config, upload_concurrency)
 
     download_queue: asyncio.Queue = asyncio.Queue()
-    extract_queue: asyncio.Queue = asyncio.Queue(maxsize=extract_queue_size)
+    extract_queue: asyncio.Queue | ExtractionScheduler
+    if scheduler_mode == "adaptive":
+        extract_queue = ExtractionScheduler(
+            capacity=extract_queue_size,
+            media_slots=get_adaptive_media_slots(config, extract_concurrency),
+            media_hints=get_media_bundle_hints(config),
+        )
+    else:
+        extract_queue = asyncio.Queue(maxsize=extract_queue_size)
     upload_queue: asyncio.Queue = asyncio.Queue(maxsize=upload_queue_size)
     failed_tasks: List[DownloadItem] = []
     failed_lock = asyncio.Lock()
@@ -928,21 +1011,38 @@ async def run_pipeline(
             )
             for worker_id in range(download_concurrency)
         ]
-        extract_tasks = [
-            asyncio.create_task(
-                _extract_stage(
-                    pipeline_id,
-                    f"extract_worker-{worker_id}",
-                    extract_queue,
-                    upload_queue,
-                    config,
-                    failed_tasks,
-                    failed_lock,
-                    profiler,
+        if isinstance(extract_queue, ExtractionScheduler):
+            extract_tasks = [
+                asyncio.create_task(
+                    _adaptive_extract_stage(
+                        pipeline_id,
+                        f"extract_worker-{worker_id}",
+                        extract_queue,
+                        upload_queue,
+                        config,
+                        failed_tasks,
+                        failed_lock,
+                        profiler,
+                    )
                 )
-            )
-            for worker_id in range(extract_concurrency)
-        ]
+                for worker_id in range(extract_concurrency)
+            ]
+        else:
+            extract_tasks = [
+                asyncio.create_task(
+                    _extract_stage(
+                        pipeline_id,
+                        f"extract_worker-{worker_id}",
+                        extract_queue,
+                        upload_queue,
+                        config,
+                        failed_tasks,
+                        failed_lock,
+                        profiler,
+                    )
+                )
+                for worker_id in range(extract_concurrency)
+            ]
         upload_tasks = [
             asyncio.create_task(
                 _upload_stage(
@@ -963,11 +1063,15 @@ async def run_pipeline(
         try:
             await _await_with_worker_monitor(download_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
-            await _await_with_worker_monitor(
-                _put_sentinels(extract_queue, extract_concurrency),
-                worker_monitor,
-            )
-            await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
+            if isinstance(extract_queue, ExtractionScheduler):
+                await _await_with_worker_monitor(extract_queue.wait_idle(), worker_monitor)
+                await _await_with_worker_monitor(extract_queue.close(), worker_monitor)
+            else:
+                await _await_with_worker_monitor(
+                    _put_sentinels(extract_queue, extract_concurrency),
+                    worker_monitor,
+                )
+                await _await_with_worker_monitor(extract_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=extract | status=completed", pipeline_id)
             await _await_with_worker_monitor(
                 _put_sentinels(upload_queue, upload_concurrency),
@@ -984,7 +1088,11 @@ async def run_pipeline(
                 task.cancel()
             worker_monitor.cancel()
             await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=True)
-            await _cleanup_queued_artifacts(extract_queue)
+            if isinstance(extract_queue, ExtractionScheduler):
+                for artifact in await extract_queue.drain_for_cleanup():
+                    await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
+            else:
+                await _cleanup_queued_artifacts(extract_queue)
             await _cleanup_queued_artifacts(upload_queue)
             profiler.finish("aborted")
             raise
