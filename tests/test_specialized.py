@@ -171,6 +171,37 @@ class SpecializedHelpersTest(unittest.TestCase):
             include_list = [r"^music/music_score/002_song$"]
             self.assertFalse(has_local_chart_sources(root, include_list))
 
+    def _fetch_chart_sources_with(self, score_dirs, include_list):
+        import tempfile
+
+        storage = {"type": "normal", "base": "remote:", "program": "rclone", "args": []}
+
+        async def copy_sources(_storage, target_dir, _config):
+            for score_dir in score_dirs:
+                (target_dir / score_dir).mkdir(parents=True)
+                (target_dir / score_dir / "master.txt").write_text("# SUS", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = SimpleNamespace(ASSET_REMOTE_STORAGE=[storage])
+            with patch.object(charts, "_copy_chart_sources_from_one_storage", new=copy_sources):
+                asyncio.run(
+                    charts.fetch_chart_sources_from_storage(config, Path(temp_dir), include_list)
+                )
+
+    def test_chart_source_fetch_reports_scores_excluded_by_include_list(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "remote:: storage provided 2 music/music_score directories, "
+            "but DL_INCLUDE_LIST matches none of them",
+        ):
+            self._fetch_chart_sources_with(["0371_01", "0387_01"], [r"^gacha/.*"])
+
+    def test_chart_source_fetch_reports_storage_without_scores(self):
+        with self.assertRaisesRegex(
+            RuntimeError, "remote:: storage did not provide any chart .txt files"
+        ):
+            self._fetch_chart_sources_with([], [r"^gacha/.*"])
+
     def test_live2d_extraction_is_decided_by_bundle_name(self):
         self.assertTrue(is_live2d_bundle({"bundleName": "live2d/motion/base"}))
         self.assertTrue(is_live2d_bundle({"bundleName": "live2d/model/base"}))

@@ -44,6 +44,36 @@ def test_validate_config_keeps_normal_only_mode_compatible(monkeypatch) -> None:
     configuration.validate_config(_valid_config())  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "unity_version",
+    ["2022.3.21f1", "2022.3.52f1", "2023.2.20f1", "6000.0.23f1", "2022.3.2t3", "5.6.7f1"],
+)
+def test_validate_config_accepts_released_unity_versions(monkeypatch, unity_version) -> None:
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
+
+    configuration.validate_config(  # type: ignore[arg-type]
+        _valid_config(UNITY_VERSION=unity_version)
+    )
+
+
+@pytest.mark.parametrize(
+    "unity_version",
+    ["2024.3.52f1", "2016.4.1f1", "2022.3", "6.8.0.10", " 2022.3.21f1", 2022],
+)
+def test_validate_config_rejects_unreleased_or_malformed_unity_versions(
+    monkeypatch, unity_version
+) -> None:
+    monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
+
+    with pytest.raises(ValueError) as caught:
+        configuration.validate_config(  # type: ignore[arg-type]
+            _valid_config(UNITY_VERSION=unity_version)
+        )
+
+    assert "UNITY_VERSION must be a released Unity version" in str(caught.value)
+    assert repr(unity_version) in str(caught.value)
+
+
 def test_validate_config_checks_enabled_live2d_storage_and_prerequisite(monkeypatch) -> None:
     monkeypatch.setattr(
         configuration.shutil, "which", lambda program: None if program == "missing" else "/bin/true"

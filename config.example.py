@@ -15,7 +15,8 @@ UPDATER_MODE = "assets"
 # Optional additional export for bundles containing 3D scene meshes.
 ENABLE_MODEL3D_FBX_EXPORT = False
 
-# Fallback unity version, replace with the correct version if needed
+# Game Unity version (a released version such as 2022.3.21f1). Bundles strip their
+# engine version, so extraction reads object layouts from this value.
 UNITY_VERSION = "2022.3.21f1"
 # User agent for requests, replace with the correct user agent if needed
 USER_AGENT = None

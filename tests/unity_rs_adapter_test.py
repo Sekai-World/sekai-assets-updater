@@ -84,6 +84,49 @@ def test_environment_uses_asset_bundle_container_targets() -> None:
     assert environment.container["actual.playable"].container == "actual.playable"
 
 
+@pytest.mark.parametrize("order", [(28, 213), (213, 28)])
+def test_asset_bundle_container_keeps_texture_over_same_path_sprite(order) -> None:
+    # A Sprite-imported PNG lists its Texture2D and Sprite under one path, as in
+    # bonds_honor/character/chr_sd_21_01; the Sprite would export trimmed.
+    path = "assets/sekai/assetbundle/resources/startapp/bonds_honor/character/chr_sd_21_01.png"
+    texture = _Info(file_index=0, object_index=0, path_id=1, class_id=28)
+    sprite = _Info(file_index=0, object_index=1, path_id=2, class_id=213)
+    asset_bundle = _Info(file_index=0, object_index=2, path_id=3, class_id=142)
+    path_ids = {28: 1, 213: 2}
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, _file_index, _path_id):
+            return SimpleNamespace(
+                container=[(path, 0, 1, (0, path_ids[class_id])) for class_id in order]
+            )
+
+    environment = unity_rs_adapter.UnityRsEnvironment(
+        _AssetBundleStudio([texture, sprite, asset_bundle])
+    )
+
+    assert environment.container[path].class_id == 28
+    # The Sprite still knows its path; it is only not the exported entry.
+    assert environment.objects[1].container == path
+
+
+@pytest.mark.parametrize("order", [(28, 213), (213, 28)])
+def test_object_containers_keep_texture_over_same_path_sprite(order) -> None:
+    infos = [
+        _Info(
+            file_index=0,
+            object_index=index,
+            path_id=index + 1,
+            class_id=class_id,
+            container="a.png",
+        )
+        for index, class_id in enumerate(order)
+    ]
+
+    environment = unity_rs_adapter.UnityRsEnvironment(_Studio(infos))
+
+    assert environment.container["a.png"].class_id == 28
+
+
 def test_type_tree_and_text_asset_keep_json_and_raw_bytes() -> None:
     info = _Info(file_index=0, object_index=0, path_id=7, class_id=49, name="fixture")
     obj = unity_rs_adapter.UnityRsEnvironment(_Studio([info])).objects[0]

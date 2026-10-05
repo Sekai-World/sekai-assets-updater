@@ -312,6 +312,11 @@ def _get_bundle_file_size(bundle: Dict[str, Any]) -> int:
     return 0
 
 
+def _stage_error_summary(exc: BaseException) -> str:
+    """Return a one-line, sanitized cause for a failed pipeline item."""
+    return sanitize_log_label(f"{type(exc).__name__}: {exc}")
+
+
 def _validate_artifact_outputs(extracted_root: Path, exported_paths: List[Path]) -> List[Path]:
     """Ensure extraction output is contained regular files for this artifact."""
 
@@ -568,14 +573,15 @@ async def _download_one_item(
         if bundle_save_path is not None and remove_bundle_after_extract:
             await bundle_save_path.unlink(missing_ok=True)
         raise
-    except Exception:
+    except Exception as exc:
         if bundle_save_path is not None and remove_bundle_after_extract:
             await bundle_save_path.unlink(missing_ok=True)
         logger.error(
-            "ERROR | pipeline_id=%s | worker=%s | stage=download | item=%s",
+            "ERROR | pipeline_id=%s | worker=%s | stage=download | item=%s | error=%s",
             pipeline_id,
             name,
             label,
+            _stage_error_summary(exc),
         )
         async with failed_lock:
             failed_tasks.append(item)
@@ -701,10 +707,11 @@ async def _extract_one_artifact(
     except Exception as exc:
         profiler.record_bundle_failure(label, loop.time() - extract_started, exc)
         logger.error(
-            "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s",
+            "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s | error=%s",
             pipeline_id,
             name,
             label,
+            _stage_error_summary(exc),
         )
         async with failed_lock:
             failed_tasks.append((artifact.url, artifact.bundle))
@@ -802,12 +809,13 @@ async def _upload_one_artifact(
     except asyncio.CancelledError:
         await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
         raise
-    except Exception:
+    except Exception as exc:
         logger.error(
-            "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s",
+            "ERROR | pipeline_id=%s | worker=%s | stage=upload | item=%s | error=%s",
             pipeline_id,
             name,
             label,
+            _stage_error_summary(exc),
         )
         async with failed_lock:
             failed_tasks.append((artifact.url, artifact.bundle))
