@@ -4,52 +4,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from anyio import Path as AnyioPath
+from conftest import install_pipeline_fakes, pipeline_config
 
 from updater import pipeline
-
-
-def _config(extracted_root: Path | None) -> SimpleNamespace:
-    return SimpleNamespace(
-        ASSET_LOCAL_BUNDLE_CACHE_DIR=None,
-        ASSET_LOCAL_EXTRACTED_DIR=AnyioPath(extracted_root) if extracted_root else None,
-        ASSET_REMOTE_STORAGE=[
-            {"type": "normal", "base": "remote", "program": "uploader", "args": []}
-        ],
-        UNITY_VERSION=None,
-        MAX_CONCURRENCY_DOWNLOADS=1,
-        MAX_CONCURRENCY_EXTRACTS=1,
-        MAX_CONCURRENCY_UPLOAD_STAGE=1,
-        PIPELINE_STAGE_QUEUE_SIZE=1,
-        MAX_CONCURRENCY_UPLOADS=1,
-        REQUEST_TIMEOUT=1,
-    )
-
-
-def _install_pipeline_fakes(
-    monkeypatch: pytest.MonkeyPatch,
-    contents: dict[str, bytes],
-    uploads: list[tuple[str, Path, Path, bytes]],
-):
-    async def fake_download(_url, root, relative, **_kwargs):
-        await root.joinpath(relative).write_bytes(b"synthetic bundle")
-
-    async def fake_extract(bundle_path, bundle, output_root, **_kwargs):
-        output = output_root / "shared.txt"
-        await output.write_bytes(contents[bundle["bundleName"]])
-        return [output]
-
-    async def fake_upload(files, root, *_args, **_kwargs):
-        exported_file = files[0]
-        data = await exported_file.read_bytes()
-        uploads.append((exported_file.name, Path(root.as_posix()), exported_file, data))
-
-    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
-    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
-    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
 
 
 def test_extract_single_bundle_populates_artifact_standalone(
@@ -63,7 +23,7 @@ def test_extract_single_bundle_populates_artifact_standalone(
         return [output]
 
     monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
-    config = _config(extracted_root)
+    config = pipeline_config(extracted_root)
     artifact = pipeline.PipelineArtifact(
         url="url",
         bundle={"bundleName": "first"},
@@ -90,7 +50,7 @@ def test_extract_single_bundle_uses_temporary_staging_without_configured_root(
         return [output]
 
     monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
-    config = _config(None)
+    config = pipeline_config(None)
     artifact = pipeline.PipelineArtifact(
         url="url",
         bundle={"bundleName": "first"},
@@ -116,7 +76,7 @@ def test_extract_single_bundle_propagates_failure_without_queue_side_effects(
         raise RuntimeError("synthetic extraction failure")
 
     monkeypatch.setattr(pipeline, "extract_asset_bundle", failing_extract)
-    config = _config(tmp_path / "extracted")
+    config = pipeline_config(tmp_path / "extracted")
     artifact = pipeline.PipelineArtifact(
         url="url",
         bundle={"bundleName": "first"},
@@ -187,8 +147,8 @@ def test_run_pipeline_logs_extraction_summary_and_writes_profile(
 ) -> None:
     uploads: list[tuple[str, Path, Path, bytes]] = []
     contents = {"first": b"first bytes", "second": b"second bytes"}
-    _install_pipeline_fakes(monkeypatch, contents, uploads)
-    config = _config(tmp_path / "extracted")
+    install_pipeline_fakes(monkeypatch, contents, uploads)
+    config = pipeline_config(tmp_path / "extracted")
     config.EXTRACTION_PROFILING = True
     items = [
         ("first-url", {"bundleName": "first"}),
@@ -222,8 +182,8 @@ def test_run_pipeline_writes_no_profile_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     uploads: list[tuple[str, Path, Path, bytes]] = []
-    _install_pipeline_fakes(monkeypatch, {"only": b"only bytes"}, uploads)
-    config = _config(tmp_path / "extracted")
+    install_pipeline_fakes(monkeypatch, {"only": b"only bytes"}, uploads)
+    config = pipeline_config(tmp_path / "extracted")
 
     failed = asyncio.run(pipeline.run_pipeline([("only-url", {"bundleName": "only"})], config, {}))
 
