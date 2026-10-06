@@ -181,8 +181,9 @@ def test_image_contract_rejects_malformed_native_image() -> None:
 
 @pytest.mark.parametrize("width,height", [(0, 1), (1, 0), (-1, 2), (2, -1)])
 def test_image_contract_rejects_zero_or_negative_dimensions(width: int, height: int) -> None:
+    image = SimpleNamespace(width=width, height=height, rgba=b"")
     with pytest.raises(unity_rs_adapter.InvalidImageDimensions, match="invalid dimensions"):
-        unity_rs_adapter._rendered_image(SimpleNamespace(width=width, height=height, rgba=b""))
+        unity_rs_adapter._rendered_image(image)
 
 
 @pytest.mark.parametrize(

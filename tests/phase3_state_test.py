@@ -251,8 +251,9 @@ def test_atomic_write_file_fsync_failure_preserves_old_target_and_cleans_temp(
     monkeypatch.setattr(
         state.os, "fsync", lambda _descriptor: (_ for _ in ()).throw(OSError("fsync"))
     )
+    queue = _queue()
     with pytest.raises(state.StatePersistenceError):
-        state.atomic_write_json(target, _queue(), state.validate_pending_queue)
+        state.atomic_write_json(target, queue, state.validate_pending_queue)
     assert target.read_text() == '[["old", {"bundleName": "old"}]]'
     assert not list(tmp_path.glob(".state.json.*.tmp"))
 
@@ -274,15 +275,17 @@ def test_atomic_write_parent_fsync_failure_after_replace_leaves_new_target(
         return real_fsync_parent(path)
 
     monkeypatch.setattr(state, "_fsync_parent", fail_parent)
+    queue = _queue()
     with pytest.raises(state.StatePersistenceError):
-        state.atomic_write_json(target, _queue(), state.validate_pending_queue)
+        state.atomic_write_json(target, queue, state.validate_pending_queue)
     assert target.read_text() != old
 
 
 def test_atomic_write_requires_validator_and_existing_parent(tmp_path: Path) -> None:
     queue = _queue()
+    target = tmp_path / "state.json"
     with pytest.raises(state.StateValidationError):
-        state.atomic_write_json(tmp_path / "state.json", queue, 0)  # type: ignore[arg-type]
+        state.atomic_write_json(target, queue, 0)  # type: ignore[arg-type]
     missing_target = tmp_path / "absent" / "state.json"
     with pytest.raises(state.StatePersistenceError):
         state.atomic_write_json(missing_target, queue, state.validate_pending_queue)
@@ -447,8 +450,9 @@ def test_create_journal_rejects_every_existing_journal(tmp_path: Path) -> None:
     for existing in (b"valid", b"{bad", b'{"schema_version": 99}'):
         journal.write_bytes(existing)
         before = journal.read_bytes()
+        queue, metadata, version = _queue(), _metadata(), _version()
         with pytest.raises(state.StateAlreadyExistsError):
-            state.create_journal(journal, _queue(), _metadata(), _version(), "tx")
+            state.create_journal(journal, queue, metadata, version, "tx")
         assert journal.read_bytes() == before
         journal.unlink()
 
@@ -462,8 +466,9 @@ def test_create_journal_file_fsync_failure_leaves_no_partial_journal(
         "fsync",
         lambda _descriptor: (_ for _ in ()).throw(OSError("journal fsync")),
     )
+    queue, metadata, version = _queue(), _metadata(), _version()
     with pytest.raises(state.StatePersistenceError):
-        state.create_journal(journal, _queue(), _metadata(), _version(), "tx")
+        state.create_journal(journal, queue, metadata, version, "tx")
     assert not journal.exists()
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 
@@ -477,8 +482,9 @@ def test_create_journal_publication_failure_leaves_no_partial_journal(
         "link",
         lambda _source, _target: (_ for _ in ()).throw(OSError("link fault")),
     )
+    queue, metadata, version = _queue(), _metadata(), _version()
     with pytest.raises(state.StatePersistenceError):
-        state.create_journal(journal, _queue(), _metadata(), _version(), "tx")
+        state.create_journal(journal, queue, metadata, version, "tx")
     assert not journal.exists()
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 
@@ -489,8 +495,9 @@ def test_create_journal_collision_preserves_existing_bytes_and_cleans_temp(
     journal = tmp_path / "journal.json"
     journal.write_bytes(b"existing journal bytes")
     before = journal.read_bytes()
+    queue, metadata, version = _queue(), _metadata(), _version()
     with pytest.raises(state.StateAlreadyExistsError):
-        state.create_journal(journal, _queue(), _metadata(), _version(), "tx")
+        state.create_journal(journal, queue, metadata, version, "tx")
     assert journal.read_bytes() == before
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 
@@ -504,8 +511,9 @@ def test_create_journal_parent_fsync_failure_leaves_full_journal(
         "_fsync_parent",
         lambda _path: (_ for _ in ()).throw(state.StatePersistenceError("parent fsync")),
     )
+    queue, metadata, version = _queue(), _metadata(), _version()
     with pytest.raises(state.StatePersistenceError):
-        state.create_journal(journal, _queue(), _metadata(), _version(), "tx")
+        state.create_journal(journal, queue, metadata, version, "tx")
     assert state.load_journal(journal)["transaction_id"] == "tx"
     assert not list(tmp_path.glob(".journal.json.*.tmp"))
 

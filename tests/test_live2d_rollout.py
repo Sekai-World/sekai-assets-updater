@@ -576,7 +576,6 @@ def test_upload_failure_does_not_create_local_rollout_history(tmp_path: Path) ->
             association_index=index,
             association_output_root=source,
             association_namespace_root=namespace,
-            association_state_path=state_path,
             skip_missing_sources=True,
         )
         with pytest.raises(RuntimeError, match="upload failed"):

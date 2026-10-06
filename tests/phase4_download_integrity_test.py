@@ -278,7 +278,8 @@ def test_retryable_failures_retry_and_then_succeed(
         )
     )
     assert session.calls == 2
-    assert sleeps and sleeps[0] <= 4.0
+    assert sleeps
+    assert sleeps[0] <= 4.0
     assert target.read_bytes() == _unityfs()
 
 

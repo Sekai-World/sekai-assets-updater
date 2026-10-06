@@ -145,7 +145,8 @@ def test_configured_bundle_outputs_use_distinct_retained_roots(tmp_path: Path, m
     first_out, first_failures = _run_extract_stage(first, _config(root), monkeypatch, "a.txt")
     second_out, second_failures = _run_extract_stage(second, _config(root), monkeypatch, "b.txt")
 
-    assert not first_failures and not second_failures
+    assert not first_failures
+    assert not second_failures
     assert first_out.extracted_save_path != second_out.extracted_save_path
     assert (
         first_out.extracted_save_path.parent.parent == second_out.extracted_save_path.parent.parent
@@ -296,7 +297,8 @@ def test_temporary_artifact_cleanup_is_scoped_to_its_own_stage(tmp_path: Path, m
     second_out, _ = _run_extract_stage(second, _config(None), monkeypatch, "b.txt")
     first_root = first_out.extracted_save_path
     second_root = second_out.extracted_save_path
-    assert asyncio.run(first_root.exists()) and asyncio.run(second_root.exists())
+    assert asyncio.run(first_root.exists())
+    assert asyncio.run(second_root.exists())
 
     asyncio.run(pipeline._cleanup_artifact(first_out, remove_extracted=True))
     assert not asyncio.run(first_root.exists())
@@ -368,7 +370,8 @@ def test_upload_stage_isolates_same_relative_output_and_content(
         await pipeline._upload_stage("phase2", "upload", queue, config, failures, asyncio.Lock())
 
     asyncio.run(run())
-    assert not failures and not second_failures
+    assert not failures
+    assert not second_failures
     assert [(root, path.name, contents) for root, path, contents in seen] == [
         (first_out.extracted_save_path, "same.txt", b"first bytes"),
         (second_out.extracted_save_path, "same.txt", b"second bytes"),

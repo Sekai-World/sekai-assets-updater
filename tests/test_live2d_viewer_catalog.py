@@ -43,16 +43,24 @@ def test_public_catalog_has_only_viewer_fields_and_resolves_model3_and_motion_pa
         "ichika-april2025": (None, None),
         "mizuki-unit": (20, 202),
     }
+    expected_entry_fields = {
+        "modelName",
+        "modelBase",
+        "modelPath",
+        "modelFile",
+        "motionSets",
+        "characterId",
+        "character2dId",
+    }
+    expected_motion_fields = {
+        "motionSetId",
+        "motionPath",
+        "motionFiles",
+        "facialPath",
+        "facialFiles",
+    }
     for entry in catalog:
-        assert set(entry) == {
-            "modelName",
-            "modelBase",
-            "modelPath",
-            "modelFile",
-            "motionSets",
-            "characterId",
-            "character2dId",
-        }
+        assert set(entry) == expected_entry_fields
         model_file = source / entry["modelPath"] / entry["modelFile"]
         assert model_file.is_file()
         assert entry["modelFile"].endswith(".model3.json")
@@ -61,13 +69,7 @@ def test_public_catalog_has_only_viewer_fields_and_resolves_model3_and_motion_pa
             model_output_id
         ]
         for motion_set in entry["motionSets"]:
-            assert set(motion_set) == {
-                "motionSetId",
-                "motionPath",
-                "motionFiles",
-                "facialPath",
-                "facialFiles",
-            }
+            assert set(motion_set) == expected_motion_fields
             assert all(
                 (source / motion_set["motionPath"] / filename).is_file()
                 for filename in motion_set["motionFiles"]

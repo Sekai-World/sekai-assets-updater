@@ -23,71 +23,71 @@ class BinaryStream:
         self.base_stream = base_stream
         self.endian = endian
 
-    def readByte(self):
+    def read_byte(self):
         return self.base_stream.read(1)
 
     @offset_decorate
-    def readBytes(self, length):
+    def read_bytes(self, length):
         return self.base_stream.read(length)
 
-    def readChar(self):
+    def read_char(self):
         return self.unpack("b")
 
-    def readUChar(self):
+    def read_uchar(self):
         return self.unpack("B")
 
-    def readBool(self):
+    def read_bool(self):
         return self.unpack("?")
 
-    def readInt16(self):
+    def read_int16(self):
         if self.endian == "big":
             return self.unpack(">h", 2)
         return self.unpack("h", 2)
 
-    def readUInt16(self):
+    def read_uint16(self):
         if self.endian == "big":
             return self.unpack(">H", 2)
         return self.unpack("H", 2)
 
-    def readInt32(self):
+    def read_int32(self):
         if self.endian == "big":
             return self.unpack(">i", 4)
         return self.unpack("i", 4)
 
-    def readUInt32(self):
+    def read_uint32(self):
         if self.endian == "big":
             return self.unpack(">I", 4)
         return self.unpack("I", 4)
 
-    def readInt64(self):
+    def read_int64(self):
         if self.endian == "big":
             return self.unpack(">q", 8)
         return self.unpack("q", 8)
 
-    def readUInt64(self):
+    def read_uint64(self):
         if self.endian == "big":
             return self.unpack(">Q", 8)
         return self.unpack("Q", 8)
 
-    def readFloat(self):
+    def read_float(self):
         return self.unpack("f", 4)
 
-    def readDouble(self):
+    def read_double(self):
         return self.unpack("d", 8)
 
-    def readString(self):
-        length = self.readUInt16()
+    def read_string(self):
+        length = self.read_uint16()
         return self.unpack(str(length) + "s", length)
 
     @offset_decorate
-    def readStringLength(self, length):
+    def read_string_length(self, length):
         return self.unpack(str(length) + "s", length)
 
     @offset_decorate
-    def readStringToNull(self):
+    def read_string_to_null(self):
         byte_str = b""
         while 1:
-            b = self.readByte()
+            b = self.read_byte()
             if b == b"":
                 raise EOFError("null-terminated string is missing its terminator")
             if b == b"\x00":
@@ -95,60 +95,60 @@ class BinaryStream:
             byte_str += b
         return byte_str
 
-    def AlignStream(self, alignment):
+    def align_stream(self, alignment):
         pos = self.base_stream.tell()
         # print('currPos is: ' + str(pos), pos % alignment)
         if (pos % alignment) != 0:
             self.base_stream.seek(alignment - (pos % alignment), 1)
             # print('aligned currPos is: ' + str(self.base_stream.tell()))
 
-    def writeBytes(self, value):
+    def write_bytes(self, value):
         self.base_stream.write(value)
 
-    def writeChar(self, value):
+    def write_char(self, value):
         self.pack("c", value)
 
-    def writeUChar(self, value):
+    def write_uchar(self, value):
         self.pack("C", value)
 
-    def writeBool(self, value):
+    def write_bool(self, value):
         self.pack("?", value)
 
-    def writeInt16(self, value):
+    def write_int16(self, value):
         self.pack("h", value)
 
-    def writeUInt16(self, value):
+    def write_uint16(self, value):
         self.pack("H", value)
 
-    def writeInt32(self, value):
+    def write_int32(self, value):
         self.pack("i", value)
 
-    def writeUInt32(self, value):
+    def write_uint32(self, value):
         self.pack("I", value)
 
-    def writeInt64(self, value):
+    def write_int64(self, value):
         self.pack("q", value)
 
-    def writeUInt64(self, value):
+    def write_uint64(self, value):
         self.pack("Q", value)
 
-    def writeFloat(self, value):
+    def write_float(self, value):
         self.pack("f", value)
 
-    def writeDouble(self, value):
+    def write_double(self, value):
         self.pack("d", value)
 
     def writeString(self, value):
         length = len(value)
-        self.writeUInt16(length)
+        self.write_uint16(length)
         self.pack(str(length) + "s", value)
 
     def pack(self, fmt: str, data):
-        return self.writeBytes(pack(fmt, data))
+        return self.write_bytes(pack(fmt, data))
 
     def unpack(self, fmt: str, length=1):
-        return unpack(fmt, self.readBytes(length))[0]
+        return unpack(fmt, self.read_bytes(length))[0]
 
     def unpack_raw(self, fmt):
         length = Struct(fmt).size
-        return unpack(fmt, self.readBytes(length))
+        return unpack(fmt, self.read_bytes(length))

@@ -390,6 +390,60 @@ async def _ensure_manifest_motion_outputs(config, selections, source_root: StdPa
     )
 
 
+def _collect_motion_bundle_paths(config, index: Live2DIndex) -> tuple[list[StdPath], list[str]]:
+    bundle_paths: list[StdPath] = []
+    missing: list[str] = []
+    for record in index.motion_sets:
+        bundle_name = record.motion_bundle.name
+        if not bundle_name.startswith(MOTION_BUNDLE_PREFIX):
+            missing.append(f"{bundle_name!r} (cache path unavailable)")
+            continue
+        bundle_path = get_bundle_cache_path(config, {"bundleName": bundle_name})
+        if bundle_path is None:
+            missing.append(f"{bundle_name!r} (cache path unavailable)")
+            continue
+        path = StdPath(str(bundle_path))
+        if path.is_symlink() or not path.is_file():
+            missing.append(f"{bundle_name!r} ({path})")
+            continue
+        bundle_paths.append(path)
+    return bundle_paths, missing
+
+
+async def _restore_associated_motion_bundles(
+    config,
+    index: Live2DIndex,
+    source_root: StdPath,
+    model_dir: StdPath,
+    motion_source: StdPath | None,
+    allow_cache_scan: bool,
+) -> None:
+    bundle_paths, missing = _collect_motion_bundle_paths(config, index)
+    if missing:
+        if not allow_cache_scan:
+            raise FileNotFoundError(
+                "selected Live2D motion bundle cache is missing: " + ", ".join(missing)
+            )
+        # Older explicit indexes stored only the logical motion name (for
+        # example ``motion/v2_01ichika_motion_base``), not the current
+        # metadata Bundle name.  Keep their historical behavior: restore
+        # from every file in the local motion cache.  Automatic and
+        # manifest-driven paths never opt into this fallback, so an
+        # unselected root alias cannot be materialized there.
+        bundle_paths = None
+
+    param_id_map = await collect_param_id_map(Path(str(model_dir)))
+    await restore_live2d_motions(
+        Path(str(motion_source)),
+        Path(str(source_root / "motion")),
+        Path(str(model_dir)),
+        config.UNITY_VERSION,
+        config=config,
+        param_id_map=param_id_map,
+        bundle_paths=bundle_paths,
+    )
+
+
 async def _ensure_associated_motion_outputs(
     config,
     index: Live2DIndex,
@@ -435,45 +489,8 @@ async def _ensure_associated_motion_outputs(
         # automatic versioned-path preference).  Restore only the corresponding
         # bundle identities instead of globbing the cache and allowing an
         # unselected root alias to materialize.
-        bundle_paths: list[StdPath] = []
-        missing: list[str] = []
-        for record in index.motion_sets:
-            bundle_name = record.motion_bundle.name
-            if not bundle_name.startswith(MOTION_BUNDLE_PREFIX):
-                missing.append(f"{bundle_name!r} (cache path unavailable)")
-                continue
-            bundle_path = get_bundle_cache_path(config, {"bundleName": bundle_name})
-            if bundle_path is None:
-                missing.append(f"{bundle_name!r} (cache path unavailable)")
-                continue
-            path = StdPath(str(bundle_path))
-            if path.is_symlink() or not path.is_file():
-                missing.append(f"{bundle_name!r} ({path})")
-                continue
-            bundle_paths.append(path)
-
-        if missing:
-            if not allow_cache_scan:
-                raise FileNotFoundError(
-                    "selected Live2D motion bundle cache is missing: " + ", ".join(missing)
-                )
-            # Older explicit indexes stored only the logical motion name (for
-            # example ``motion/v2_01ichika_motion_base``), not the current
-            # metadata Bundle name.  Keep their historical behavior: restore
-            # from every file in the local motion cache.  Automatic and
-            # manifest-driven paths never opt into this fallback, so an
-            # unselected root alias cannot be materialized there.
-            bundle_paths = None
-
-        param_id_map = await collect_param_id_map(Path(str(model_dir)))
-        await restore_live2d_motions(
-            Path(str(motion_source)),
-            Path(str(source_root / "motion")),
-            Path(str(model_dir)),
-            config.UNITY_VERSION,
-            config=config,
-            param_id_map=param_id_map,
-            bundle_paths=bundle_paths,
+        await _restore_associated_motion_bundles(
+            config, index, source_root, model_dir, motion_source, allow_cache_scan
         )
     except Exception as exc:
         raise Live2DAssociatedRolloutError(
@@ -506,7 +523,6 @@ def _resolve_associated_index_path(
     association_index,
     association_index_path,
     configured_path,
-    configured_selections_path,
 ):
     if association_index is not None and association_index_path is not None:
         raise ValueError(
@@ -846,7 +862,6 @@ async def _process_live2d_associated(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     skip_missing_sources: bool = False,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
@@ -862,7 +877,6 @@ async def _process_live2d_associated(
         association_index,
         association_index_path,
         configured_path,
-        configured_selections_path,
     )
     if _associated_index_source_is_missing(
         association_index,
@@ -1055,7 +1069,6 @@ async def _run_live2d_associated_postprocess(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
     asset_metadata_version: str | None = None,
@@ -1067,7 +1080,6 @@ async def _run_live2d_associated_postprocess(
         association_index_path=association_index_path,
         association_output_root=association_output_root,
         association_namespace_root=association_namespace_root,
-        association_state_path=association_state_path,
         skip_missing_sources=skip_missing_sources,
         motion_outputs_ready=motion_outputs_ready,
         live2d_bundles=live2d_bundles,
@@ -1086,7 +1098,6 @@ async def run_specialized_postprocess(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
     asset_metadata_version: str | None = None,
@@ -1111,7 +1122,6 @@ async def run_specialized_postprocess(
             association_index_path=association_index_path,
             association_output_root=association_output_root,
             association_namespace_root=association_namespace_root,
-            association_state_path=association_state_path,
             motion_outputs_ready=motion_outputs_ready,
             live2d_bundles=live2d_bundles,
             asset_metadata_version=asset_metadata_version,

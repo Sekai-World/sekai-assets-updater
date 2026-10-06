@@ -25,11 +25,11 @@ class StreamedCurveKey(object):
     def __init__(self, bs):
         super().__init__()
 
-        self.index: int = bs.readUInt32()
-        self.coeff: List[float] = [bs.readFloat() for _ in range(3)]
+        self.index: int = bs.read_uint32()
+        self.coeff: List[float] = [bs.read_float() for _ in range(3)]
 
         self.outSlope: float = self.coeff[2]
-        self.value: float = bs.readFloat()
+        self.value: float = bs.read_float()
         self.inSlope: float = 0.0
 
     def __repr__(self) -> str:
@@ -82,8 +82,8 @@ def build_binding_info_lookup(
 def _read_streamed_frames(bs: BinaryStream, payload_len: int) -> List:
     frames = []
     while bs.base_stream.tell() < payload_len:
-        time = bs.readFloat()
-        num_keys = bs.readUInt32()
+        time = bs.read_float()
+        num_keys = bs.read_uint32()
         key_list = [StreamedCurveKey(bs) for _ in range(num_keys)]
         assert len(key_list) == num_keys
         if time >= 0:

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import IO, Protocol, runtime_checkable
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import quote, unquote, urlsplit
 from urllib.request import urlopen
 
@@ -51,6 +51,9 @@ DEFAULT_MASTER_DATA_EXTRACTED_MAX_BYTES = 512 * 1024 * 1024
 _ARCHIVE_CHUNK_SIZE = 1024 * 1024
 _ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".zip")
 _VERSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]*$")
+
+
+MASTER_DB_VERSION_REQUIRED_MESSAGE = "master_db_version must be provided as a non-empty string"
 
 
 class Live2DMasterDataError(ValueError):
@@ -125,7 +128,7 @@ class Live2DMasterDataSnapshot:
 
     def __post_init__(self) -> None:
         if not isinstance(self.master_db_version, str) or not self.master_db_version.strip():
-            raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+            raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
         if not isinstance(self.tables, Mapping):
             raise Live2DMasterDataShapeError(
                 "normalized Live2D tables must be a mapping of the six required tables"
@@ -224,6 +227,42 @@ def default_online_master_db_version(branch: str = DEFAULT_MASTER_DATA_BRANCH) -
     return version
 
 
+def _codeload_archive_url(owner: str, repository: str, branch: str) -> str:
+    """Build the codeload tar.gz URL for one GitHub repository branch."""
+
+    encoded_owner = quote(owner, safe="")
+    encoded_repository = quote(repository, safe="")
+    encoded_branch = quote(branch, safe="/")
+    return (
+        f"https://codeload.github.com/{encoded_owner}/{encoded_repository}"
+        f"/tar.gz/refs/heads/{encoded_branch}"
+    )
+
+
+def _github_archive_url(url: str, path: str, branch: str) -> str:
+    """Resolve one github.com URL to its branch archive URL.
+
+    Direct archive URLs are returned unchanged; repository URLs are rewritten
+    to codeload.
+    """
+
+    if path.casefold().endswith(_ARCHIVE_SUFFIXES):
+        return url
+    path_parts = [part for part in path.strip("/").split("/") if part]
+    if len(path_parts) != 2:
+        raise Live2DMasterDataDownloadError(
+            "GitHub master-data URL must be a repository URL or a direct archive URL"
+        )
+    owner, repository = path_parts
+    if repository.endswith(".git"):
+        repository = repository[:-4]
+    if not owner or not repository:
+        raise Live2DMasterDataDownloadError(
+            "GitHub master-data repository URL must include owner and repository"
+        )
+    return _codeload_archive_url(owner, repository, branch)
+
+
 def build_live2d_master_data_archive_url(
     repository_or_archive_url: str,
     *,
@@ -240,34 +279,11 @@ def build_live2d_master_data_archive_url(
     parts = urlsplit(url)
     host = (parts.hostname or "").casefold()
     path = unquote(parts.path)
-    path_parts = [part for part in path.strip("/").split("/") if part]
     path_lower = path.casefold()
 
     if host in {"github.com", "www.github.com"}:
-        if path_lower.endswith(_ARCHIVE_SUFFIXES):
-            return url
-        if len(path_parts) == 2:
-            owner, repository = path_parts
-            if repository.endswith(".git"):
-                repository = repository[:-4]
-            if not owner or not repository:
-                raise Live2DMasterDataDownloadError(
-                    "GitHub master-data repository URL must include owner and repository"
-                )
-            encoded_owner = quote(owner, safe="")
-            encoded_repository = quote(repository, safe="")
-            encoded_branch = quote(validated_branch, safe="/")
-            return (
-                f"https://codeload.github.com/{encoded_owner}/{encoded_repository}"
-                f"/tar.gz/refs/heads/{encoded_branch}"
-            )
-        raise Live2DMasterDataDownloadError(
-            "GitHub master-data URL must be a repository URL or a direct archive URL"
-        )
-
+        return _github_archive_url(url, path, validated_branch)
     if host == "codeload.github.com" and "/tar.gz/" in path_lower:
-        return url
-    if path_lower.endswith(_ARCHIVE_SUFFIXES):
         return url
     # Non-GitHub hosts cannot be reliably classified as repositories from their
     # URL alone.  Treat them as direct archive URLs and let archive validation
@@ -361,6 +377,68 @@ def _copy_archive_file(
     return copied
 
 
+def _checked_member_parts(name: str, seen: set[tuple[str, ...]]) -> tuple[str, ...]:
+    """Split one archive member name into parts, rejecting repeated paths."""
+
+    parts = _archive_member_parts(name)
+    if parts in seen:
+        raise Live2DMasterDataArchiveError(f"archive contains a duplicate path: {name!r}")
+    seen.add(parts)
+    return parts
+
+
+def _create_member_directory(target: Path, name: str) -> None:
+    """Create one archive directory below the extraction root."""
+
+    if target.exists() and not target.is_dir():
+        raise Live2DMasterDataArchiveError(f"archive path collides with a file: {name!r}")
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Live2DMasterDataArchiveError(
+            f"cannot extract archive directory {name!r}: {exc}"
+        ) from exc
+
+
+def _checked_file_target(target: Path, extract_root: Path, name: str) -> None:
+    """Ensure one file member's parent is safe and its path is unused."""
+
+    _ensure_archive_parent(target, extract_root)
+    if target.exists() or target.is_symlink():
+        raise Live2DMasterDataArchiveError(f"archive path collides with an existing path: {name!r}")
+
+
+def _reject_unsupported_tar_member(member: tarfile.TarInfo) -> None:
+    """Reject tar members that are links or unsupported special files."""
+
+    if member.issym() or member.islnk():
+        raise Live2DMasterDataArchiveError(
+            f"archive contains a symbolic or hard link: {member.name!r}"
+        )
+    if not member.isdir() and not member.isfile():
+        raise Live2DMasterDataArchiveError(
+            f"archive contains an unsupported special file: {member.name!r}"
+        )
+
+
+def _copy_tar_member(
+    archive: tarfile.TarFile,
+    member: tarfile.TarInfo,
+    target: Path,
+    extract_root: Path,
+    extracted_bytes: int,
+    max_extracted_bytes: int,
+) -> int:
+    """Copy one regular tar member below the extraction root and return its size."""
+
+    _checked_file_target(target, extract_root, member.name)
+    source = archive.extractfile(member)
+    if source is None:
+        raise Live2DMasterDataArchiveError(f"cannot read archive member: {member.name!r}")
+    with source:
+        return _copy_archive_file(source, target, member.size, extracted_bytes, max_extracted_bytes)
+
+
 def _extract_tar_archive(
     archive_path: Path,
     extract_root: Path,
@@ -369,57 +447,23 @@ def _extract_tar_archive(
 ) -> None:
     try:
         with tarfile.open(archive_path, mode="r:*") as archive:
-            members = archive.getmembers()
             seen: set[tuple[str, ...]] = set()
             extracted_bytes = 0
-            for member in members:
-                parts = _archive_member_parts(member.name)
-                if parts in seen:
-                    raise Live2DMasterDataArchiveError(
-                        f"archive contains a duplicate path: {member.name!r}"
-                    )
-                seen.add(parts)
-                if member.issym() or member.islnk():
-                    raise Live2DMasterDataArchiveError(
-                        f"archive contains a symbolic or hard link: {member.name!r}"
-                    )
-                if not member.isdir() and not member.isfile():
-                    raise Live2DMasterDataArchiveError(
-                        f"archive contains an unsupported special file: {member.name!r}"
-                    )
-
+            for member in archive.getmembers():
+                parts = _checked_member_parts(member.name, seen)
+                _reject_unsupported_tar_member(member)
                 target = _archive_target(extract_root, parts)
                 if member.isdir():
-                    if target.exists() and not target.is_dir():
-                        raise Live2DMasterDataArchiveError(
-                            f"archive path collides with a file: {member.name!r}"
-                        )
-                    try:
-                        target.mkdir(parents=True, exist_ok=True)
-                    except OSError as exc:
-                        raise Live2DMasterDataArchiveError(
-                            f"cannot extract archive directory {member.name!r}: {exc}"
-                        ) from exc
+                    _create_member_directory(target, member.name)
                     continue
-
-                _ensure_archive_parent(target, extract_root)
-                if target.exists() or target.is_symlink():
-                    raise Live2DMasterDataArchiveError(
-                        f"archive path collides with an existing path: {member.name!r}"
-                    )
-                source = archive.extractfile(member)
-                if source is None:
-                    raise Live2DMasterDataArchiveError(
-                        f"cannot read archive member: {member.name!r}"
-                    )
-                with source:
-                    extracted_bytes += _copy_archive_file(
-                        source,
-                        target,
-                        member.size,
-                        extracted_bytes,
-                        max_extracted_bytes,
-                    )
+                extracted_bytes += _copy_tar_member(
+                    archive,
+                    member,
+                    target,
+                    extract_root,
+                    extracted_bytes,
+                    max_extracted_bytes,
+                )
     except Live2DMasterDataError:
         raise
     except (OSError, EOFError, tarfile.TarError) as exc:
@@ -430,6 +474,40 @@ def _extract_tar_archive(
 
 def _zip_member_mode(info: zipfile.ZipInfo) -> int:
     return (info.external_attr >> 16) & 0xFFFF
+
+
+def _reject_unsupported_zip_member(info: zipfile.ZipInfo) -> None:
+    """Reject zip members that are links or unsupported special files."""
+
+    mode = _zip_member_mode(info)
+    if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
+        raise Live2DMasterDataArchiveError(
+            f"archive contains an unsupported link or special file: {info.filename!r}"
+        )
+
+
+def _copy_zip_member(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    target: Path,
+    extract_root: Path,
+    extracted_bytes: int,
+    max_extracted_bytes: int,
+) -> int:
+    """Copy one regular zip member below the extraction root and return its size."""
+
+    _checked_file_target(target, extract_root, info.filename)
+    try:
+        with archive.open(info) as source:
+            return _copy_archive_file(
+                source, target, info.file_size, extracted_bytes, max_extracted_bytes
+            )
+    except Live2DMasterDataError:
+        raise
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise Live2DMasterDataArchiveError(
+            f"cannot extract archive member {info.filename!r}"
+        ) from exc
 
 
 def _extract_zip_archive(
@@ -443,53 +521,20 @@ def _extract_zip_archive(
             seen: set[tuple[str, ...]] = set()
             extracted_bytes = 0
             for info in archive.infolist():
-                parts = _archive_member_parts(info.filename)
-                if parts in seen:
-                    raise Live2DMasterDataArchiveError(
-                        f"archive contains a duplicate path: {info.filename!r}"
-                    )
-                seen.add(parts)
-                mode = _zip_member_mode(info)
-                file_type = stat.S_IFMT(mode)
-                if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
-                    raise Live2DMasterDataArchiveError(
-                        f"archive contains an unsupported link or special file: {info.filename!r}"
-                    )
-
+                parts = _checked_member_parts(info.filename, seen)
+                _reject_unsupported_zip_member(info)
                 target = _archive_target(extract_root, parts)
                 if info.is_dir() or info.filename.endswith("/"):
-                    if target.exists() and not target.is_dir():
-                        raise Live2DMasterDataArchiveError(
-                            f"archive path collides with a file: {info.filename!r}"
-                        )
-                    try:
-                        target.mkdir(parents=True, exist_ok=True)
-                    except OSError as exc:
-                        raise Live2DMasterDataArchiveError(
-                            f"cannot extract archive directory {info.filename!r}: {exc}"
-                        ) from exc
+                    _create_member_directory(target, info.filename)
                     continue
-
-                _ensure_archive_parent(target, extract_root)
-                if target.exists() or target.is_symlink():
-                    raise Live2DMasterDataArchiveError(
-                        f"archive path collides with an existing path: {info.filename!r}"
-                    )
-                try:
-                    with archive.open(info) as source:
-                        extracted_bytes += _copy_archive_file(
-                            source,
-                            target,
-                            info.file_size,
-                            extracted_bytes,
-                            max_extracted_bytes,
-                        )
-                except Live2DMasterDataError:
-                    raise
-                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
-                    raise Live2DMasterDataArchiveError(
-                        f"cannot extract archive member {info.filename!r}"
-                    ) from exc
+                extracted_bytes += _copy_zip_member(
+                    archive,
+                    info,
+                    target,
+                    extract_root,
+                    extracted_bytes,
+                    max_extracted_bytes,
+                )
     except Live2DMasterDataError:
         raise
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
@@ -618,7 +663,7 @@ class LocalMasterDataProvider:
         object.__setattr__(self, "root", root)
 
         if not isinstance(self.master_db_version, str) or not self.master_db_version.strip():
-            raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+            raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
 
     def load_live2d_snapshot(self) -> Live2DMasterDataSnapshot:
         """Read and normalize exactly the six required Live2D table files."""
@@ -687,6 +732,40 @@ def _request_timeout(value: object) -> float | None:
     return timeout
 
 
+def _checked_content_length(content_length: object, max_archive_bytes: int) -> None:
+    """Reject a declared Content-Length outside the configured download limit."""
+
+    if content_length is None:
+        return
+    try:
+        declared_size = int(content_length)
+    except (TypeError, ValueError) as exc:
+        raise Live2DMasterDataDownloadError(
+            "online Live2D master-data archive has an invalid Content-Length"
+        ) from exc
+    if declared_size < 0 or declared_size > max_archive_bytes:
+        raise Live2DMasterDataDownloadError(
+            "online Live2D master-data archive exceeds the configured download size limit"
+        )
+
+
+def _save_response_body(response: IO[bytes], destination: Path, max_archive_bytes: int) -> None:
+    """Stream the response body to destination, enforcing the download size limit."""
+
+    downloaded_bytes = 0
+    with destination.open("wb") as output:
+        while True:
+            chunk = response.read(_ARCHIVE_CHUNK_SIZE)
+            if not chunk:
+                break
+            downloaded_bytes += len(chunk)
+            if downloaded_bytes > max_archive_bytes:
+                raise Live2DMasterDataDownloadError(
+                    "online Live2D master-data archive exceeds the configured download size limit"
+                )
+            output.write(chunk)
+
+
 def _download_archive(
     archive_url: str,
     destination: Path,
@@ -709,33 +788,11 @@ def _download_archive(
                 )
             headers = getattr(response, "headers", None)
             content_length = headers.get("Content-Length") if headers is not None else None
-            if content_length is not None:
-                try:
-                    declared_size = int(content_length)
-                except (TypeError, ValueError) as exc:
-                    raise Live2DMasterDataDownloadError(
-                        "online Live2D master-data archive has an invalid Content-Length"
-                    ) from exc
-                if declared_size < 0 or declared_size > max_archive_bytes:
-                    raise Live2DMasterDataDownloadError(
-                        "online Live2D master-data archive exceeds the configured download size limit"
-                    )
-
-            downloaded_bytes = 0
-            with destination.open("wb") as output:
-                while True:
-                    chunk = response.read(_ARCHIVE_CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    downloaded_bytes += len(chunk)
-                    if downloaded_bytes > max_archive_bytes:
-                        raise Live2DMasterDataDownloadError(
-                            "online Live2D master-data archive exceeds the configured download size limit"
-                        )
-                    output.write(chunk)
+            _checked_content_length(content_length, max_archive_bytes)
+            _save_response_body(response, destination, max_archive_bytes)
     except Live2DMasterDataError:
         raise
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except (URLError, OSError) as exc:
         raise Live2DMasterDataDownloadError(
             f"cannot download online Live2D master-data archive: {sanitize_url(archive_url)}"
         ) from exc
@@ -804,7 +861,7 @@ def prepare_online_master_data(
         else master_db_version
     )
     if not isinstance(version, str) or not version.strip():
-        raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+        raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
 
     request_timeout = _request_timeout(timeout)
     try:

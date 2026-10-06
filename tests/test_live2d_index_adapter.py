@@ -90,12 +90,13 @@ def test_explicit_adapter_path_matching_remains_case_sensitive(tmp_path: Path) -
     )
     assert exact.output_path == "Actual-Output"
 
+    case_sensitive_bundle = model_bundle()
     with pytest.raises(Live2DIndexAdapterError, match="referenced directory is missing"):
         build_model_output_record(
             output_root=tmp_path,
             output_path="actual_output",
             model_output_id="case-sensitive",
-            bundle=model_bundle(),
+            bundle=case_sensitive_bundle,
             metadata_version=METADATA_VERSION,
         )
 

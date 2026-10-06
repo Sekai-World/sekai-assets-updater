@@ -67,9 +67,7 @@ def _is_known_fbx_read_error(exc: Exception) -> bool:
     return "failed to fill whole buffer" in message or "fbx" in message
 
 
-def _export_model_fbx(
-    unity_file, output_root: StdPath, bundle_name: str, exported_files: list[StdPath]
-) -> None:
+def _validate_fbx_bundle_name(bundle_name: str) -> None:
     if (
         not isinstance(bundle_name, str)
         or not bundle_name
@@ -80,6 +78,37 @@ def _export_model_fbx(
     components = bundle_name.split("/")
     if any(component in ("", ".", "..") for component in components):
         raise ValueError("invalid bundleName for FBX export")
+
+
+def _write_fbx_payload(
+    fbx_dir: StdPath, payload, fbx_written: list[tuple[StdPath, bytes | None]]
+) -> None:
+    fbx_path = fbx_dir / "model.fbx"
+    fbx_written.append((fbx_path, fbx_path.read_bytes() if fbx_path.exists() else None))
+    atomic_write_bytes(fbx_path, payload.fbx)
+    for texture in payload.textures:
+        texture_path = fbx_dir / texture.file_name
+        fbx_written.append(
+            (texture_path, texture_path.read_bytes() if texture_path.exists() else None)
+        )
+        atomic_write_bytes(texture_path, texture.data)
+
+
+def _rollback_fbx_outputs(fbx_written: list[tuple[StdPath, bytes | None]]) -> None:
+    for path, previous_data in reversed(fbx_written):
+        try:
+            if previous_data is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic_write_bytes(path, previous_data)
+        except OSError:
+            logger.warning("Failed to roll back FBX output %s", path, exc_info=True)
+
+
+def _export_model_fbx(
+    unity_file, output_root: StdPath, bundle_name: str, exported_files: list[StdPath]
+) -> None:
+    _validate_fbx_bundle_name(bundle_name)
     # resolve_secure_path permits legitimate nested POSIX paths while
     # rejecting absolute/traversal paths; validate_output_target additionally
     # rejects a pre-existing symlink at the bundle directory itself.
@@ -97,24 +126,9 @@ def _export_model_fbx(
     fbx_dir.mkdir(parents=True, exist_ok=True)
     fbx_written: list[tuple[StdPath, bytes | None]] = []
     try:
-        fbx_path = fbx_dir / "model.fbx"
-        fbx_written.append((fbx_path, fbx_path.read_bytes() if fbx_path.exists() else None))
-        atomic_write_bytes(fbx_path, payload.fbx)
-        for texture in payload.textures:
-            texture_path = fbx_dir / texture.file_name
-            fbx_written.append(
-                (texture_path, texture_path.read_bytes() if texture_path.exists() else None)
-            )
-            atomic_write_bytes(texture_path, texture.data)
+        _write_fbx_payload(fbx_dir, payload, fbx_written)
     except Exception:
-        for path, previous_data in reversed(fbx_written):
-            try:
-                if previous_data is None:
-                    path.unlink(missing_ok=True)
-                else:
-                    atomic_write_bytes(path, previous_data)
-            except OSError:
-                logger.warning("Failed to roll back FBX output %s", path, exc_info=True)
+        _rollback_fbx_outputs(fbx_written)
         # Do not remove a bundle directory that may contain ordinary exports.
         try:
             fbx_dir.rmdir()

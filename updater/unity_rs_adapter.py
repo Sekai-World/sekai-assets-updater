@@ -292,22 +292,26 @@ class UnityRsEnvironment:
         if not self.container:
             self._load_object_containers()
 
+    def _register_container_item(self, item) -> None:
+        if len(item) != 4:
+            return
+        container_path, _preload_index, _preload_size, identity = item
+        if not isinstance(container_path, str) or not isinstance(identity, tuple):
+            return
+        target = self._by_identity.get(identity)
+        if target is None:
+            return
+        current = self.container.get(container_path)
+        if current is None or not _texture_supersedes(current, target):
+            self.container[container_path] = target
+        self._container_paths[identity] = container_path
+
     def _load_asset_bundle_containers(self, read_asset_bundle: Callable) -> None:
         for obj in self.objects:
             if obj.class_id != 142:
                 continue
             for item in read_asset_bundle(obj.file_index, obj.path_id).container:
-                if len(item) != 4:
-                    continue
-                container_path, _preload_index, _preload_size, identity = item
-                if not isinstance(container_path, str) or not isinstance(identity, tuple):
-                    continue
-                target = self._by_identity.get(identity)
-                if target is not None:
-                    current = self.container.get(container_path)
-                    if current is None or not _texture_supersedes(current, target):
-                        self.container[container_path] = target
-                    self._container_paths[identity] = container_path
+                self._register_container_item(item)
 
     def _load_object_containers(self) -> None:
         for obj in self.objects:

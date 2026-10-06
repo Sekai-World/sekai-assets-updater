@@ -133,44 +133,46 @@ def get_class_name(data: dict, script_map: dict) -> str:
     return info.get("className", "unknown")
 
 
+def _mono_track_data(all_objects: dict, script_map: dict, class_name: str) -> dict:
+    """Return {path_id: data} for MonoBehaviour objects of the given track class."""
+    return {
+        pid: obj["data"]
+        for pid, obj in all_objects.items()
+        if obj["type"] == "MonoBehaviour" and get_class_name(obj["data"], script_map) == class_name
+    }
+
+
+def _character_from_track(d: dict, suffix: str) -> tuple[int, str] | None:
+    cid = d.get("CharacterId", 0)
+    char_name = d.get("m_Name", "").replace(suffix, "").strip()
+    if cid and char_name:
+        return cid, char_name
+    return None
+
+
 def build_character_map(all_objects: dict, script_map: dict) -> dict:
     """
     Build a CharacterId -> character name map using spawn tracks and talk tracks.
     Character names are derived from track names (e.g. "こはね_入場" -> "こはね").
     """
     # Collect GroupTrack names (not currently used but available)
-    group_names = {}
-    for pid, obj in all_objects.items():
-        if obj["type"] == "MonoBehaviour":
-            d = obj["data"]
-            cls = get_class_name(d, script_map)
-            if cls == "GroupTrack":
-                group_names[pid] = d.get("m_Name", "")
+    group_names = {  # noqa: F841
+        pid: d.get("m_Name", "")
+        for pid, d in _mono_track_data(all_objects, script_map, "GroupTrack").items()
+    }
 
     # Extract from spawn tracks
     char_id_map = {}
-    for _pid, obj in all_objects.items():
-        if obj["type"] == "MonoBehaviour":
-            d = obj["data"]
-            cls = get_class_name(d, script_map)
-            if cls == "MCTimelineCharacterSpawnTrack":
-                cid = d.get("CharacterId", 0)
-                name = d.get("m_Name", "")
-                char_name = name.replace("_入場", "").strip()
-                if cid and char_name:
-                    char_id_map[cid] = char_name
+    for d in _mono_track_data(all_objects, script_map, "MCTimelineCharacterSpawnTrack").values():
+        entry = _character_from_track(d, "_入場")
+        if entry is not None:
+            char_id_map[entry[0]] = entry[1]
 
     # Supplement using talk tracks
-    for _pid, obj in all_objects.items():
-        if obj["type"] == "MonoBehaviour":
-            d = obj["data"]
-            cls = get_class_name(d, script_map)
-            if cls == "MCTimelineCharacterTalkTrack":
-                cid = d.get("CharacterId", 0)
-                name = d.get("m_Name", "")
-                char_name = name.replace("_Talk", "").strip()
-                if cid and char_name and cid not in char_id_map:
-                    char_id_map[cid] = char_name
+    for d in _mono_track_data(all_objects, script_map, "MCTimelineCharacterTalkTrack").values():
+        entry = _character_from_track(d, "_Talk")
+        if entry is not None and entry[0] not in char_id_map:
+            char_id_map[entry[0]] = entry[1]
 
     return char_id_map
 

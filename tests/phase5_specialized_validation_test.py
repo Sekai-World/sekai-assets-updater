@@ -65,10 +65,9 @@ def test_validate_config_rejects_unreleased_or_malformed_unity_versions(
 ) -> None:
     monkeypatch.setattr(configuration.shutil, "which", lambda _program: "/usr/bin/fake")
 
+    config = _valid_config(UNITY_VERSION=unity_version)
     with pytest.raises(ValueError) as caught:
-        configuration.validate_config(  # type: ignore[arg-type]
-            _valid_config(UNITY_VERSION=unity_version)
-        )
+        configuration.validate_config(config)  # type: ignore[arg-type]
 
     assert "UNITY_VERSION must be a released Unity version" in str(caught.value)
     assert repr(unity_version) in str(caught.value)

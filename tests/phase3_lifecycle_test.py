@@ -112,8 +112,9 @@ def test_current_invalid_network_version_remains_a_commit_error(
     monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
     monkeypatch.setattr(pending, "get_download_list", fake_plan)
 
+    main_coro = runner.main(force_full_download=True)
     with pytest.raises(state.StateValidationError, match="assetVersion"):
-        asyncio.run(runner.main(force_full_download=True))
+        asyncio.run(main_coro)
 
 
 def test_empty_calculated_queue_commits_checkpoints_then_leaves_no_pending_queue(

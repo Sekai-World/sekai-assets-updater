@@ -70,11 +70,13 @@ async def _prepare_jacket(jacket: str) -> tuple[str, tempfile.TemporaryDirectory
     tmpdir = tempfile.TemporaryDirectory()
     target_path = Path(tmpdir.name) / "jacket.png"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(jacket) as response:
-            response.raise_for_status()
-            async with await open_file(target_path, "wb") as f:
-                await f.write(await response.read())
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(jacket) as response,
+    ):
+        response.raise_for_status()
+        async with await open_file(target_path, "wb") as f:
+            await f.write(await response.read())
 
     return target_path.as_uri(), tmpdir
 
@@ -107,10 +109,12 @@ async def render_chart(score_path: str, chart_path: str, music: dict, jacket: st
 
 async def get_list(url: str) -> List[dict]:
     # use aiohttp to get the list from url
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            response.raise_for_status()
-            return await response.json()
+    async with (
+        aiohttp.ClientSession() as session,
+        session.get(url) as response,
+    ):
+        response.raise_for_status()
+        return await response.json()
 
 
 def get_json_url(server: str, json_name: str) -> str:

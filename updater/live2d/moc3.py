@@ -14,15 +14,15 @@ def extract_params_ids_from_moc3(moc3: bytes) -> Dict[str, str]:
     """Extract parameter IDs from moc3 file"""
     bs = BinaryStream(BytesIO(moc3))
     bs.base_stream.seek(0x4C)
-    part_base_addr = bs.readUInt32()
-    part_end_addr = bs.readUInt32()
+    part_base_addr = bs.read_uint32()
+    part_end_addr = bs.read_uint32()
 
     cursor = part_base_addr
     param_id_map = {}
 
     while part_end_addr - cursor > 64:
         bs.base_stream.seek(cursor)
-        param_id = bs.readStringToNull()
+        param_id = bs.read_string_to_null()
         crc = str(crc32(param_id))
         param_id_map[crc] = param_id.decode()
         crc = str(crc32(b"Parts/" + param_id))
@@ -31,14 +31,14 @@ def extract_params_ids_from_moc3(moc3: bytes) -> Dict[str, str]:
         cursor += 64
 
     bs.base_stream.seek(0x108)
-    param_base_addr = bs.readUInt32()
-    param_end_addr = bs.readUInt32()
+    param_base_addr = bs.read_uint32()
+    param_end_addr = bs.read_uint32()
 
     cursor = param_base_addr
 
     while param_end_addr - cursor > 64:
         bs.base_stream.seek(cursor)
-        param_id = bs.readStringToNull()
+        param_id = bs.read_string_to_null()
         crc = str(crc32(param_id))
         param_id_map[crc] = param_id.decode()
         crc = str(crc32(b"Parameters/" + param_id))
