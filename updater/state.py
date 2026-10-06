@@ -104,37 +104,60 @@ def validate_pending_queue(value: Any) -> list[list[Any]]:
     return result
 
 
-def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
+def _validate_bundle_identity(value: Any, path: str) -> None:
+    """Require a bundle object with a non-empty ``bundleName``."""
     if not isinstance(value, dict):
         raise StateValidationError(f"{path} must be an object")
     bundle_name = value.get("bundleName")
     if not isinstance(bundle_name, str) or not bundle_name.strip():
         _fail(f"{path}.bundleName must be non-empty")
-    normalized = copy.deepcopy(value)
+
+
+def _validate_bundle_optional_strings(normalized: dict[str, Any], path: str) -> None:
     for field in {"downloadPath", "md5", "sha256"}:
         if field in normalized and (
             not isinstance(normalized[field], str) or not normalized[field].strip()
         ):
             _fail(f"{path}.{field} must be a non-empty string")
+
+
+def _validate_bundle_hash(normalized: dict[str, Any], path: str) -> bool:
     bundle_hash = normalized.get("hash")
     has_hash = isinstance(bundle_hash, str) and bool(bundle_hash.strip())
     if "hash" in normalized and not isinstance(bundle_hash, str):
         _fail(f"{path}.hash must be a string")
-    if "crc" in normalized:
-        crc = normalized["crc"]
-        if isinstance(crc, bool) or not isinstance(crc, (str, int, float)):
-            _fail(f"{path}.crc must be numeric or a non-empty string")
-        if isinstance(crc, float) and not math.isfinite(crc):
-            _fail(f"{path}.crc must be finite")
-        if isinstance(crc, str) and not crc.strip():
-            _fail(f"{path}.crc must be non-empty when present")
-        normalized["crc"] = str(crc)
-    has_crc = "crc" in normalized
-    if not has_hash and not has_crc:
-        _fail(f"{path} must contain a non-empty hash or CRC")
+    return has_hash
+
+
+def _validate_bundle_crc(normalized: dict[str, Any], path: str) -> bool:
+    if "crc" not in normalized:
+        return False
+    crc = normalized["crc"]
+    if isinstance(crc, bool) or not isinstance(crc, (str, int, float)):
+        _fail(f"{path}.crc must be numeric or a non-empty string")
+    if isinstance(crc, float) and not math.isfinite(crc):
+        _fail(f"{path}.crc must be finite")
+    if isinstance(crc, str) and not crc.strip():
+        _fail(f"{path}.crc must be non-empty when present")
+    normalized["crc"] = str(crc)
+    return True
+
+
+def _validate_bundle_sizes(normalized: dict[str, Any], path: str) -> None:
     for field in {"fileSize", "size"}:
         if field in normalized and (type(normalized[field]) is not int or normalized[field] < 0):
             _fail(f"{path}.{field} must be a non-negative integer")
+
+
+def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
+    _validate_bundle_identity(value, path)
+    normalized = copy.deepcopy(value)
+    _validate_bundle_optional_strings(normalized, path)
+    has_hash = _validate_bundle_hash(normalized, path)
+    has_crc = _validate_bundle_crc(normalized, path)
+    if not has_hash and not has_crc:
+        _fail(f"{path} must contain a non-empty hash or CRC")
+    _validate_bundle_sizes(normalized, path)
     _validate_json_value(normalized, path)
     return normalized
 
@@ -603,6 +626,49 @@ def _state_set(
     return paths
 
 
+def _resolve_replay_paths(
+    journal_path: os.PathLike[str] | str | StatePaths,
+    queue_path: os.PathLike[str] | str | None,
+    asset_metadata_path: os.PathLike[str] | str | None,
+    game_version_path: os.PathLike[str] | str | None,
+) -> StatePaths:
+    if isinstance(journal_path, StatePaths):
+        if any(path is not None for path in (queue_path, asset_metadata_path, game_version_path)):
+            raise StateValidationError("StatePaths replay cannot be combined with path arguments")
+        paths = journal_path
+        _state_set(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
+        return paths
+    if any(path is None for path in (queue_path, asset_metadata_path, game_version_path)):
+        raise StateValidationError("replay_journal requires queue, metadata, and version paths")
+    return _state_set(
+        journal_path,
+        queue_path,  # type: ignore[arg-type]
+        asset_metadata_path,  # type: ignore[arg-type]
+        game_version_path,  # type: ignore[arg-type]
+    )
+
+
+def _load_replay_envelope(
+    journal: Path, verified_envelope: _VerifiedJournal | None
+) -> dict[str, Any] | None:
+    if verified_envelope is None:
+        # Startup and all callers receiving a journal from disk must use this
+        # strict path.  In particular, do not optimize away full metadata
+        # validation for an envelope that was not created in this process.
+        try:
+            return load_journal(journal)
+        except StateNotFoundError:
+            return None
+    if not isinstance(verified_envelope, _VerifiedJournal):
+        raise StateValidationError("replay received an unverified journal envelope")
+    if verified_envelope.journal_path != journal:
+        raise StateValidationError("verified journal envelope path mismatch")
+    envelope = dict(verified_envelope)
+    if not journal.exists():
+        raise StateNotFoundError(f"state file does not exist: {journal}")
+    return envelope
+
+
 def replay_journal(
     journal_path: os.PathLike[str] | str | StatePaths,
     queue_path: os.PathLike[str] | str | None = None,
@@ -619,37 +685,11 @@ def replay_journal(
     corrupt or absent.
     """
 
-    if isinstance(journal_path, StatePaths):
-        if any(path is not None for path in (queue_path, asset_metadata_path, game_version_path)):
-            raise StateValidationError("StatePaths replay cannot be combined with path arguments")
-        paths = journal_path
-        _state_set(paths.journal, paths.queue, paths.asset_metadata, paths.game_version)
-    else:
-        if any(path is None for path in (queue_path, asset_metadata_path, game_version_path)):
-            raise StateValidationError("replay_journal requires queue, metadata, and version paths")
-        paths = _state_set(
-            journal_path,
-            queue_path,  # type: ignore[arg-type]
-            asset_metadata_path,  # type: ignore[arg-type]
-            game_version_path,  # type: ignore[arg-type]
-        )
+    paths = _resolve_replay_paths(journal_path, queue_path, asset_metadata_path, game_version_path)
     journal = paths.journal
-    if _verified_envelope is None:
-        # Startup and all callers receiving a journal from disk must use this
-        # strict path.  In particular, do not optimize away full metadata
-        # validation for an envelope that was not created in this process.
-        try:
-            envelope = load_journal(journal)
-        except StateNotFoundError:
-            return False
-    else:
-        if not isinstance(_verified_envelope, _VerifiedJournal):
-            raise StateValidationError("replay received an unverified journal envelope")
-        if _verified_envelope.journal_path != journal:
-            raise StateValidationError("verified journal envelope path mismatch")
-        envelope = dict(_verified_envelope)
-        if not journal.exists():
-            raise StateNotFoundError(f"state file does not exist: {journal}")
+    envelope = _load_replay_envelope(journal, _verified_envelope)
+    if envelope is None:
+        return False
     atomic_write_json(paths.queue, envelope["queue"], validate_pending_queue)
     atomic_write_json(paths.asset_metadata, envelope["asset_metadata"], validate_asset_metadata)
     atomic_write_json(paths.game_version, envelope["game_version"], validate_game_version)

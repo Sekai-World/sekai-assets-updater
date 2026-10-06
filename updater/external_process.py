@@ -41,6 +41,23 @@ async def terminate_process(process, grace_period: float) -> None:
         await process.wait()
 
 
+async def _await_termination(task: asyncio.Task) -> tuple[bool, BaseException | None]:
+    """Await the shared termination task, recording any deferred cancellation."""
+    cancellation_seen = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            return cancellation_seen, None
+        # Cancellation is deliberately deferred until the shared termination task
+        # finishes, then re-raised by the caller after cleanup, including repeated cancels.
+        except asyncio.CancelledError:  # NOSONAR
+            cancellation_seen = True
+            if task.done():
+                return cancellation_seen, None
+        except Exception as exc:
+            return cancellation_seen, exc
+
+
 async def ensure_process_terminated(
     process,
     terminate: TerminateProcess,
@@ -54,21 +71,7 @@ async def ensure_process_terminated(
         task = asyncio.create_task(terminate(process))
         setattr(process, task_attribute, task)
 
-    cancellation_seen = False
-    cleanup_error: BaseException | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        # Cancellation is deliberately deferred until the shared termination task
-        # finishes, then re-raised below after cleanup, including repeated cancels.
-        except asyncio.CancelledError:  # NOSONAR
-            cancellation_seen = True
-            if task.done():
-                break
-        except Exception as exc:
-            cleanup_error = exc
-            break
+    cancellation_seen, cleanup_error = await _await_termination(task)
 
     if task.done():
         if task.cancelled():

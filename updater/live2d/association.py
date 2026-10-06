@@ -466,6 +466,37 @@ def _motion_variant_kind(rest: str) -> str | None:
     return "variant"
 
 
+def _motion_prefix_rest(
+    leaf: str,
+    asset_name: str,
+    motion: SharedMotionSetRecord,
+) -> str | None:
+    """Return the leaf remainder after the matched asset-name segment, or None."""
+    if leaf.startswith("v2_"):
+        parts = _motion_v2_parts(motion)
+        if parts is None:
+            return None
+        _numeric_prefix, tail = parts
+        candidate = leaf if asset_name.startswith("v2_") else tail
+    else:
+        candidate = leaf
+    if not candidate.startswith(f"{asset_name}_"):
+        return None
+    return candidate[len(asset_name) :]
+
+
+def _motion_leaf_match(
+    leaf: str,
+    asset_name: str,
+    motion: SharedMotionSetRecord,
+) -> tuple[str | None, str] | None:
+    """Match the asset name against the leaf, falling back to reverse matching."""
+    rest = _motion_prefix_rest(leaf, asset_name, motion)
+    if rest is None:
+        return _reverse_motion_match(leaf, asset_name)
+    return _motion_numeric_prefix(motion), rest
+
+
 def _motion_match_kind(
     motion: SharedMotionSetRecord,
     context: _CharacterContext,
@@ -474,28 +505,12 @@ def _motion_match_kind(
     if asset_name is None:
         return None
     leaf = motion.motion_bundle.name.rsplit("/", 1)[-1]
-    numeric_prefix: str | None = None
-    rest: str | None = None
-    if leaf.startswith("v2_"):
-        parts = _motion_v2_parts(motion)
-        if parts is None:
-            return None
-        numeric_prefix, tail = parts
-        if asset_name.startswith("v2_"):
-            if leaf.startswith(f"{asset_name}_"):
-                rest = leaf[len(asset_name) :]
-        else:
-            if tail.startswith(f"{asset_name}_"):
-                rest = tail[len(asset_name) :]
-    else:
-        numeric_prefix = _motion_numeric_prefix(motion)
-        if leaf.startswith(f"{asset_name}_"):
-            rest = leaf[len(asset_name) :]
-    if rest is None:
-        reverse_match = _reverse_motion_match(leaf, asset_name)
-        if reverse_match is None:
-            return None
-        numeric_prefix, rest = reverse_match
+    if leaf.startswith("v2_") and _motion_v2_parts(motion) is None:
+        return None
+    matched = _motion_leaf_match(leaf, asset_name, motion)
+    if matched is None:
+        return None
+    numeric_prefix, rest = matched
     expected_character_id = _numeric_character_id(context.character_id)
     if (
         numeric_prefix is not None

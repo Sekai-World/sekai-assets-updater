@@ -1250,6 +1250,24 @@ def _validate_index_references(
         )
 
 
+def _validate_model_output_model3_rule(record: ModelOutputRecord) -> None:
+    if record.schema_version == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION:
+        if record.model3_path is not None:
+            _integrity_fail(
+                f"model output {record.model_output_id!r} has model3_path in schema version 1"
+            )
+    elif record.schema_version == MODEL_OUTPUT_SCHEMA_VERSION:
+        if record.model3_path is None:
+            _integrity_fail(
+                f"model output {record.model_output_id!r} is missing model3_path in schema version 2"
+            )
+    else:  # pragma: no cover - ModelOutputRecord validates this first.
+        _integrity_fail(
+            f"model output {record.model_output_id!r} has unsupported schema version "
+            f"{record.schema_version!r}"
+        )
+
+
 def _validate_index_record_versions(
     model_outputs: tuple[ModelOutputRecord, ...],
     motion_sets: tuple[SharedMotionSetRecord, ...],
@@ -1258,21 +1276,7 @@ def _validate_index_record_versions(
     for record in model_outputs:
         if record.metadata_version != metadata_version:
             _integrity_fail(f"model metadata version mismatch for {record.model_output_id!r}")
-        if record.schema_version == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION:
-            if record.model3_path is not None:
-                _integrity_fail(
-                    f"model output {record.model_output_id!r} has model3_path in schema version 1"
-                )
-        elif record.schema_version == MODEL_OUTPUT_SCHEMA_VERSION:
-            if record.model3_path is None:
-                _integrity_fail(
-                    f"model output {record.model_output_id!r} is missing model3_path in schema version 2"
-                )
-        else:  # pragma: no cover - ModelOutputRecord validates this first.
-            _integrity_fail(
-                f"model output {record.model_output_id!r} has unsupported schema version "
-                f"{record.schema_version!r}"
-            )
+        _validate_model_output_model3_rule(record)
     for record in motion_sets:
         if record.metadata_version != metadata_version:
             _integrity_fail(f"motion metadata version mismatch for {record.motion_set_id!r}")

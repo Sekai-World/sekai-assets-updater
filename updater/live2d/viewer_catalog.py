@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import TypeAlias
 
 from updater import state
-from updater.live2d.contracts import CandidateStatus, Live2DIndex, validate_index
+from updater.live2d.contracts import (
+    CandidateStatus,
+    Live2DIndex,
+    ModelOutputRecord,
+    SharedMotionSetRecord,
+    validate_index,
+)
 from updater.live2d.publication import validate_live2d_outputs
 
 PathInput: TypeAlias = str | os.PathLike[str]
@@ -114,41 +120,48 @@ def _relative_text(parts: Sequence[str]) -> str:
     return "/".join(parts)
 
 
-def _checked_entry(
+def _inspect_entry(
+    current: Path,
+    relative: str,
+    field_name: str,
+    *,
+    is_final_component: bool,
+) -> os.stat_result:
+    """Lstat one path component, rejecting missing, unsafe, or non-directory parts."""
+    try:
+        entry_stat = current.lstat()
+    except FileNotFoundError as exc:
+        raise Live2DViewerCatalogError(
+            f"{field_name}: referenced path is missing: {relative!r}"
+        ) from exc
+    except NotADirectoryError as exc:
+        raise Live2DViewerCatalogError(
+            f"{field_name}: path component is not a directory: {relative!r}"
+        ) from exc
+    except OSError as exc:
+        raise Live2DViewerCatalogError(
+            f"{field_name}: cannot inspect referenced path {relative!r}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise Live2DViewerCatalogError(
+            f"{field_name}: symlink path components are not allowed: {relative!r}"
+        )
+    if not is_final_component and not stat.S_ISDIR(entry_stat.st_mode):
+        raise Live2DViewerCatalogError(
+            f"{field_name}: path component is not a directory: {relative!r}"
+        )
+    return entry_stat
+
+
+def _check_entry_target(
     root: _Root,
-    parts: tuple[str, ...],
+    current: Path,
+    relative: str,
     field_name: str,
     expected: str,
-) -> Path:
-    current = root.lexical
-    final_stat: os.stat_result | None = None
-    relative = _relative_text(parts)
-    for index, part in enumerate(parts):
-        current /= part
-        try:
-            entry_stat = current.lstat()
-        except FileNotFoundError as exc:
-            raise Live2DViewerCatalogError(
-                f"{field_name}: referenced path is missing: {relative!r}"
-            ) from exc
-        except NotADirectoryError as exc:
-            raise Live2DViewerCatalogError(
-                f"{field_name}: path component is not a directory: {relative!r}"
-            ) from exc
-        except OSError as exc:
-            raise Live2DViewerCatalogError(
-                f"{field_name}: cannot inspect referenced path {relative!r}: {exc}"
-            ) from exc
-        if stat.S_ISLNK(entry_stat.st_mode):
-            raise Live2DViewerCatalogError(
-                f"{field_name}: symlink path components are not allowed: {relative!r}"
-            )
-        if index < len(parts) - 1 and not stat.S_ISDIR(entry_stat.st_mode):
-            raise Live2DViewerCatalogError(
-                f"{field_name}: path component is not a directory: {relative!r}"
-            )
-        final_stat = entry_stat
-
+    final_stat: os.stat_result | None,
+) -> None:
+    """Reject paths that escape the root or do not match the expected entry type."""
     try:
         resolved = current.resolve(strict=True)
         resolved.relative_to(root.resolved)
@@ -166,6 +179,26 @@ def _checked_entry(
         raise Live2DViewerCatalogError(f"{field_name}: expected a directory: {relative!r}")
     if expected == "file" and not stat.S_ISREG(final_stat.st_mode):
         raise Live2DViewerCatalogError(f"{field_name}: expected a regular file: {relative!r}")
+
+
+def _checked_entry(
+    root: _Root,
+    parts: tuple[str, ...],
+    field_name: str,
+    expected: str,
+) -> Path:
+    current = root.lexical
+    final_stat: os.stat_result | None = None
+    relative = _relative_text(parts)
+    for index, part in enumerate(parts):
+        current /= part
+        final_stat = _inspect_entry(
+            current,
+            relative,
+            field_name,
+            is_final_component=index == len(parts) - 1,
+        )
+    _check_entry_target(root, current, relative, field_name, expected, final_stat)
     return current
 
 
@@ -193,26 +226,34 @@ def _validate_source_index(index: IndexInput, output_root: PathInput) -> tuple[L
     return validated, root
 
 
-def find_model3_file(
-    output_root: PathInput,
-    output_path: str,
-    model3_path: str | None = None,
-) -> Path:
-    """Resolve a declared model3 document, with legacy one-file fallback."""
+def _resolve_declared_model3(root: _Root, output_directory: Path, model3_path: str) -> Path:
+    """Resolve an explicitly declared model3 document relative to its output directory."""
+    if not model3_path.endswith(MODEL3_SUFFIX):
+        raise Live2DViewerCatalogError("model3_path: must name a .model3.json file")
+    model3_parts = _relative_parts(model3_path, "model3_path")
+    return _checked_entry(
+        root,
+        output_directory.relative_to(root.lexical).parts + model3_parts,
+        "model3_path",
+        "file",
+    )
 
-    root = _prepare_root(output_root)
-    output_directory = _checked_directory(root, output_path, "model output")
-    if model3_path is not None:
-        if not model3_path.endswith(MODEL3_SUFFIX):
-            raise Live2DViewerCatalogError("model3_path: must name a .model3.json file")
-        model3_parts = _relative_parts(model3_path, "model3_path")
-        return _checked_entry(
-            root,
-            output_directory.relative_to(root.lexical).parts + model3_parts,
-            "model3_path",
-            "file",
-        )
 
+def _require_model_output_entry(entry: Path) -> os.stat_result:
+    """Stat one model-output entry, rejecting unreadable or symlinked entries."""
+    try:
+        entry_stat = entry.lstat()
+    except OSError as exc:
+        raise Live2DViewerCatalogError(
+            f"model output: cannot inspect entry {entry}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(entry_stat.st_mode):
+        raise Live2DViewerCatalogError(f"model output: symlink entries are not allowed: {entry}")
+    return entry_stat
+
+
+def _search_model3_documents(output_directory: Path) -> list[Path]:
+    """Collect every regular ``.model3.json`` document beneath ``output_directory``."""
     pending = [output_directory]
     found: list[Path] = []
     while pending:
@@ -224,21 +265,27 @@ def find_model3_file(
                 f"model output: cannot inspect directory {directory}: {exc}"
             ) from exc
         for entry in entries:
-            try:
-                entry_stat = entry.lstat()
-            except OSError as exc:
-                raise Live2DViewerCatalogError(
-                    f"model output: cannot inspect entry {entry}: {exc}"
-                ) from exc
-            if stat.S_ISLNK(entry_stat.st_mode):
-                raise Live2DViewerCatalogError(
-                    f"model output: symlink entries are not allowed: {entry}"
-                )
+            entry_stat = _require_model_output_entry(entry)
             if stat.S_ISDIR(entry_stat.st_mode):
                 pending.append(entry)
             elif stat.S_ISREG(entry_stat.st_mode) and entry.name.endswith(MODEL3_SUFFIX):
                 found.append(entry)
+    return found
 
+
+def find_model3_file(
+    output_root: PathInput,
+    output_path: str,
+    model3_path: str | None = None,
+) -> Path:
+    """Resolve a declared model3 document, with legacy one-file fallback."""
+
+    root = _prepare_root(output_root)
+    output_directory = _checked_directory(root, output_path, "model output")
+    if model3_path is not None:
+        return _resolve_declared_model3(root, output_directory, model3_path)
+
+    found = _search_model3_documents(output_directory)
     if len(found) != 1:
         detail = ", ".join(path.as_posix() for path in found)
         raise Live2DViewerCatalogError(
@@ -258,59 +305,79 @@ def _public_relative(root: _Root, path: Path, field_name: str) -> str:
     return "/".join(relative.parts)
 
 
-def _asset_files(index: Live2DIndex, root: _Root) -> tuple[tuple[str, Path], ...]:
-    files: dict[str, Path] = {}
-
-    def add_file(key: str, source: Path) -> None:
-        previous = files.get(key)
-        if previous is not None and previous != source:
-            raise Live2DViewerCatalogError(
-                f"public asset path is selected by multiple sources: {key!r}"
-            )
-        files[key] = source
-
-    for record in index.model_outputs:
-        model3 = find_model3_file(root.lexical, record.output_path, record.model3_path)
-        model3_key = _public_relative(root, model3, "model3")
-        add_file(model3_key, model3)
-        reference_directory = record.output_path
-        if record.model3_path is not None:
-            model3_parts = _relative_parts(
-                record.model3_path,
-                f"model_outputs[{record.model_output_id!r}].model3_path",
-            )
-            if len(model3_parts) > 1:
-                reference_directory = f"{record.output_path}/{'/'.join(model3_parts[:-1])}"
-        references = record.file_references
-        model_references = (
-            references.moc,
-            *references.textures,
-            *((references.physics,) if references.physics is not None else ()),
+def _register_public_file(files: dict[str, Path], key: str, source: Path) -> None:
+    previous = files.get(key)
+    if previous is not None and previous != source:
+        raise Live2DViewerCatalogError(
+            f"public asset path is selected by multiple sources: {key!r}"
         )
-        for relative in model_references:
+    files[key] = source
+
+
+def _model_reference_paths(record: ModelOutputRecord) -> tuple[str, ...]:
+    references = record.file_references
+    return (
+        references.moc,
+        *references.textures,
+        *((references.physics,) if references.physics is not None else ()),
+    )
+
+
+def _model_reference_directory(record: ModelOutputRecord) -> str:
+    if record.model3_path is None:
+        return record.output_path
+    model3_parts = _relative_parts(
+        record.model3_path,
+        f"model_outputs[{record.model_output_id!r}].model3_path",
+    )
+    if len(model3_parts) <= 1:
+        return record.output_path
+    return f"{record.output_path}/{'/'.join(model3_parts[:-1])}"
+
+
+def _collect_model_output_files(
+    files: dict[str, Path],
+    root: _Root,
+    record: ModelOutputRecord,
+) -> None:
+    model3 = find_model3_file(root.lexical, record.output_path, record.model3_path)
+    _register_public_file(files, _public_relative(root, model3, "model3"), model3)
+    reference_directory = _model_reference_directory(record)
+    for relative in _model_reference_paths(record):
+        source = _checked_file(
+            root,
+            reference_directory,
+            relative,
+            f"model_outputs[{record.model_output_id!r}].file_references",
+        )
+        _register_public_file(files, _public_relative(root, source, "model reference"), source)
+
+
+def _collect_motion_set_files(
+    files: dict[str, Path],
+    root: _Root,
+    record: SharedMotionSetRecord,
+) -> None:
+    for directory, clips in (
+        (record.motion_output_path, record.known_clips.motions),
+        (record.facial_output_path, record.known_clips.facials),
+    ):
+        for clip in clips:
             source = _checked_file(
                 root,
-                reference_directory,
-                relative,
-                f"model_outputs[{record.model_output_id!r}].file_references",
+                directory,
+                f"{clip}{MOTION3_SUFFIX}",
+                f"motion_sets[{record.motion_set_id!r}].known_clips",
             )
-            add_file(_public_relative(root, source, "model reference"), source)
+            _register_public_file(files, _public_relative(root, source, "motion reference"), source)
 
+
+def _asset_files(index: Live2DIndex, root: _Root) -> tuple[tuple[str, Path], ...]:
+    files: dict[str, Path] = {}
+    for record in index.model_outputs:
+        _collect_model_output_files(files, root, record)
     for record in index.motion_sets:
-        for directory, clips in (
-            (record.motion_output_path, record.known_clips.motions),
-            (record.facial_output_path, record.known_clips.facials),
-        ):
-            for clip in clips:
-                relative = f"{clip}{MOTION3_SUFFIX}"
-                source = _checked_file(
-                    root,
-                    directory,
-                    relative,
-                    f"motion_sets[{record.motion_set_id!r}].known_clips",
-                )
-                add_file(_public_relative(root, source, "motion reference"), source)
-
+        _collect_motion_set_files(files, root, record)
     return tuple(sorted(files.items(), key=lambda item: item[0]))
 
 
