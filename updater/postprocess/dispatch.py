@@ -506,7 +506,6 @@ def _resolve_associated_index_path(
     association_index,
     association_index_path,
     configured_path,
-    configured_selections_path,
 ):
     if association_index is not None and association_index_path is not None:
         raise ValueError(
@@ -846,7 +845,6 @@ async def _process_live2d_associated(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     skip_missing_sources: bool = False,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
@@ -862,7 +860,6 @@ async def _process_live2d_associated(
         association_index,
         association_index_path,
         configured_path,
-        configured_selections_path,
     )
     if _associated_index_source_is_missing(
         association_index,
@@ -1055,7 +1052,6 @@ async def _run_live2d_associated_postprocess(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
     asset_metadata_version: str | None = None,
@@ -1067,7 +1063,6 @@ async def _run_live2d_associated_postprocess(
         association_index_path=association_index_path,
         association_output_root=association_output_root,
         association_namespace_root=association_namespace_root,
-        association_state_path=association_state_path,
         skip_missing_sources=skip_missing_sources,
         motion_outputs_ready=motion_outputs_ready,
         live2d_bundles=live2d_bundles,
@@ -1086,7 +1081,6 @@ async def run_specialized_postprocess(
     association_index_path: StdPath | str | None = None,
     association_output_root: StdPath | None = None,
     association_namespace_root: StdPath | None = None,
-    association_state_path: StdPath | None = None,
     motion_outputs_ready: bool = False,
     live2d_bundles: Mapping[str, Mapping[str, object]] | None = None,
     asset_metadata_version: str | None = None,
@@ -1111,7 +1105,6 @@ async def run_specialized_postprocess(
             association_index_path=association_index_path,
             association_output_root=association_output_root,
             association_namespace_root=association_namespace_root,
-            association_state_path=association_state_path,
             motion_outputs_ready=motion_outputs_ready,
             live2d_bundles=live2d_bundles,
             asset_metadata_version=asset_metadata_version,

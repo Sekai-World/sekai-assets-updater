@@ -25,6 +25,7 @@ LEGACY_MODEL_OUTPUT_SCHEMA_VERSION = 1
 # versioned so legacy indexes can still be parsed when their records omit
 # ``model3_path``.
 MODEL_OUTPUT_SCHEMA_VERSION = 2
+MODEL_OUTPUT_MODEL3_PATH_FIELD = "model_output.model3_path"
 MOTION_SET_SCHEMA_VERSION = 1
 CANDIDATE_SCHEMA_VERSION = 1
 MODEL_ASSOCIATION_SCHEMA_VERSION = 1
@@ -247,9 +248,9 @@ def _validate_model_output_schema_version(
             f"{LEGACY_MODEL_OUTPUT_SCHEMA_VERSION} or {MODEL_OUTPUT_SCHEMA_VERSION}",
         )
     if value == LEGACY_MODEL_OUTPUT_SCHEMA_VERSION and model3_path is not None:
-        _fail("model_output.model3_path", "is not supported by schema version 1")
+        _fail(MODEL_OUTPUT_MODEL3_PATH_FIELD, "is not supported by schema version 1")
     if value == MODEL_OUTPUT_SCHEMA_VERSION and model3_path is None:
-        _fail("model_output.model3_path", "is required by schema version 2")
+        _fail(MODEL_OUTPUT_MODEL3_PATH_FIELD, "is required by schema version 2")
     return value
 
 
@@ -844,7 +845,7 @@ class ModelOutputRecord(_Contract):
         object.__setattr__(self, "file_references", references)
         _validate_relative_path(self.output_path, "model_output.output_path")
         if self.model3_path is not None:
-            model3_path = _validate_relative_path(self.model3_path, "model_output.model3_path")
+            model3_path = _validate_relative_path(self.model3_path, MODEL_OUTPUT_MODEL3_PATH_FIELD)
             if not model3_path.endswith(".model3.json"):
                 _fail("model_output.model3_path", "must name a .model3.json file")
             object.__setattr__(self, "model3_path", model3_path)
@@ -1288,7 +1289,7 @@ def _validate_index_bundle_names(
     if overlapping_names:
         _fail(
             "index Bundle identities",
-            f"duplicate identity {sorted(overlapping_names)[0]!r}",
+            f"duplicate identity {min(overlapping_names)!r}",
         )
 
 

@@ -674,15 +674,12 @@ def commit_empty_transaction(paths: StatePaths, asset_metadata: Any, game_versio
     read-back/rewrite path used for a general queue transaction.
     """
     envelope = create_journal(paths, [], asset_metadata, game_version)
-    try:
-        atomic_write_json(paths.queue, envelope["queue"], validate_pending_queue)
-        atomic_write_json(paths.asset_metadata, envelope["asset_metadata"], validate_asset_metadata)
-        atomic_write_json(paths.game_version, envelope["game_version"], validate_game_version)
-        durable_unlink(paths.journal)
-    except BaseException:
-        # Keep the authoritative journal for startup recovery.  In particular,
-        # do not attempt cleanup after a partial commit.
-        raise
+    # Keep the authoritative journal when a write fails, for startup recovery.
+    # In particular, do not attempt cleanup after a partial commit.
+    atomic_write_json(paths.queue, envelope["queue"], validate_pending_queue)
+    atomic_write_json(paths.asset_metadata, envelope["asset_metadata"], validate_asset_metadata)
+    atomic_write_json(paths.game_version, envelope["game_version"], validate_game_version)
+    durable_unlink(paths.journal)
 
 
 class StateLock:

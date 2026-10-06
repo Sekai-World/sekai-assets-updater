@@ -116,24 +116,24 @@ async def _fetch_game_version(config: ConfigLike, headers: Dict[str, str]) -> Di
     if not config.GAME_VERSION_JSON_URL:
         raise ValueError("GAME_VERSION_JSON_URL is not set in the config")
     try:
-        async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-            async with _safe_http_request(
+        async with (
+            aiohttp.ClientSession(**get_http_session_options(config)) as session,
+            _safe_http_request(
                 session,
                 config.GAME_VERSION_JSON_URL,
                 headers,
                 "Failed to fetch game version json",
-            ) as response:
-                if response.status != 200:
-                    raise RuntimeError(
-                        "Failed to fetch game version json from "
-                        f"{sanitize_url(config.GAME_VERSION_JSON_URL)}"
-                    )
-                game_version_json = await response.json(content_type="text/plain")
-                if not isinstance(game_version_json, dict) or "appVersion" not in game_version_json:
-                    raise ValueError(
-                        f"Invalid JSON from {sanitize_url(config.GAME_VERSION_JSON_URL)}"
-                    )
-                return normalize_game_version(game_version_json)
+            ) as response,
+        ):
+            if response.status != 200:
+                raise RuntimeError(
+                    "Failed to fetch game version json from "
+                    f"{sanitize_url(config.GAME_VERSION_JSON_URL)}"
+                )
+            game_version_json = await response.json(content_type="text/plain")
+            if not isinstance(game_version_json, dict) or "appVersion" not in game_version_json:
+                raise ValueError(f"Invalid JSON from {sanitize_url(config.GAME_VERSION_JSON_URL)}")
+            return normalize_game_version(game_version_json)
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         raise _transport_error(
             "Failed to fetch game version json", config.GAME_VERSION_JSON_URL, exc
@@ -160,26 +160,28 @@ async def _fetch_assetbundle_host_hash(
         appVersion=game_version_json["appVersion"],
         appHash=app_hash,
     )
-    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-        async with _safe_http_request(
+    async with (
+        aiohttp.ClientSession(**get_http_session_options(config)) as session,
+        _safe_http_request(
             session, game_version_url, headers, "Failed to fetch assetbundle host hash"
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(
-                    "Failed to fetch assetbundle host hash from %s, status: %s, "
-                    "response headers: %s, request headers: %s"
-                    % (
-                        sanitize_url(game_version_url),
-                        response.status,
-                        sanitize_headers(response.headers),
-                        sanitize_headers(headers),
-                    )
+        ) as response,
+    ):
+        if response.status != 200:
+            raise RuntimeError(
+                "Failed to fetch assetbundle host hash from %s, status: %s, "
+                "response headers: %s, request headers: %s"
+                % (
+                    sanitize_url(game_version_url),
+                    response.status,
+                    sanitize_headers(response.headers),
+                    sanitize_headers(headers),
                 )
-            result = await response.read()
-            json_result = unpack(config.AES_KEY, config.AES_IV, result)
-            if not isinstance(json_result, dict) or "assetbundleHostHash" not in json_result:
-                raise ValueError(f"Invalid result from {sanitize_url(game_version_url)}")
-            assetbundle_host_hash = json_result["assetbundleHostHash"]
+            )
+        result = await response.read()
+        json_result = unpack(config.AES_KEY, config.AES_IV, result)
+        if not isinstance(json_result, dict) or "assetbundleHostHash" not in json_result:
+            raise ValueError(f"Invalid result from {sanitize_url(game_version_url)}")
+        assetbundle_host_hash = json_result["assetbundleHostHash"]
     logger.debug(
         "Current assetbundleHostHash: %s, assetHash: %s, game version url: %s",
         assetbundle_host_hash,
@@ -205,15 +207,15 @@ async def _fetch_asset_version(
             getattr(config, "APP_VERSION_OVERRIDE", None) or game_version_json.get("appVersion")
         ),
     )
-    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-        async with _safe_http_request(
+    async with (
+        aiohttp.ClientSession(**get_http_session_options(config)) as session,
+        _safe_http_request(
             session, asset_ver_url, headers, "Failed to fetch asset version"
-        ) as response:
-            if response.status != 200:
-                raise RuntimeError(
-                    f"Failed to fetch asset version from {sanitize_url(asset_ver_url)}"
-                )
-            return (await response.read()).decode()
+        ) as response,
+    ):
+        if response.status != 200:
+            raise RuntimeError(f"Failed to fetch asset version from {sanitize_url(asset_ver_url)}")
+        return (await response.read()).decode()
 
 
 async def _fetch_asset_bundle_metadata(
@@ -244,28 +246,30 @@ async def _fetch_asset_bundle_metadata(
             url_args["assetHash"] = asset_hash
         asset_bundle_info_url = format_url_template(config.ASSET_BUNDLE_INFO_URL, **url_args)
 
-    async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-        async with _safe_http_request(
+    async with (
+        aiohttp.ClientSession(**get_http_session_options(config)) as session,
+        _safe_http_request(
             session,
             asset_bundle_info_url,
             headers,
             "Failed to fetch asset bundle info",
-        ) as response:
-            if response.status != 200:
-                logger.error(
-                    "Failed to fetch asset bundle info from %s, status: %s, request headers: %s",
-                    sanitize_url(asset_bundle_info_url),
-                    response.status,
-                    sanitize_headers(dict(headers)),
-                )
-                raise RuntimeError(
-                    f"Failed to fetch asset bundle info from {sanitize_url(asset_bundle_info_url)}"
-                )
-            result = await response.read()
-            asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
-            if not isinstance(asset_bundle_info, dict):
-                raise ValueError(f"Invalid json from {sanitize_url(asset_bundle_info_url)}")
-            return normalize_asset_bundle_info(asset_bundle_info, fallback_asset_ver=asset_ver)
+        ) as response,
+    ):
+        if response.status != 200:
+            logger.error(
+                "Failed to fetch asset bundle info from %s, status: %s, request headers: %s",
+                sanitize_url(asset_bundle_info_url),
+                response.status,
+                sanitize_headers(dict(headers)),
+            )
+            raise RuntimeError(
+                f"Failed to fetch asset bundle info from {sanitize_url(asset_bundle_info_url)}"
+            )
+        result = await response.read()
+        asset_bundle_info = unpack(config.AES_KEY, config.AES_IV, result)
+        if not isinstance(asset_bundle_info, dict):
+            raise ValueError(f"Invalid json from {sanitize_url(asset_bundle_info_url)}")
+        return normalize_asset_bundle_info(asset_bundle_info, fallback_asset_ver=asset_ver)
 
 
 async def fetch_asset_bundle_info(

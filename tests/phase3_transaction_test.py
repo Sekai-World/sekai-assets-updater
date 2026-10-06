@@ -202,8 +202,10 @@ def test_empty_transaction_failure_retains_journal_for_recovery(
         return original_write(path, data, validator)
 
     monkeypatch.setattr(state, "atomic_write_json", fail_after_queue)
+    recovered_metadata = _metadata("recovered", "fresh")
+    recovered_version = _version()
     with pytest.raises(state.StatePersistenceError):
-        state.commit_empty_transaction(paths, _metadata("recovered", "fresh"), _version())
+        state.commit_empty_transaction(paths, recovered_metadata, recovered_version)
     assert paths.journal.exists()
 
     monkeypatch.setattr(state, "atomic_write_json", original_write)
@@ -381,8 +383,9 @@ def test_charts_uses_legacy_lock_without_replaying_journal_and_releases(
     monkeypatch.setattr(configuration, "config", config)
 
     async def fake_postprocess(*_args, **_kwargs):
+        lock = state.StateLock(paths.lock)
         with pytest.raises(state.StateLockError, match="already held"):
-            state.StateLock(paths.lock).acquire()
+            lock.acquire()
 
     monkeypatch.setattr(runner, "run_specialized_postprocess", fake_postprocess)
     asyncio.run(runner.main(mode="charts"))

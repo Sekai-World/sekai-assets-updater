@@ -75,18 +75,20 @@ async def refresh_cookie(
     if config.GAME_COOKIE_URL:
         transport_error = None
         try:
-            async with aiohttp.ClientSession(**get_http_session_options(config)) as session:
-                async with session.post(
+            async with (
+                aiohttp.ClientSession(**get_http_session_options(config)) as session,
+                session.post(
                     config.GAME_COOKIE_URL, headers=build_cookie_request_headers()
-                ) as response:
-                    if response.status == 200:
-                        cookie = build_cookie_header(response.headers.getall("Set-Cookie", []))
-                        assert cookie, "Cookie is empty"
-                        headers["Cookie"] = cookie
-                    else:
-                        raise RuntimeError(
-                            f"Failed to fetch cookie from {sanitize_url(config.GAME_COOKIE_URL)}"
-                        )
+                ) as response,
+            ):
+                if response.status == 200:
+                    cookie = build_cookie_header(response.headers.getall("Set-Cookie", []))
+                    assert cookie, "Cookie is empty"
+                    headers["Cookie"] = cookie
+                else:
+                    raise RuntimeError(
+                        f"Failed to fetch cookie from {sanitize_url(config.GAME_COOKIE_URL)}"
+                    )
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             transport_error = RuntimeError(
                 "Failed to fetch cookie from "

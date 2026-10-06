@@ -12,7 +12,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 import cridecoder
 
@@ -20,9 +20,8 @@ __all__ = ["extract_usm"]
 
 
 def extract_usm(
-    usm: Union[bytes, str, os.PathLike[str]],
+    usm: bytes | str | os.PathLike[str],
     target_dir: str,
-    fallback_name: bytes = b"",
     *args,
     export_audio: bool = True,
 ) -> list[str]:
@@ -56,7 +55,7 @@ def extract_usm(
 
 def main(invocation, usm_file, target_dir, *args):
     # args[0] = key (decimal)
-    for output in extract_usm(Path(usm_file), target_dir, b"", *args):
+    for output in extract_usm(Path(usm_file), target_dir, *args):
         print(output)
 
 

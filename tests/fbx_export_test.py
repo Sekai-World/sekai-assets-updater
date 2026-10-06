@@ -125,8 +125,9 @@ def test_unrelated_fbx_reader_oserror_is_not_swallowed(monkeypatch, tmp_path):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("permission denied")),
     )
 
+    model = SimpleNamespace()
     with pytest.raises(OSError, match="permission denied"):
-        sync_worker._export_model_fbx(SimpleNamespace(), tmp_path, "bundle", [])
+        sync_worker._export_model_fbx(model, tmp_path, "bundle", [])
 
 
 def test_fbx_write_failure_rolls_back_this_export(monkeypatch, tmp_path):
@@ -146,8 +147,9 @@ def test_fbx_write_failure_rolls_back_this_export(monkeypatch, tmp_path):
     monkeypatch.setattr(sync_worker, "atomic_write_bytes", fail_on_second_texture)
     exported = []
 
+    model = SimpleNamespace()
     with pytest.raises(OSError, match="disk full"):
-        sync_worker._export_model_fbx(SimpleNamespace(), tmp_path, "bundle", exported)
+        sync_worker._export_model_fbx(model, tmp_path, "bundle", exported)
 
     assert exported == []
     assert not (tmp_path / "bundle" / "fbx").exists()
@@ -162,12 +164,14 @@ def test_image_pixel_mismatch_is_not_downgraded(monkeypatch, tmp_path):
         unity_objects, "render_image_asset", lambda _obj: (_ for _ in ()).throw(error)
     )
 
+    texture_target = tmp_path / "texture"
+    holder = SimpleNamespace()
     with pytest.raises(UnsupportedUnityObjectError, match="pixel length"):
         unity_objects._extract_one_object(
-            SimpleNamespace(),
+            holder,
             "texture.asset",
             obj,
-            tmp_path / "texture",
+            texture_target,
             ("png",),
             False,
             2,

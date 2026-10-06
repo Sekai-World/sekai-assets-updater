@@ -12,7 +12,7 @@ import shutil
 import tempfile
 from io import BufferedReader, BytesIO
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 import cridecoder
 
@@ -192,7 +192,7 @@ def decode_acb_bytes(
 
 
 def extract_acb(
-    acb_file: Union[BytesIO, BufferedReader],
+    acb_file: BytesIO | BufferedReader,
     target_dir: str,
     acb_file_path: str,
     cue_name: Optional[str] = None,

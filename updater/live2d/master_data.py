@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import IO, Protocol, runtime_checkable
-from urllib.error import HTTPError, URLError
+from urllib.error import URLError
 from urllib.parse import quote, unquote, urlsplit
 from urllib.request import urlopen
 
@@ -51,6 +51,9 @@ DEFAULT_MASTER_DATA_EXTRACTED_MAX_BYTES = 512 * 1024 * 1024
 _ARCHIVE_CHUNK_SIZE = 1024 * 1024
 _ARCHIVE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".zip")
 _VERSION_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:+-]*$")
+
+
+MASTER_DB_VERSION_REQUIRED_MESSAGE = "master_db_version must be provided as a non-empty string"
 
 
 class Live2DMasterDataError(ValueError):
@@ -125,7 +128,7 @@ class Live2DMasterDataSnapshot:
 
     def __post_init__(self) -> None:
         if not isinstance(self.master_db_version, str) or not self.master_db_version.strip():
-            raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+            raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
         if not isinstance(self.tables, Mapping):
             raise Live2DMasterDataShapeError(
                 "normalized Live2D tables must be a mapping of the six required tables"
@@ -618,7 +621,7 @@ class LocalMasterDataProvider:
         object.__setattr__(self, "root", root)
 
         if not isinstance(self.master_db_version, str) or not self.master_db_version.strip():
-            raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+            raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
 
     def load_live2d_snapshot(self) -> Live2DMasterDataSnapshot:
         """Read and normalize exactly the six required Live2D table files."""
@@ -735,7 +738,7 @@ def _download_archive(
                     output.write(chunk)
     except Live2DMasterDataError:
         raise
-    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+    except (URLError, OSError) as exc:
         raise Live2DMasterDataDownloadError(
             f"cannot download online Live2D master-data archive: {sanitize_url(archive_url)}"
         ) from exc
@@ -804,7 +807,7 @@ def prepare_online_master_data(
         else master_db_version
     )
     if not isinstance(version, str) or not version.strip():
-        raise Live2DMasterDataError("master_db_version must be provided as a non-empty string")
+        raise Live2DMasterDataError(MASTER_DB_VERSION_REQUIRED_MESSAGE)
 
     request_timeout = _request_timeout(timeout)
     try:
