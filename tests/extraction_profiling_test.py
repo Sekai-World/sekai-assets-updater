@@ -83,8 +83,9 @@ def test_extract_single_bundle_propagates_failure_without_queue_side_effects(
         bundle_save_path=AnyioPath(tmp_path / "first.bundle"),
     )
 
+    extract_coro = pipeline.extract_single_bundle(artifact, config)
     with pytest.raises(RuntimeError, match="synthetic extraction failure"):
-        asyncio.run(pipeline.extract_single_bundle(artifact, config))
+        asyncio.run(extract_coro)
 
     assert artifact.exported_list is None
     assert artifact.extracted_save_path is not None
