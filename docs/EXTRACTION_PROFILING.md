@@ -51,30 +51,39 @@ profile file with one record per bundle plus a final run summary record.
 
 ### Record schemas
 
-All records carry `"version": 1` and the `pipeline_id`. `item` is the sanitized
+All records carry `"version": 2` and the `pipeline_id`. `item` is the sanitized
 bundle label (same value as pipeline log lines; no URLs, no credentials).
 
 Bundle record (successful extraction):
 
 ```json
-{"record": "bundle", "version": 1, "pipeline_id": "1a2b3c4d", "ts": 1760000000.123, "item": "bundle-label", "status": "ok", "duration_sec": 0.411973, "output_count": 37, "output_bytes": 2841923}
+{"record": "bundle", "version": 2, "pipeline_id": "1a2b3c4d", "ts": 1760000000.123, "item": "bundle-label", "status": "ok", "duration_sec": 0.411973, "output_count": 37, "output_bytes": 2841923, "cost_class": "media"}
 ```
 
 Bundle record (failed extraction):
 
 ```json
-{"record": "bundle", "version": 1, "pipeline_id": "1a2b3c4d", "ts": 1760000001.456, "item": "bundle-label", "status": "error", "duration_sec": 0.032011, "output_count": 0, "output_bytes": 0, "error_class": "RuntimeError"}
+{"record": "bundle", "version": 2, "pipeline_id": "1a2b3c4d", "ts": 1760000001.456, "item": "bundle-label", "status": "error", "duration_sec": 0.032011, "output_count": 0, "output_bytes": 0, "error_class": "RuntimeError", "cost_class": "light"}
 ```
 
 Only the exception **class name** is recorded — never the message — because
 error messages can embed URLs or filesystem paths. Cancelled extractions are
 not recorded (cancellation is a run-level event, not a bundle failure).
 
+`cost_class` (version 2) is the advisory routing tag stamped by the adaptive
+extraction scheduler on claim (`"light"` or `"media"` from
+`EXTRACT_MEDIA_BUNDLE_HINTS`, extraction-worker roadmap Phase 3). It is
+omitted when the tag is absent (fixed scheduler mode or standalone
+extraction), so v2 records from a fixed-mode run are a superset of v1.
+Comparing `cost_class` against the measured `duration_sec` per bundle is the
+intended feedback loop for tuning the hints: they stay advisory and never
+gate correctness.
+
 Run summary record (written when the pipeline finishes; `status` is
 `completed` or `aborted`):
 
 ```json
-{"record": "summary", "version": 1, "pipeline_id": "1a2b3c4d", "ts": 1760000002.789, "status": "completed", "bundles": 4310, "failed": 2, "total_extraction_sec": 1820.412341, "total_idle_sec": 931.702115, "output_count": 91230, "output_bytes": 5368709120, "queue_depth_avg": 0.4215, "queue_depth_max": 6}
+{"record": "summary", "version": 2, "pipeline_id": "1a2b3c4d", "ts": 1760000002.789, "status": "completed", "bundles": 4310, "failed": 2, "total_extraction_sec": 1820.412341, "total_idle_sec": 931.702115, "output_count": 91230, "output_bytes": 5368709120, "queue_depth_avg": 0.4215, "queue_depth_max": 6}
 ```
 
 ### guarantees

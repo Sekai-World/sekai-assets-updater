@@ -23,7 +23,12 @@ from updater.security import validate_contained_file
 logger = logging.getLogger("live2d")
 
 _get_shared_audio_file_semaphore = _bundle_runtime.audio_file_semaphore
-_get_shared_extract_process_pool = _bundle_runtime.extract_process_pool
+
+
+def _resolve_extract_pool(config, cost_class: str | None):
+    """Select the core or media extract pool for an artifact's cost class."""
+
+    return _bundle_runtime.extract_pool_for(config, cost_class)
 
 
 def _discard_exported_file(exported_files: list[Path], file_path: Path) -> None:
@@ -118,8 +123,14 @@ async def extract_asset_bundle(
     unity_version: str = None,
     config=None,
     bundle_cache_root: Path | None = None,
+    cost_class: str | None = None,
 ) -> List[Path]:
-    """Extract the asset bundle to the specified directory."""
+    """Extract the asset bundle to the specified directory.
+
+    ``cost_class`` is the adaptive scheduler's advisory tag: media-classified
+    bundles run on the media extract pool, all other values (including None)
+    keep the legacy shared pool.
+    """
     live2d_bundle = is_live2d_bundle(bundle)
     if getattr(config, "UPDATER_MODE", "assets") in {"live2d", "live2d-associated"} and bundle.get(
         "bundleName", ""
@@ -131,7 +142,7 @@ async def extract_asset_bundle(
         getattr(config, "ENABLE_MODEL3D_FBX_EXPORT", False)
     )
     exported_paths, audio_jobs, video_jobs = await loop.run_in_executor(
-        _get_shared_extract_process_pool(config),
+        _resolve_extract_pool(config, cost_class),
         partial(
             _extract_bundle_files_sync,
             bundle_save_path.as_posix(),

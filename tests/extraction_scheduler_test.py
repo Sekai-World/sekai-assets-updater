@@ -84,6 +84,30 @@ def test_scheduler_skips_capped_media_artifacts_for_light_ones() -> None:
     asyncio.run(run())
 
 
+def test_scheduler_claim_stamps_artifact_cost_class() -> None:
+    async def run() -> None:
+        scheduler = ExtractionScheduler(capacity=4, media_slots=2, media_hints=MEDIA_HINTS)
+        media = _artifact("media/one")
+        light = _artifact("light/one")
+        await scheduler.put(media)
+        await scheduler.put(light)
+
+        claimed_media = await scheduler.claim()
+        claimed_light = await scheduler.claim()
+
+        assert claimed_media is media
+        assert media.cost_class == MEDIA_COST_CLASS
+        assert claimed_light is light
+        assert light.cost_class == LIGHT_COST_CLASS
+
+        await scheduler.release(media)
+        await scheduler.release(light)
+        assert scheduler.active_count() == 0
+        assert scheduler.active_media_count() == 0
+
+    asyncio.run(run())
+
+
 def test_scheduler_put_blocks_while_pending_queue_is_full() -> None:
     async def run() -> None:
         scheduler = ExtractionScheduler(capacity=1, media_slots=1)
@@ -216,6 +240,41 @@ def test_adaptive_mode_limits_media_concurrency_and_keeps_light_moving(
     assert failed == []
     assert media_active["max"] == 1
     assert "light/one" in light_order
+
+
+def test_adaptive_mode_stamps_cost_class_and_fixed_mode_leaves_it_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, str | None] = {}
+
+    async def fake_extract(_bundle_path, bundle, output_root, cost_class=None, **_kwargs):
+        seen[bundle["bundleName"]] = cost_class
+        output = output_root / "out.txt"
+        await output.write_bytes(b"ok")
+        return [output]
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        await root.joinpath(relative).write_bytes(b"synthetic bundle")
+
+    async def fake_upload(_files, _root, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+
+    items = [("media-one-url", {"bundleName": "media/one"}), ("light-url", {"bundleName": "l"})]
+    adaptive_config = pipeline_config(tmp_path / "adaptive")
+    adaptive_config.EXTRACT_SCHEDULER_MODE = "adaptive"
+    adaptive_config.EXTRACT_MEDIA_BUNDLE_HINTS = [r"^media/"]
+
+    assert asyncio.run(pipeline.run_pipeline(items, adaptive_config, {})) == []
+    assert seen == {"media/one": MEDIA_COST_CLASS, "l": LIGHT_COST_CLASS}
+
+    seen.clear()
+    fixed_config = pipeline_config(tmp_path / "fixed")
+    assert asyncio.run(pipeline.run_pipeline(items, fixed_config, {})) == []
+    assert seen == {"media/one": None, "l": None}
 
 
 def test_adaptive_mode_without_hints_produces_fixed_mode_outputs(

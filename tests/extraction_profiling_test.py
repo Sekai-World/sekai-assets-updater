@@ -119,27 +119,34 @@ def test_extraction_profiler_aggregates_and_logs_summary(caplog: pytest.LogCaptu
 def test_extraction_profiler_writes_jsonl_profile(tmp_path: Path) -> None:
     profile_path = tmp_path / "profiles" / "run.jsonl"
     profiler = pipeline.ExtractionProfiler("testpipe", profile_path)
-    profiler.record_bundle("bundle-a", 0.5, 3, 300)
-    profiler.record_bundle_failure("bundle-b", 0.25, RuntimeError("secret failure details"))
+    profiler.record_bundle("bundle-a", 0.5, 3, 300, cost_class="media")
+    profiler.record_bundle_failure(
+        "bundle-b", 0.25, RuntimeError("secret failure details"), cost_class="light"
+    )
+    profiler.record_bundle("bundle-c", 0.1, 1, 100)
     profiler.record_queue_depth(1)
     profiler.finish("completed")
 
     raw = profile_path.read_text(encoding="utf-8")
     records = [json.loads(line) for line in raw.splitlines()]
-    assert [record["record"] for record in records] == ["bundle", "bundle", "summary"]
-    ok_record, error_record, summary = records
+    assert [record["record"] for record in records] == ["bundle", "bundle", "bundle", "summary"]
+    ok_record, error_record, unclassified_record, summary = records
     assert ok_record["status"] == "ok"
     assert ok_record["item"] == "bundle-a"
     assert ok_record["output_count"] == 3
     assert ok_record["output_bytes"] == 300
-    assert ok_record["pipeline_id"] == "testpipe"
+    assert ok_record["version"] == 2
+    assert ok_record["cost_class"] == "media"
     assert error_record["status"] == "error"
     assert error_record["error_class"] == "RuntimeError"
+    assert error_record["cost_class"] == "light"
+    assert unclassified_record["status"] == "ok"
+    assert "cost_class" not in unclassified_record
     assert "secret" not in raw
     assert summary["status"] == "completed"
-    assert summary["bundles"] == 2
+    assert summary["bundles"] == 3
     assert summary["failed"] == 1
-    assert summary["total_extraction_sec"] == pytest.approx(0.75)
+    assert summary["total_extraction_sec"] == pytest.approx(0.85)
     assert summary["queue_depth_max"] == 1
 
 

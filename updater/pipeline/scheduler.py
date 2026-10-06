@@ -19,11 +19,17 @@ import re
 from collections import deque
 from typing import TYPE_CHECKING, Any, Dict
 
+from updater.runtime import LIGHT_COST_CLASS, MEDIA_COST_CLASS
+
 if TYPE_CHECKING:
     from updater.pipeline import PipelineArtifact
 
-LIGHT_COST_CLASS = "light"
-MEDIA_COST_CLASS = "media"
+__all__ = [
+    "LIGHT_COST_CLASS",
+    "MEDIA_COST_CLASS",
+    "ExtractionScheduler",
+    "classify_bundle_cost",
+]
 
 
 def classify_bundle_cost(
@@ -79,7 +85,12 @@ class ExtractionScheduler:
             self._admission.notify_all()
 
     async def claim(self) -> PipelineArtifact | None:
-        """Return the next admissible artifact, or None once closed and drained."""
+        """Return the next admissible artifact, or None once closed and drained.
+
+        The claimed artifact's ``cost_class`` is stamped with the advisory
+        classification so downstream extraction can route it to the matching
+        process pool (extraction-worker roadmap Phase 3).
+        """
 
         async with self._admission:
             await self._admission.wait_for(self._has_admissible)
@@ -92,8 +103,9 @@ class ExtractionScheduler:
             )
             artifact = self._pending[index]
             del self._pending[index]
+            artifact.cost_class = self._cost(artifact)
             self._active += 1
-            if self._cost(artifact) == MEDIA_COST_CLASS:
+            if artifact.cost_class == MEDIA_COST_CLASS:
                 self._active_media += 1
         async with self._space_available:
             self._space_available.notify_all()
@@ -103,7 +115,7 @@ class ExtractionScheduler:
         """Free the extraction slot held by a claimed artifact."""
 
         self._active -= 1
-        if self._cost(artifact) == MEDIA_COST_CLASS:
+        if artifact.cost_class == MEDIA_COST_CLASS:
             self._active_media -= 1
         async with self._admission:
             self._admission.notify_all()
