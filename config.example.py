@@ -84,6 +84,25 @@ EXTRACTION_PROFILING = False
 # in the working directory when no local extracted dir is configured.
 EXTRACTION_PROFILE_PATH = None
 
+# Adaptive extraction scheduling (extraction-worker roadmap Phase 2).
+# "fixed" (default) keeps the homogeneous extract stage unchanged; "adaptive"
+# routes extraction through the admission scheduler in
+# updater/pipeline/scheduler.py.
+EXTRACT_SCHEDULER_MODE = "fixed"
+# Upper bound on extract workers in adaptive mode (still capped by
+# MAX_CONCURRENCY_EXTRACTS). None keeps the fixed-stage width.
+EXTRACT_MAX_WORKERS = None
+# Concurrent media-classified extraction slots in adaptive mode; light and
+# unclassified bundles always keep at least one slot. None defaults to half
+# the adaptive worker count (at least one).
+EXTRACT_ADAPTIVE_MEDIA_SLOTS = None
+# Advisory regex hints matched against bundleName to classify bundles as
+# media-heavy for adaptive scheduling. Unclassified bundles stay light, so a
+# burst of heavy bundles cannot consume every extraction slot. Populate these
+# from extraction-profiling data (docs/EXTRACTION_PROFILING.md).
+# Example: [r"^songs/", r"^movie/"]
+EXTRACT_MEDIA_BUNDLE_HINTS = None
+
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 # libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than
