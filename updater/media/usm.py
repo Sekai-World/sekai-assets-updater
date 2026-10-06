@@ -53,11 +53,11 @@ def extract_usm(
                 pass
 
 
-def main(invocation, usm_file, target_dir, *args):
-    # args[0] = key (decimal)
+def main(usm_file, target_dir, *args):
+    # The remaining CLI args are forwarded to extract_usm; the first is the key (decimal).
     for output in extract_usm(Path(usm_file), target_dir, *args):
         print(output)
 
 
 if __name__ == "__main__":
-    main(*sys.argv)
+    main(*sys.argv[1:])
