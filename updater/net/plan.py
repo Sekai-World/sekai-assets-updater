@@ -270,6 +270,7 @@ async def get_download_list(
     automatic_prefixes: tuple[str, ...] = (),
     bundle_cache_path_resolver=None,
     asset_bundle_info_for_cache: Dict | None = None,
+    required_bundle_names: Tuple[str, ...] | List[str] = (),
 ) -> DownloadPlan:
     """Generate the download list for the asset bundles.
 
@@ -313,6 +314,7 @@ async def get_download_list(
         include_list=include_list,
         exclude_list=exclude_list,
         automatic_prefixes=automatic_prefixes,
+        required_bundle_names=required_bundle_names,
     )
     if not current_bundles:
         raise ValueError("No bundles found after filtering")
@@ -394,8 +396,17 @@ def select_bundles_for_download(
     include_list: List[str] | None = None,
     exclude_list: List[str] | None = None,
     automatic_prefixes: tuple[str, ...] = (),
+    required_bundle_names: Tuple[str, ...] | List[str] = (),
 ) -> Dict[str, Dict]:
-    """Select user bundles and merge mandatory specialized bundles."""
+    """Select user bundles and merge mandatory specialized bundles.
+
+    ``required_bundle_names`` unions exact bundle names (GLB package closure
+    members) into the selection, bypassing include/exclude filters the same
+    way ``automatic_prefixes`` does. Empty by default, which keeps the
+    standard filtering behavior byte-for-byte unchanged.
+    """
+
+    required = set(required_bundle_names or ())
     selected: Dict[str, Dict] = {}
     selected_names: set[str] = set()
     for key, value in bundles.items():
@@ -404,7 +415,9 @@ def select_bundles_for_download(
             not include_list or any(re.match(pattern, bundle_name) for pattern in include_list)
         ) and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
         automatic_selected = bundle_name.startswith(automatic_prefixes)
-        if (user_selected or automatic_selected) and bundle_name not in selected_names:
+        if (
+            user_selected or automatic_selected or bundle_name in required
+        ) and bundle_name not in selected_names:
             selected[key] = value
             selected_names.add(bundle_name)
     return selected

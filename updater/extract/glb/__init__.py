@@ -7,6 +7,8 @@ flag default to ``False`` so the standard per-Bundle path is untouched.
 
 from updater.extract.glb.contracts import (
     COMPOSITE_PURPOSE,
+    DIAG_BUNDLE_DOWNLOAD_FAILED,
+    DIAG_CACHE_MISSING,
     DIAG_DEPENDENCY_CYCLE,
     DIAG_DEPENDENCY_EXCLUDED,
     DIAG_DUPLICATE_BUNDLE,
@@ -42,6 +44,17 @@ from updater.extract.glb.contracts import (
     safe_path_segment,
     safe_relative_path,
 )
+from updater.extract.glb.downloads import (
+    PackageReadiness,
+    association_bytes,
+    bundle_record_changed,
+    download_failure_diagnostic,
+    evaluate_package_readiness,
+    load_plan_associations,
+    persist_plan_associations,
+    plan_download_requirements,
+    requirement_names,
+)
 from updater.extract.glb.flags import (
     FLAG_NAMES,
     GLBFlags,
@@ -55,6 +68,8 @@ from updater.extract.glb.observability import (
 
 __all__ = [
     "COMPOSITE_PURPOSE",
+    "DIAG_BUNDLE_DOWNLOAD_FAILED",
+    "DIAG_CACHE_MISSING",
     "DIAG_DEPENDENCY_CYCLE",
     "DIAG_DEPENDENCY_EXCLUDED",
     "DIAG_DUPLICATE_BUNDLE",
@@ -76,6 +91,7 @@ __all__ = [
     "GLBFlags",
     "LIVE2D_PURPOSE",
     "PLAN_VERSION",
+    "PackageReadiness",
     "SCENE3D_PURPOSE",
     "SEVERITIES",
     "STANDARD_PURPOSE",
@@ -88,10 +104,18 @@ __all__ = [
     "PlanDiagnostic",
     "PlanValidationError",
     "RootRef",
+    "association_bytes",
+    "bundle_record_changed",
     "canonical_json_bytes",
+    "download_failure_diagnostic",
+    "evaluate_package_readiness",
+    "load_plan_associations",
     "log_plan_built",
     "log_plan_diagnostic",
     "log_plan_diagnostics",
+    "persist_plan_associations",
+    "plan_download_requirements",
+    "requirement_names",
     "resolve_glb_flags",
     "safe_relative_path",
     "safe_path_segment",
