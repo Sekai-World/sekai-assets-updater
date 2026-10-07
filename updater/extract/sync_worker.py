@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from updater.extract.glb.collection import GlbCollectionExtraction
+    from updater.extract.glb.export import GlbExport
 
 from updater.extract.acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
@@ -601,3 +602,68 @@ def extract_collection_sync(
     manifest_path_obj.parent.mkdir(parents=True, exist_ok=True)
     persist_package_manifest(manifest_path_obj, manifest)
     return GlbCollectionExtraction(manifest=manifest, report=report)
+
+
+def export_root_glb_sync(
+    plan,
+    bundle_payloads: list[tuple[str, bytes]],
+    unity_version: str,
+    package_manifest_path: str,
+    root_identity: tuple[int, int],
+    glb_path: str,
+    export_manifest_path: str,
+    *,
+    include_fbx_diagnostic: bool = False,
+    fbx_path: str | None = None,
+) -> "GlbExport":
+    """Export one root's subtree as an atomically published GLB (#38).
+
+    The package loads and validates exactly like
+    :func:`extract_collection_sync`; a non-publishable package is refused
+    before anything is written.  Otherwise the root-scoped GLB is built in
+    memory, structurally validated, and only then published atomically
+    together with its export manifest (and optional FBX diagnostic).
+    """
+
+    from updater.extract.glb.collection import (
+        GlbCollectionExtraction,
+        PackageNotPublishable,
+        build_package_manifest,
+        load_package_collection,
+        persist_package_manifest,
+        validate_collection_reachability,
+    )
+    from updater.extract.glb.export import export_root_glb, persist_export_manifest
+    from updater.security import atomic_write_bytes
+
+    environment, table = load_package_collection(plan, bundle_payloads, unity_version)
+    report = validate_collection_reachability(environment, table, plan.roots)
+    if not report.publishable:
+        raise PackageNotPublishable(report)
+    package_manifest = build_package_manifest(
+        plan, bundle_payloads, unity_version, report, environment, table
+    )
+    extraction = GlbCollectionExtraction(manifest=package_manifest, report=report)
+    export = export_root_glb(
+        environment,
+        table,
+        extraction,
+        root_identity,
+        include_fbx_diagnostic=include_fbx_diagnostic,
+    )
+
+    glb_target = StdPath(glb_path)
+    glb_target.parent.mkdir(parents=True, exist_ok=True)
+    export_manifest_target = StdPath(export_manifest_path)
+    export_manifest_target.parent.mkdir(parents=True, exist_ok=True)
+    package_manifest_target = StdPath(package_manifest_path)
+    package_manifest_target.parent.mkdir(parents=True, exist_ok=True)
+
+    persist_package_manifest(package_manifest_target, package_manifest)
+    atomic_write_bytes(glb_target, export.glb_bytes)
+    persist_export_manifest(export_manifest_target, export.manifest)
+    if include_fbx_diagnostic and export.fbx_diagnostic is not None and fbx_path:
+        fbx_target = StdPath(fbx_path)
+        fbx_target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(fbx_target, export.fbx_diagnostic)
+    return export
