@@ -83,6 +83,12 @@ EXTRACTION_PROFILING = False
 # extraction-profile-<pipeline_id>.jsonl next to ASSET_LOCAL_EXTRACTED_DIR, or
 # in the working directory when no local extracted dir is configured.
 EXTRACTION_PROFILE_PATH = None
+# Optional Prometheus textfile metrics path (extraction-worker roadmap Phase 5).
+# After each pipeline run, a .prom-format snapshot (extraction totals by cost
+# class, failures, worker utilisation, queue depth, media saturation) is
+# written here for a Prometheus textfile collector. None disables the export;
+# write failures degrade to a warning and never affect extraction.
+PROMETHEUS_METRICS_PATH = None
 
 # Adaptive extraction scheduling (extraction-worker roadmap Phase 2).
 # "fixed" (default) keeps the homogeneous extract stage unchanged; "adaptive"
