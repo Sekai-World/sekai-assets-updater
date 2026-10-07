@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -277,6 +278,113 @@ def test_adaptive_mode_stamps_cost_class_and_fixed_mode_leaves_it_unset(
     assert seen == {"media/one": None, "l": None}
 
 
+def test_adaptive_mode_survives_process_pool_crash_and_records_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uploads: list[tuple[str, bytes]] = []
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        await root.joinpath(relative).write_bytes(b"synthetic bundle")
+
+    async def crashing_extract(_bundle_path, bundle, output_root, **_kwargs):
+        if bundle["bundleName"] == "crash":
+            raise BrokenProcessPool("extract worker process died")
+        output = output_root / "out.txt"
+        await output.write_bytes(b"ok")
+        return [output]
+
+    async def fake_upload(files, _root, *_args, **_kwargs):
+        uploads.append((files[0].name, b"ok"))
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", crashing_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+    config = pipeline_config(tmp_path / "extracted")
+    config.EXTRACT_SCHEDULER_MODE = "adaptive"
+
+    items = [("crash-url", {"bundleName": "crash"}), ("ok-url", {"bundleName": "ok"})]
+    failed = asyncio.run(pipeline.run_pipeline(items, config, {}))
+
+    assert failed == [("crash-url", {"bundleName": "crash"})]
+    assert uploads == [("out.txt", b"ok")]
+
+
+def test_adaptive_mode_isolates_same_identity_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uploads: list[tuple[str, Path, bytes]] = []
+    staging_roots: list[Path] = []
+    extract_calls = {"count": 0}
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        await root.joinpath(relative).write_bytes(b"synthetic bundle")
+
+    async def fake_extract(_bundle_path, _bundle, output_root, **_kwargs):
+        extract_calls["count"] += 1
+        staging_roots.append(Path(output_root.as_posix()))
+        output = output_root / "out.txt"
+        await output.write_bytes(f"payload-{extract_calls['count']}".encode())
+        return [output]
+
+    async def fake_upload(files, _root, *_args, **_kwargs):
+        exported = Path(files[0].as_posix())
+        uploads.append((exported, exported.parent, exported.read_bytes()))
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+    config = pipeline_config(tmp_path / "extracted")
+    config.EXTRACT_SCHEDULER_MODE = "adaptive"
+    items = [
+        ("twin-url-1", {"bundleName": "twin"}),
+        ("twin-url-2", {"bundleName": "twin"}),
+    ]
+
+    failed = asyncio.run(pipeline.run_pipeline(items, config, {}))
+
+    assert failed == []
+    assert len(uploads) == 2
+    assert len({parent for _file, parent, _data in uploads}) == 2
+    assert len(set(staging_roots)) == 2
+    assert sorted(data for _file, _parent, data in uploads) == [b"payload-1", b"payload-2"]
+
+
+def test_adaptive_mode_routes_live2d_bundle_into_aggregate_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extract_roots: list[Path] = []
+
+    async def fake_download(_url, root, relative, **_kwargs):
+        await root.joinpath(relative).write_bytes(b"synthetic bundle")
+
+    async def fake_extract(_bundle_path, _bundle, output_root, **_kwargs):
+        extract_roots.append(Path(output_root.as_posix()))
+        output = output_root / "model.json"
+        await output.write_bytes(b"{}")
+        return [output]
+
+    async def fake_upload(_files, _root, *_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+    config = pipeline_config(tmp_path / "workspace")
+    config.EXTRACT_SCHEDULER_MODE = "adaptive"
+    config.UPDATER_MODE = "live2d"
+
+    failed = asyncio.run(
+        pipeline.run_pipeline([("live2d-url", {"bundleName": "live2d/model/x"})], config, {})
+    )
+
+    assert failed == []
+    # Invariant I6: specialized bundles extract straight into the run
+    # workspace (no per-identity staging dir) and survive upload.
+    workspace_root = (tmp_path / "workspace").resolve()
+    assert [root.resolve() for root in extract_roots] == [workspace_root]
+    assert (workspace_root / "model.json").exists()
+
+
 def test_adaptive_mode_without_hints_produces_fixed_mode_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -342,6 +450,7 @@ def test_adaptive_mode_cleans_pending_artifacts_on_cancellation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     reserved: list[str] = []
+    staging_roots: list[Path] = []
     original_reserve = pipeline._reserve_temporary_bundle_path
 
     def recording_reserve() -> str:
@@ -355,6 +464,7 @@ def test_adaptive_mode_cleans_pending_artifacts_on_cancellation(
         await root.joinpath(relative).write_bytes(b"synthetic bundle")
 
     async def blocked_extract(_bundle_path, _bundle, output_root, **_kwargs):
+        staging_roots.append(Path(output_root.as_posix()))
         output = output_root / "partial.txt"
         await output.write_bytes(b"partial")
         extract_started.set()
@@ -382,3 +492,7 @@ def test_adaptive_mode_cleans_pending_artifacts_on_cancellation(
 
     assert reserved
     assert all(not Path(path).exists() for path in reserved)
+    # A worker cancelled mid-extraction must not leak its staging directory
+    # either (invariant I8: no temporary files survive a cancelled run).
+    assert staging_roots
+    assert all(not root.exists() for root in staging_roots)
