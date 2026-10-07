@@ -18,6 +18,7 @@ from updater.modes import (
 from updater.net.disk_space import build_download_disk_space_gate
 from updater.net.plan import (
     DownloadItem,
+    _sanitize_asset_bundle_info,
     dedupe_download_items,
     select_bundles_for_download,
 )
@@ -28,7 +29,9 @@ from updater.sanitize import sanitize_http_log_value
 from updater.state import (
     StatePaths,
     atomic_write_json,
+    create_journal,
     durable_unlink,
+    replay_journal,
     validate_asset_metadata,
     validate_game_version,
     validate_pending_queue,
@@ -113,7 +116,8 @@ async def _write_metadata_only_cache(
     paths: StatePaths | None = None,
 ) -> None:
     logger.info("RUN | step=2/2 | action=write_metadata_cache")
-    current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
+    sanitized_metadata = _sanitize_asset_bundle_info(asset_bundle_info)
+    current_bundles: Dict[str, Dict] = sanitized_metadata.get("bundles", {})
     if not current_bundles:
         raise ValueError("bundles must be set in asset bundle info")
 
@@ -127,8 +131,8 @@ async def _write_metadata_only_cache(
         raise ValueError("No bundles found after filtering")
 
     metadata = {
-        "version": asset_bundle_info.get("version", ""),
-        "os": asset_bundle_info.get("os", ""),
+        "version": sanitized_metadata.get("version", ""),
+        "os": sanitized_metadata.get("os", ""),
         "bundles": current_bundles,
     }
     if paths is None:
@@ -274,6 +278,35 @@ async def _cleanup_pending_cache_on_success(
     )
 
 
+async def _commit_successful_selection(
+    cfg: ConfigLike,
+    pending_items_outside_mode: List[DownloadItem],
+    paths: StatePaths | None,
+    asset_metadata: Dict[str, Any],
+    game_version: Dict[str, Any],
+) -> None:
+    """Commit processed-selection provenance only after download success.
+
+    The final queue and metadata are journaled together, so a crash cannot
+    publish the new snapshot while restoring an old pending queue (or vice
+    versa). The earlier pre-pipeline journal retains the prior snapshot.
+    """
+    queue_items = [list(item) for item in pending_items_outside_mode]
+    if paths is not None:
+        journal = create_journal(paths, queue_items, asset_metadata, game_version)
+        replay_journal(paths, _verified_envelope=journal)
+        if not queue_items:
+            durable_unlink(paths.queue)
+        return
+
+    await _write_json_cache(cfg.ASSET_BUNDLE_INFO_CACHE_PATH, asset_metadata)
+    await _write_json_cache(cfg.GAME_VERSION_JSON_CACHE_PATH, game_version)
+    if queue_items:
+        await _write_json_cache(cfg.DL_LIST_CACHE_PATH, queue_items)
+    else:
+        await cfg.DL_LIST_CACHE_PATH.unlink(missing_ok=True)
+
+
 async def _complete_with_empty_download_list(
     cfg: ConfigLike,
     mode: str,
@@ -284,6 +317,8 @@ async def _complete_with_empty_download_list(
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
     *,
     asset_metadata_version: str | None = None,
+    successful_asset_metadata: Dict[str, Any] | None = None,
+    successful_game_version: Dict[str, Any] | None = None,
 ) -> None:
     # An assets run can legitimately have no current downloads. Specialized
     # processors still need to run: Live2D may restore its inputs from the raw
@@ -293,7 +328,15 @@ async def _complete_with_empty_download_list(
         "RUN | result=noop | reason=no_items | postprocess=%s",
         should_postprocess,
     )
-    if pending_items_outside_mode:
+    if successful_asset_metadata is not None and successful_game_version is not None:
+        await _commit_successful_selection(
+            cfg,
+            pending_items_outside_mode,
+            paths,
+            successful_asset_metadata,
+            successful_game_version,
+        )
+    elif pending_items_outside_mode:
         if paths is None:
             await _write_json_cache(cfg.DL_LIST_CACHE_PATH, pending_items_outside_mode)
         else:
@@ -330,6 +373,8 @@ async def _complete_with_download_list(
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
     *,
     asset_metadata_version: str | None = None,
+    successful_asset_metadata: Dict[str, Any] | None = None,
+    successful_game_version: Dict[str, Any] | None = None,
 ) -> None:
     logger.info("RUN | action=download_list_ready | count=%d", len(download_list))
 
@@ -347,9 +392,18 @@ async def _complete_with_download_list(
     if not is_success:
         await _restore_pending_cache_on_failure(cfg, mode, pending_items_outside_mode, paths)
     else:
-        await _cleanup_pending_cache_on_success(
-            cfg, download_list, pending_items_outside_mode, paths
-        )
+        if successful_asset_metadata is not None and successful_game_version is not None:
+            await _commit_successful_selection(
+                cfg,
+                pending_items_outside_mode,
+                paths,
+                successful_asset_metadata,
+                successful_game_version,
+            )
+        else:
+            await _cleanup_pending_cache_on_success(
+                cfg, download_list, pending_items_outside_mode, paths
+            )
         await _run_enabled_specialized_postprocess(
             mode,
             cfg,

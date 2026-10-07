@@ -149,6 +149,22 @@ def _validate_bundle_sizes(normalized: dict[str, Any], path: str) -> None:
             _fail(f"{path}.{field} must be a non-negative integer")
 
 
+def _validate_bundle_provenance(normalized: dict[str, Any], path: str) -> None:
+    provenance_key = "_sekai_assets_updater"
+    if provenance_key not in normalized:
+        return
+    provenance = normalized[provenance_key]
+    if not isinstance(provenance, dict) or set(provenance) != {"processed_checksum"}:
+        _fail(f"{path}.{provenance_key} must contain only processed_checksum")
+    checksum = provenance["processed_checksum"]
+    if not isinstance(checksum, dict) or set(checksum) != {"field", "value"}:
+        _fail(f"{path}.{provenance_key}.processed_checksum must contain only field and value")
+    if not isinstance(checksum["field"], str) or checksum["field"] not in {"hash", "crc"}:
+        _fail(f"{path}.{provenance_key}.processed_checksum.field must be 'hash' or 'crc'")
+    if not isinstance(checksum["value"], str) or not checksum["value"].strip():
+        _fail(f"{path}.{provenance_key}.processed_checksum.value must be a non-empty string")
+
+
 def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
     _validate_bundle_identity(value, path)
     normalized = copy.deepcopy(value)
@@ -158,21 +174,23 @@ def _validate_bundle(value: Any, path: str) -> dict[str, Any]:
     if not has_hash and not has_crc:
         _fail(f"{path} must contain a non-empty hash or CRC")
     _validate_bundle_sizes(normalized, path)
+    _validate_bundle_provenance(normalized, path)
     _validate_json_value(normalized, path)
     return normalized
 
 
 def validate_asset_metadata(value: Any) -> dict[str, Any]:
-    """Validate the current cache shape: ``version``, ``os``, and ``bundles``.
+    """Validate metadata with optional per-bundle processing provenance.
 
     Bundle mapping keys are bundle names and must equal each value's
-    ``bundleName``.  The top-level field set is intentionally strict so a
-    malformed cache cannot be mistaken for a compatible generation.
+    ``bundleName``. The transitional ``processed_bundle_names`` field is
+    accepted only to read metadata written by the intermediate updater patch;
+    it is validated and then dropped, never used as processing evidence.
     """
 
     if not isinstance(value, dict):
         _fail("asset metadata must be an object")
-    if set(value) - {"version", "os", "bundles"}:
+    if set(value) - {"version", "os", "bundles", "processed_bundle_names"}:
         _fail("asset metadata contains unknown fields")
     if "version" in value and (
         not isinstance(value["version"], str) or not value["version"].strip()
@@ -180,19 +198,35 @@ def validate_asset_metadata(value: Any) -> dict[str, Any]:
         _fail("asset metadata.version must be a non-empty string")
     if "os" in value and not isinstance(value["os"], str):
         _fail("asset metadata.os must be a string")
+    if "processed_bundle_names" in value:
+        processed_bundle_names = value["processed_bundle_names"]
+        if not isinstance(processed_bundle_names, list):
+            _fail("asset metadata.processed_bundle_names must be a list")
+        seen_names: set[str] = set()
+        for index, bundle_name in enumerate(processed_bundle_names):
+            if not isinstance(bundle_name, str) or not bundle_name.strip():
+                _fail(f"asset metadata.processed_bundle_names[{index}] must be a non-empty string")
+            if bundle_name in seen_names:
+                _fail(
+                    "asset metadata.processed_bundle_names contains duplicate "
+                    f"bundle name {bundle_name!r}"
+                )
+            seen_names.add(bundle_name)
     bundles = value.get("bundles")
     if not isinstance(bundles, dict):
         _fail("asset metadata.bundles must be a mapping")
     assert isinstance(bundles, dict)
+    normalized = copy.deepcopy(value)
     for key, bundle in bundles.items():
         if not isinstance(key, str) or not key.strip():
             _fail("asset metadata bundle keys must be non-empty strings")
-        bundle = _validate_bundle(bundle, f"asset metadata.bundles[{key!r}]")
-        if bundle["bundleName"] != key:
+        normalized_bundle = _validate_bundle(bundle, f"asset metadata.bundles[{key!r}]")
+        if normalized_bundle["bundleName"] != key:
             _fail(f"asset metadata bundle key {key!r} does not match bundleName")
-        bundles[key] = bundle
-    _validate_json_value(value, "asset metadata")
-    return copy.deepcopy(value)
+        normalized["bundles"][key] = normalized_bundle
+    normalized.pop("processed_bundle_names", None)
+    _validate_json_value(normalized, "asset metadata")
+    return normalized
 
 
 def validate_game_version(value: Any) -> dict[str, Any]:

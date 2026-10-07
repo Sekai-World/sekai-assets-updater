@@ -16,7 +16,11 @@ def _queue():
 
 
 def _metadata():
-    return {"version": "v1", "bundles": {"a": {"bundleName": "a", "hash": "h"}}}
+    return {
+        "version": "v1",
+        "os": "ios",
+        "bundles": {"a": {"bundleName": "a", "hash": "h"}},
+    }
 
 
 def _version():
@@ -204,6 +208,49 @@ def test_metadata_and_version_validation_is_strict() -> None:
     }
     with pytest.raises(state.StateValidationError):
         state.validate_journal(invalid_journal)
+
+
+def test_bundle_provenance_is_optional_strict_and_transitional_names_are_dropped() -> None:
+    legacy_metadata = _metadata()
+    assert state.validate_asset_metadata(legacy_metadata) == legacy_metadata
+
+    marker = {"_sekai_assets_updater": {"processed_checksum": {"field": "hash", "value": "h"}}}
+    marked_metadata = {
+        **legacy_metadata,
+        "bundles": {"a": {**legacy_metadata["bundles"]["a"], **marker}},
+    }
+    assert state.validate_asset_metadata(marked_metadata) == marked_metadata
+
+    for invalid_snapshot in (None, {}, [""], ["a", "a"], ["a", 1]):
+        invalid_metadata = {**legacy_metadata, "processed_bundle_names": invalid_snapshot}
+        with pytest.raises(state.StateValidationError, match="processed_bundle_names"):
+            state.validate_asset_metadata(invalid_metadata)
+    transitional = {**legacy_metadata, "processed_bundle_names": ["a"]}
+    assert state.validate_asset_metadata(transitional) == legacy_metadata
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        None,
+        [],
+        {"other": {"value": "h"}},
+        {"processed_checksum": None},
+        {"processed_checksum": []},
+        {"processed_checksum": {"field": "md5", "value": "h"}},
+        {"processed_checksum": {"field": 1, "value": "h"}},
+        {"processed_checksum": {"field": "hash", "value": ""}},
+        {"processed_checksum": {"field": "hash", "value": 1}},
+        {"processed_checksum": {"field": "hash", "value": "h", "extra": True}},
+        {"processed_checksum": {"field": "hash", "value": "h"}, "extra": True},
+    ],
+)
+def test_malformed_bundle_provenance_is_rejected(marker) -> None:
+    metadata = _metadata()
+    metadata["bundles"]["a"]["_sekai_assets_updater"] = marker
+
+    with pytest.raises(state.StateValidationError):
+        state.validate_asset_metadata(metadata)
 
 
 def test_missing_and_unreadable_state_are_distinct(tmp_path: Path, monkeypatch) -> None:
@@ -406,6 +453,27 @@ def test_journal_replay_repairs_corrupt_targets_in_required_order(
     assert state.load_asset_metadata(paths.asset_metadata) == _metadata()
     assert state.load_game_version(paths.game_version) == _version()
     assert not paths.journal.exists()
+
+
+def test_nested_bundle_provenance_survives_empty_journal_replay(tmp_path: Path) -> None:
+    paths = state.derive_state_paths(
+        tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
+    )
+    metadata = _metadata()
+    metadata["bundles"]["a"]["_sekai_assets_updater"] = {
+        "processed_checksum": {"field": "hash", "value": "h"}
+    }
+
+    journal = state.create_journal(paths, [], metadata, _version(), "snapshot")
+
+    assert set(journal["asset_metadata"]) == {"version", "os", "bundles"}
+    assert (
+        journal["asset_metadata"]["bundles"]["a"]["_sekai_assets_updater"]
+        == metadata["bundles"]["a"]["_sekai_assets_updater"]
+    )
+    assert state.replay_journal(paths, _verified_envelope=journal)
+    assert state.load_pending_queue(paths.queue) == []
+    assert state.load_asset_metadata(paths.asset_metadata) == metadata
 
 
 def test_immediate_replay_uses_verified_envelope_but_still_verifies_targets(

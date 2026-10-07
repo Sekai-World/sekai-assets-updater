@@ -1,5 +1,6 @@
 """Download-list planning: fetch, change-detect, select, dedupe, and sort."""
 
+import copy
 import inspect
 import logging
 import re
@@ -9,6 +10,7 @@ from typing import Dict, List, Tuple
 from updater.net.urls import format_url_template, get_template_placeholders
 from updater.state import (
     StateNotFoundError,
+    StatePersistenceError,
     StateValidationError,
     load_asset_metadata,
     load_game_version,
@@ -27,6 +29,57 @@ class DownloadPlan:
     candidates: List[Tuple[str, Dict]]
     asset_metadata: Dict
     game_version: Dict
+    successful_asset_metadata: Dict | None = None
+
+
+_PROVENANCE_KEY = "_sekai_assets_updater"
+
+
+def _sanitize_asset_bundle_info(asset_bundle_info: Dict) -> Dict:
+    """Copy a manifest while discarding server-supplied local provenance."""
+    source_bundles = asset_bundle_info.get("bundles", {})
+    if isinstance(source_bundles, dict):
+        bundles = {}
+        for key, bundle in source_bundles.items():
+            sanitized_bundle = copy.deepcopy(bundle)
+            if isinstance(sanitized_bundle, dict):
+                sanitized_bundle.pop(_PROVENANCE_KEY, None)
+            bundles[key] = sanitized_bundle
+    else:
+        bundles = copy.deepcopy(source_bundles)
+    return {
+        "version": copy.deepcopy(asset_bundle_info.get("version", "")),
+        "os": copy.deepcopy(asset_bundle_info.get("os", "")),
+        "bundles": bundles,
+    }
+
+
+def _processed_checksum(bundle: Dict) -> Dict[str, str] | None:
+    field, value = get_bundle_checksum(bundle)
+    if field not in {"hash", "crc"} or not value:
+        return None
+    return {"field": field, "value": value}
+
+
+def _bundle_has_current_provenance(bundle: Dict, observed_bundle: Dict) -> bool:
+    provenance = bundle.get(_PROVENANCE_KEY)
+    if not isinstance(provenance, dict):
+        return False
+    marker = provenance.get("processed_checksum")
+    return marker == _processed_checksum(observed_bundle)
+
+
+def _merge_trusted_provenance(current_metadata: Dict, cached_metadata: Dict | None) -> Dict:
+    """Carry validated local markers onto the current sanitized manifest."""
+    merged = copy.deepcopy(current_metadata)
+    cached_bundles = (cached_metadata or {}).get("bundles") or {}
+    for key, bundle in merged["bundles"].items():
+        cached_bundle = cached_bundles.get(key)
+        if isinstance(bundle, dict) and isinstance(cached_bundle, dict):
+            marker = cached_bundle.get(_PROVENANCE_KEY)
+            if marker is not None:
+                bundle[_PROVENANCE_KEY] = copy.deepcopy(marker)
+    return merged
 
 
 def get_bundle_checksum(bundle: Dict) -> Tuple[str | None, str]:
@@ -97,7 +150,11 @@ async def _select_changed_bundles(
 ) -> list[Dict]:
     changed_bundles = []
     for bundle in current_bundles.values():
-        if bundle_has_changed(bundle, cached_bundles.get(bundle.get("bundleName", ""), {})):
+        cached_bundle = cached_bundles.get(bundle.get("bundleName", ""), {})
+        if bundle_has_changed(bundle, cached_bundle):
+            changed_bundles.append(bundle)
+            continue
+        if not _bundle_has_current_provenance(cached_bundle, bundle):
             changed_bundles.append(bundle)
             continue
         if bundle_cache_path_resolver is None:
@@ -233,12 +290,22 @@ async def get_download_list(
     cached_asset_bundle_info, cached_game_version_json = _load_cached_metadata(
         config, force_full_download
     )
+    provenance_metadata = cached_asset_bundle_info
+    if force_full_download:
+        # Force-full skips cached checksums, but retaining a valid prior
+        # snapshot keeps successful selection history without changing which
+        # bundles force-full downloads.
+        try:
+            provenance_metadata = load_asset_metadata(config.ASSET_BUNDLE_INFO_CACHE_PATH)
+        except (StateNotFoundError, StatePersistenceError, StateValidationError):
+            provenance_metadata = None
 
     if assetver is not None:
         game_version_json = dict(game_version_json)
         game_version_json["assetver"] = assetver
 
-    current_bundles: Dict[str, Dict] = asset_bundle_info.get("bundles", {})
+    sanitized_selection_info = _sanitize_asset_bundle_info(asset_bundle_info)
+    current_bundles: Dict[str, Dict] = sanitized_selection_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
     asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
     current_bundles = select_bundles_for_download(
@@ -250,10 +317,32 @@ async def get_download_list(
     if not current_bundles:
         raise ValueError("No bundles found after filtering")
 
+    metadata_source = (
+        asset_bundle_info if asset_bundle_info_for_cache is None else asset_bundle_info_for_cache
+    )
+    normalized_metadata = _merge_trusted_provenance(
+        _sanitize_asset_bundle_info(metadata_source), provenance_metadata
+    )
+
+    provenance_bundles = (provenance_metadata or {}).get("bundles") or {}
+    legacy_selected = [
+        bundle
+        for bundle in current_bundles.values()
+        if not isinstance(provenance_bundles.get(bundle.get("bundleName", "")), dict)
+        or _PROVENANCE_KEY not in provenance_bundles.get(bundle.get("bundleName", ""), {})
+    ]
+    if provenance_metadata is not None and legacy_selected:
+        logger.warning(
+            "Initializing bundle processing provenance for %d selected bundle(s)",
+            len(legacy_selected),
+        )
+
     if cached_asset_bundle_info and cached_game_version_json:
         cached_bundles: Dict[str, Dict] = cached_asset_bundle_info.get("bundles") or {}
         changed_bundles = await _select_changed_bundles(
-            current_bundles, cached_bundles, bundle_cache_path_resolver
+            current_bundles,
+            cached_bundles,
+            bundle_cache_path_resolver,
         )
         download_list = _build_incremental_download_list(
             config,
@@ -281,15 +370,23 @@ async def get_download_list(
             priority_list=priority_list,
         )
 
-    metadata_source = (
-        asset_bundle_info if asset_bundle_info_for_cache is None else asset_bundle_info_for_cache
+    successful_asset_metadata = copy.deepcopy(normalized_metadata)
+    successful_bundles = successful_asset_metadata["bundles"]
+    for _, candidate in download_list:
+        bundle_name = candidate.get("bundleName")
+        bundle = successful_bundles.get(bundle_name)
+        if not isinstance(bundle, dict):
+            continue
+        checksum = _processed_checksum(bundle)
+        if checksum is not None:
+            bundle[_PROVENANCE_KEY] = {"processed_checksum": checksum}
+
+    return DownloadPlan(
+        download_list,
+        normalized_metadata,
+        game_version_json,
+        successful_asset_metadata,
     )
-    normalized_metadata = {
-        "version": metadata_source.get("version", ""),
-        "os": metadata_source.get("os", ""),
-        "bundles": metadata_source.get("bundles", {}),
-    }
-    return DownloadPlan(download_list, normalized_metadata, game_version_json)
 
 
 def select_bundles_for_download(

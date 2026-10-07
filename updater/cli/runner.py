@@ -85,6 +85,8 @@ async def _run_full_download_pipeline(
         len(new_download_list),
         len(download_list),
     )
+    successful_asset_metadata = getattr(plan, "successful_asset_metadata", None)
+    successful_game_version = plan.game_version if successful_asset_metadata is not None else None
 
     if paths is not None and not paths.journal.exists():
         queue_items = dedupe_download_items(pending_items_outside_mode + download_list)
@@ -123,6 +125,8 @@ async def _run_full_download_pipeline(
             paths,
             fetch_result.asset_bundle_info.get("bundles", {}),
             asset_metadata_version=_asset_metadata_version(fetch_result.asset_bundle_info),
+            successful_asset_metadata=successful_asset_metadata,
+            successful_game_version=successful_game_version,
         )
         return
 
@@ -138,6 +142,8 @@ async def _run_full_download_pipeline(
         paths,
         fetch_result.asset_bundle_info.get("bundles", {}),
         asset_metadata_version=_asset_metadata_version(fetch_result.asset_bundle_info),
+        successful_asset_metadata=successful_asset_metadata,
+        successful_game_version=successful_game_version,
     )
 
 
