@@ -103,6 +103,27 @@ EXTRACT_ADAPTIVE_MEDIA_SLOTS = None
 # Example: [r"^songs/", r"^movie/"]
 EXTRACT_MEDIA_BUNDLE_HINTS = None
 
+# Independent extract process-pool budgets (extraction-worker roadmap Phase 3).
+# In adaptive mode, media-classified bundles extract on the media pool while
+# light and unclassified bundles use the core pool, so heavy Unity extraction
+# cannot evict light work and vice versa. The fixed scheduler mode and
+# standalone extraction always use the core pool. None keeps each pool at the
+# legacy MAX_CONCURRENCY_EXTRACTS width.
+#
+# Resource model when adaptive mode is enabled (all knobs sanitize to >= 1):
+# - CPU: at most EXTRACT_CORE_CONCURRENCY + EXTRACT_MEDIA_CONCURRENCY extract
+#   workers run at once, on top of the audio/video budgets above
+#   (MAX_CONCURRENCY_HCA_DECODES, MAX_CONCURRENCY_AUDIO_ENCODERS,
+#   MAX_CONCURRENCY_VIDEO_TRANSCODES, MAX_CONCURRENCY_USM_DEMUXES).
+# - Memory: extract worker count x per-bundle working set; PIPELINE_STAGE_QUEUE_SIZE
+#   bounds how many downloaded bundles wait for extraction.
+# - Temporary disk: each pending or extracting artifact holds one bundle file
+#   plus its staging directory, bounded by the scheduler queue capacity
+#   (PIPELINE_STAGE_QUEUE_SIZE); downloads additionally respect
+#   MIN_FREE_DISK_BYTES via the download disk-space gate.
+EXTRACT_CORE_CONCURRENCY = None
+EXTRACT_MEDIA_CONCURRENCY = None
+
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 # libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than

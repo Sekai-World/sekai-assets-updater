@@ -4,6 +4,11 @@ import asyncio
 import atexit
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 
+# Advisory cost-class vocabulary shared by the extraction scheduler (which
+# classifies artifacts) and the pool selector below (which routes them).
+LIGHT_COST_CLASS = "light"
+MEDIA_COST_CLASS = "media"
+
 
 def sanitize_concurrency(value) -> int:
     try:
@@ -85,6 +90,22 @@ def get_extract_process_concurrency(config) -> int:
     )
 
 
+def get_extract_core_concurrency(config) -> int:
+    """Concurrency of the core extract pool (light and unclassified bundles)."""
+
+    fallback = get_extract_process_concurrency(config)
+    concurrency = getattr(config, "EXTRACT_CORE_CONCURRENCY", fallback)
+    return fallback if concurrency is None else sanitize_concurrency(concurrency)
+
+
+def get_extract_media_concurrency(config) -> int:
+    """Concurrency of the media extract pool (media-classified bundles)."""
+
+    fallback = get_extract_process_concurrency(config)
+    concurrency = getattr(config, "EXTRACT_MEDIA_CONCURRENCY", fallback)
+    return fallback if concurrency is None else sanitize_concurrency(concurrency)
+
+
 def get_extract_executor_kind(config) -> str:
     """Which executor runs bundle extraction: "process" or "thread".
 
@@ -108,6 +129,7 @@ class BundleRuntime:
         self._audio_encoder_semaphore: tuple[int, asyncio.Semaphore] | None = None
         self._video_transcode_semaphore: tuple[int, asyncio.Semaphore] | None = None
         self._extract_process_pool: tuple[tuple[str, int], Executor] | None = None
+        self._media_extract_pool: tuple[tuple[str, int], Executor] | None = None
         self._audio_process_pool: tuple[int, ProcessPoolExecutor] | None = None
         self._usm_process_pool: tuple[int, ProcessPoolExecutor] | None = None
 
@@ -153,21 +175,57 @@ class BundleRuntime:
             cache[1].shutdown(wait=False, cancel_futures=False)
         return concurrency, ProcessPoolExecutor(max_workers=concurrency)
 
-    def extract_process_pool(self, config) -> Executor:
-        kind = get_extract_executor_kind(config)
-        concurrency = get_extract_process_concurrency(config)
+    @staticmethod
+    def _kinded_extract_pool(
+        cache: tuple[tuple[str, int], Executor] | None,
+        kind: str,
+        concurrency: int,
+        thread_name_prefix: str,
+    ) -> tuple[tuple[str, int], Executor]:
         cache_key = (kind, concurrency)
-        if self._extract_process_pool is None or self._extract_process_pool[0] != cache_key:
-            if self._extract_process_pool is not None:
-                self._extract_process_pool[1].shutdown(wait=False, cancel_futures=False)
-            if kind == "thread":
-                executor: Executor = ThreadPoolExecutor(
-                    max_workers=concurrency, thread_name_prefix="extract"
-                )
-            else:
-                executor = ProcessPoolExecutor(max_workers=concurrency)
-            self._extract_process_pool = (cache_key, executor)
+        if cache is not None and cache[0] == cache_key:
+            return cache
+        if cache is not None:
+            cache[1].shutdown(wait=False, cancel_futures=False)
+        if kind == "thread":
+            executor: Executor = ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix=thread_name_prefix
+            )
+        else:
+            executor = ProcessPoolExecutor(max_workers=concurrency)
+        return cache_key, executor
+
+    def extract_process_pool(self, config) -> Executor:
+        self._extract_process_pool = self._kinded_extract_pool(
+            self._extract_process_pool,
+            get_extract_executor_kind(config),
+            get_extract_core_concurrency(config),
+            "extract",
+        )
         return self._extract_process_pool[1]
+
+    def media_extract_pool(self, config) -> Executor:
+        """Extract pool reserved for media-classified bundles in adaptive mode."""
+
+        self._media_extract_pool = self._kinded_extract_pool(
+            self._media_extract_pool,
+            get_extract_executor_kind(config),
+            get_extract_media_concurrency(config),
+            "extract-media",
+        )
+        return self._media_extract_pool[1]
+
+    def extract_pool_for(self, config, cost_class: str | None) -> Executor:
+        """Route an extraction to the media or core pool by its cost class.
+
+        ``cost_class`` uses the scheduler's classification vocabulary
+        (``MEDIA_COST_CLASS``); anything else — including ``None`` from the
+        fixed stage or standalone callers — stays on the legacy shared pool.
+        """
+
+        if cost_class == MEDIA_COST_CLASS:
+            return self.media_extract_pool(config)
+        return self.extract_process_pool(config)
 
     def audio_process_pool(self, config) -> ProcessPoolExecutor:
         self._audio_process_pool = self._process_pool(
@@ -193,9 +251,11 @@ class BundleRuntime:
 
     def shutdown(self, *, wait: bool = False, cancel_futures: bool = False) -> None:
         self._shutdown_pool(self._extract_process_pool, wait=wait, cancel_futures=cancel_futures)
+        self._shutdown_pool(self._media_extract_pool, wait=wait, cancel_futures=cancel_futures)
         self._shutdown_pool(self._audio_process_pool, wait=wait, cancel_futures=cancel_futures)
         self._shutdown_pool(self._usm_process_pool, wait=wait, cancel_futures=cancel_futures)
         self._extract_process_pool = None
+        self._media_extract_pool = None
         self._audio_process_pool = None
         self._usm_process_pool = None
 
