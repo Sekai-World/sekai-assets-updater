@@ -4,6 +4,13 @@
 > extraction stage of the download–extract–upload pipeline. No source changes are implied
 > until individual phases are approved and executed.
 
+> **Status (updated as phases ship):** Phases 0–5 are implemented and merged
+> (#22, #23, #21, #26, #25, #24) behind `EXTRACT_SCHEDULER_MODE="fixed"`
+> (the default, unchanged behavior). Phase 6 enablement/tuning/rollback
+> guidance lives in
+> [EXTRACTION_SCHEDULER_ROLLOUT.md](EXTRACTION_SCHEDULER_ROLLOUT.md); the
+> default flip to `"adaptive"` remains gated on a passing production canary.
+
 ## Objective
 
 Evolve the current fixed-width extraction worker stage into an adaptive scheduler that
