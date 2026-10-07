@@ -1,0 +1,41 @@
+{
+  "scene3d/stage/cycle_a": {
+    "bundleName": "scene3d/stage/cycle_a",
+    "cacheDirectoryName": "0d1e",
+    "cacheFileName": "2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9",
+    "category": "Stage3d",
+    "crc": "6000000001",
+    "dependencies": ["scene3d/stage/cycle_b"],
+    "fileSize": 1048576,
+    "hash": "9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/stage/cycle_a"]
+  },
+  "scene3d/stage/cycle_b": {
+    "bundleName": "scene3d/stage/cycle_b",
+    "cacheDirectoryName": "1e2f",
+    "cacheFileName": "3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0",
+    "category": "Stage3d",
+    "crc": "6000000002",
+    "dependencies": ["scene3d/stage/cycle_c"],
+    "fileSize": 1048576,
+    "hash": "0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/stage/cycle_b"]
+  },
+  "scene3d/stage/cycle_c": {
+    "bundleName": "scene3d/stage/cycle_c",
+    "cacheDirectoryName": "2f3a",
+    "cacheFileName": "4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1",
+    "category": "Stage3d",
+    "crc": "6000000003",
+    "dependencies": ["scene3d/stage/cycle_a"],
+    "fileSize": 1048576,
+    "hash": "1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/stage/cycle_c"]
+  }
+}

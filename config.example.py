@@ -131,6 +131,23 @@ EXTRACT_MEDIA_BUNDLE_HINTS = None
 EXTRACT_CORE_CONCURRENCY = None
 EXTRACT_MEDIA_CONCURRENCY = None
 
+# Streaming Live GLB preprocessing (GLB roadmap Phase 0, #34). All flags are
+# disabled by default: the default configuration schedules no GLB work and the
+# standard per-Bundle pipeline is byte-for-byte unchanged. Enabling a later
+# GLB phase flag requires the earlier phases and the master flag, and fails
+# fast with a configuration error otherwise (see
+# docs/STREAMING_LIVE_GLB_ROADMAP.md for the phase order).
+ENABLE_STREAMING_LIVE_GLB_PREPROCESSING = False
+ENABLE_EXTRACTION_PLANS = False
+ENABLE_MULTIBUNDLE_COLLECTIONS = False
+ENABLE_STATIC_GLB_EXPORT = False
+ENABLE_GLB_MATERIALS = False
+ENABLE_GLB_ANIMATIONS = False
+ENABLE_TIMELINE_MANIFEST = False
+# Diagnostics-only escape hatch for incomplete GLB plans; incomplete output is
+# marked non-publishable.
+ALLOW_INCOMPLETE_EXTRACTION = False
+
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
 # libwebp effort (0-6) for lossy WebP texture output. 2 encodes ~2x faster than
