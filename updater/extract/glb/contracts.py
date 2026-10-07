@@ -50,6 +50,8 @@ DIAG_EDGE_UNKNOWN_BUNDLE = "edge_unknown_bundle"
 DIAG_META_BUNDLE_MISSING = "metadata_bundle_missing"
 DIAG_DEPENDENCY_CYCLE = "dependency_cycle"
 DIAG_DEPENDENCY_EXCLUDED = "dependency_excluded"
+DIAG_CACHE_MISSING = "cache_missing"
+DIAG_BUNDLE_DOWNLOAD_FAILED = "bundle_download_failed"
 
 
 class PlanValidationError(ValueError):

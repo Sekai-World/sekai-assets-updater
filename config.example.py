@@ -147,6 +147,11 @@ ENABLE_TIMELINE_MANIFEST = False
 # Diagnostics-only escape hatch for incomplete GLB plans; incomplete output is
 # marked non-publishable.
 ALLOW_INCOMPLETE_EXTRACTION = False
+# Optional path for the GLB plan-to-Bundle association document (Phase 2).
+# Persisted separately from Bundle cache metadata so cache invalidation cannot
+# destroy logical package identity; written atomically after plan validation.
+# None keeps associations in memory for the run only.
+STREAMING_LIVE_PLAN_CACHE_PATH = None
 
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")
