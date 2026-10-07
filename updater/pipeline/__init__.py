@@ -58,8 +58,9 @@ _QUEUE_SENTINEL = object()
 
 # Extraction-worker roadmap Phase 0: queue-depth sampling cadence and the
 # versioned extraction profile record format (docs/EXTRACTION_PROFILING.md).
+# Version 2 adds the optional per-bundle cost_class routing tag (Phase 3).
 _QUEUE_DEPTH_SAMPLE_INTERVAL_SEC = 1.0
-_EXTRACTION_PROFILE_VERSION = 1
+_EXTRACTION_PROFILE_VERSION = 2
 
 
 def _reserve_temporary_bundle_path() -> str:
@@ -80,6 +81,9 @@ class PipelineArtifact:
     tmp_extracted_save_dir: tempfile.TemporaryDirectory | None = None
     remove_bundle_after_extract: bool = False
     remove_extracted_after_upload: bool = False
+    # Advisory classification stamped by the adaptive scheduler on claim
+    # (extraction-worker roadmap Phase 3); None keeps the legacy shared pool.
+    cost_class: str | None = None
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -204,44 +208,53 @@ class ExtractionProfiler:
         duration_sec: float,
         output_count: int,
         output_bytes: int,
+        cost_class: str | None = None,
     ) -> None:
         self.bundle_count += 1
         self.total_extraction_sec += duration_sec
         self.output_count += output_count
         self.output_bytes += output_bytes
-        self._write_record(
-            {
-                "record": "bundle",
-                "version": _EXTRACTION_PROFILE_VERSION,
-                "pipeline_id": self.pipeline_id,
-                "ts": round(time.time(), 3),
-                "item": label,
-                "status": "ok",
-                "duration_sec": round(duration_sec, 6),
-                "output_count": output_count,
-                "output_bytes": output_bytes,
-            }
-        )
+        record: Dict[str, Any] = {
+            "record": "bundle",
+            "version": _EXTRACTION_PROFILE_VERSION,
+            "pipeline_id": self.pipeline_id,
+            "ts": round(time.time(), 3),
+            "item": label,
+            "status": "ok",
+            "duration_sec": round(duration_sec, 6),
+            "output_count": output_count,
+            "output_bytes": output_bytes,
+        }
+        if cost_class is not None:
+            record["cost_class"] = cost_class
+        self._write_record(record)
 
-    def record_bundle_failure(self, label: str, duration_sec: float, error: BaseException) -> None:
+    def record_bundle_failure(
+        self,
+        label: str,
+        duration_sec: float,
+        error: BaseException,
+        cost_class: str | None = None,
+    ) -> None:
         self.bundle_count += 1
         self.failed_count += 1
         self.total_extraction_sec += duration_sec
         # Only the exception class is recorded; messages can embed URLs or paths.
-        self._write_record(
-            {
-                "record": "bundle",
-                "version": _EXTRACTION_PROFILE_VERSION,
-                "pipeline_id": self.pipeline_id,
-                "ts": round(time.time(), 3),
-                "item": label,
-                "status": "error",
-                "duration_sec": round(duration_sec, 6),
-                "output_count": 0,
-                "output_bytes": 0,
-                "error_class": type(error).__name__,
-            }
-        )
+        record: Dict[str, Any] = {
+            "record": "bundle",
+            "version": _EXTRACTION_PROFILE_VERSION,
+            "pipeline_id": self.pipeline_id,
+            "ts": round(time.time(), 3),
+            "item": label,
+            "status": "error",
+            "duration_sec": round(duration_sec, 6),
+            "output_count": 0,
+            "output_bytes": 0,
+            "error_class": type(error).__name__,
+        }
+        if cost_class is not None:
+            record["cost_class"] = cost_class
+        self._write_record(record)
 
     def record_worker_idle(self, idle_sec: float) -> None:
         self.total_idle_sec += idle_sec
@@ -391,6 +404,7 @@ async def extract_single_bundle(artifact: PipelineArtifact, config) -> PipelineA
         unity_version=config.UNITY_VERSION,
         config=config,
         bundle_cache_root=bundle_cache_root,
+        cost_class=artifact.cost_class,
     )
     artifact.exported_list = _validate_artifact_outputs(
         artifact.extracted_save_path,
@@ -717,15 +731,22 @@ async def _extract_one_artifact(
         duration_sec = loop.time() - extract_started
         output_bytes = await _total_output_bytes(artifact.exported_list)
         logger.debug(
-            "PIPELINE | id=%s | worker=%s | stage=extract | action=bundle_timing | item=%s | duration_sec=%.3f | outputs=%d | output_bytes=%d",
+            "PIPELINE | id=%s | worker=%s | stage=extract | action=bundle_timing | item=%s | duration_sec=%.3f | outputs=%d | output_bytes=%d | cost_class=%s",
             pipeline_id,
             name,
             label,
             duration_sec,
             len(artifact.exported_list or []),
             output_bytes,
+            artifact.cost_class,
         )
-        profiler.record_bundle(label, duration_sec, len(artifact.exported_list or []), output_bytes)
+        profiler.record_bundle(
+            label,
+            duration_sec,
+            len(artifact.exported_list or []),
+            output_bytes,
+            cost_class=artifact.cost_class,
+        )
         logger.debug(
             "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
             pipeline_id,
@@ -741,7 +762,12 @@ async def _extract_one_artifact(
             await _cleanup_artifact(artifact, remove_bundle=True, remove_extracted=True)
         raise
     except Exception as exc:
-        profiler.record_bundle_failure(label, loop.time() - extract_started, exc)
+        profiler.record_bundle_failure(
+            label,
+            loop.time() - extract_started,
+            exc,
+            cost_class=artifact.cost_class,
+        )
         logger.error(
             "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s | error=%s",
             pipeline_id,
