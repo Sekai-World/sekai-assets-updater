@@ -93,7 +93,8 @@ PROMETHEUS_METRICS_PATH = None
 # Adaptive extraction scheduling (extraction-worker roadmap Phase 2).
 # "fixed" (default) keeps the homogeneous extract stage unchanged; "adaptive"
 # routes extraction through the admission scheduler in
-# updater/pipeline/scheduler.py.
+# updater/pipeline/scheduler.py. Enablement, canary comparison, rollback, and
+# tuning are documented in docs/EXTRACTION_SCHEDULER_ROLLOUT.md.
 EXTRACT_SCHEDULER_MODE = "fixed"
 # Upper bound on extract workers in adaptive mode (still capped by
 # MAX_CONCURRENCY_EXTRACTS). None keeps the fixed-stage width.
