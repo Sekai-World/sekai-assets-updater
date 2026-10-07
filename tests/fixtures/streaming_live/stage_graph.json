@@ -7,6 +7,7 @@
     "crc": "1000000001",
     "dependencies": [
       "scene3d/stage/shared_base_stage",
+      "scene3d/light/stage_light_rig",
       "scene3d/shader/custom_lil_001",
       "scene3d/texture/tex_stage_common"
     ],
@@ -22,12 +23,41 @@
     "cacheFileName": "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90",
     "category": "Stage3d",
     "crc": "1000000002",
-    "dependencies": ["scene3d/shader/custom_lil_001"],
+    "dependencies": [
+      "scene3d/camera/stage_camera_decoration",
+      "scene3d/shader/custom_lil_001"
+    ],
     "fileSize": 2097152,
     "hash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a",
     "isBuiltin": false,
     "isRelocate": true,
     "paths": ["live/scene3d/stage/shared_base_stage"]
+  },
+  "scene3d/light/stage_light_rig": {
+    "bundleName": "scene3d/light/stage_light_rig",
+    "cacheDirectoryName": "8b9c",
+    "cacheFileName": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+    "category": "Stage3d",
+    "crc": "1000000005",
+    "dependencies": [],
+    "fileSize": 524288,
+    "hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/light/stage_light_rig"]
+  },
+  "scene3d/camera/stage_camera_decoration": {
+    "bundleName": "scene3d/camera/stage_camera_decoration",
+    "cacheDirectoryName": "9c0d",
+    "cacheFileName": "1b2c3d4e5f60718293a4b5c6d7e8f90a1b2",
+    "category": "Stage3d",
+    "crc": "1000000006",
+    "dependencies": [],
+    "fileSize": 524288,
+    "hash": "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/camera/stage_camera_decoration"]
   },
   "scene3d/shader/custom_lil_001": {
     "bundleName": "scene3d/shader/custom_lil_001",
