@@ -83,11 +83,18 @@ EXTRACTION_PROFILING = False
 # extraction-profile-<pipeline_id>.jsonl next to ASSET_LOCAL_EXTRACTED_DIR, or
 # in the working directory when no local extracted dir is configured.
 EXTRACTION_PROFILE_PATH = None
+# Optional Prometheus textfile metrics path (extraction-worker roadmap Phase 5).
+# After each pipeline run, a .prom-format snapshot (extraction totals by cost
+# class, failures, worker utilisation, queue depth, media saturation) is
+# written here for a Prometheus textfile collector. None disables the export;
+# write failures degrade to a warning and never affect extraction.
+PROMETHEUS_METRICS_PATH = None
 
 # Adaptive extraction scheduling (extraction-worker roadmap Phase 2).
 # "fixed" (default) keeps the homogeneous extract stage unchanged; "adaptive"
 # routes extraction through the admission scheduler in
-# updater/pipeline/scheduler.py.
+# updater/pipeline/scheduler.py. Enablement, canary comparison, rollback, and
+# tuning are documented in docs/EXTRACTION_SCHEDULER_ROLLOUT.md.
 EXTRACT_SCHEDULER_MODE = "fixed"
 # Upper bound on extract workers in adaptive mode (still capped by
 # MAX_CONCURRENCY_EXTRACTS). None keeps the fixed-stage width.
@@ -123,6 +130,23 @@ EXTRACT_MEDIA_BUNDLE_HINTS = None
 #   MIN_FREE_DISK_BYTES via the download disk-space gate.
 EXTRACT_CORE_CONCURRENCY = None
 EXTRACT_MEDIA_CONCURRENCY = None
+
+# Streaming Live GLB preprocessing (GLB roadmap Phase 0, #34). All flags are
+# disabled by default: the default configuration schedules no GLB work and the
+# standard per-Bundle pipeline is byte-for-byte unchanged. Enabling a later
+# GLB phase flag requires the earlier phases and the master flag, and fails
+# fast with a configuration error otherwise (see
+# docs/STREAMING_LIVE_GLB_ROADMAP.md for the phase order).
+ENABLE_STREAMING_LIVE_GLB_PREPROCESSING = False
+ENABLE_EXTRACTION_PLANS = False
+ENABLE_MULTIBUNDLE_COLLECTIONS = False
+ENABLE_STATIC_GLB_EXPORT = False
+ENABLE_GLB_MATERIALS = False
+ENABLE_GLB_ANIMATIONS = False
+ENABLE_TIMELINE_MANIFEST = False
+# Diagnostics-only escape hatch for incomplete GLB plans; incomplete output is
+# marked non-publishable.
+ALLOW_INCOMPLETE_EXTRACTION = False
 
 # Texture export formats. Use ("png",), ("webp",), or ("png", "webp").
 TEXTURE_OUTPUT_FORMATS = ("png", "webp")

@@ -120,6 +120,19 @@ Concurrency:
 - `MAX_CONCURRENCY_UPLOADS`: concurrent remote uploads
 - `TEXTURE_OUTPUT_FORMATS`: texture formats to export, for example `("webp",)` or `("png", "webp")`
 
+Adaptive extraction scheduling (off by default; see
+[docs/EXTRACTION_SCHEDULER_ROLLOUT.md](docs/EXTRACTION_SCHEDULER_ROLLOUT.md)):
+
+- `EXTRACT_SCHEDULER_MODE`: `fixed` (default, unchanged behavior) or `adaptive`
+- `EXTRACT_MAX_WORKERS`: adaptive worker upper bound, capped by `MAX_CONCURRENCY_EXTRACTS`
+- `EXTRACT_ADAPTIVE_MEDIA_SLOTS`: concurrent media-classified extraction slots
+- `EXTRACT_MEDIA_BUNDLE_HINTS`: advisory regex hints over bundle names, e.g. `[r"^songs/", r"^movie/"]`
+- `EXTRACT_CORE_CONCURRENCY` / `EXTRACT_MEDIA_CONCURRENCY`: split extract pool budgets
+- `EXTRACTION_PROFILING`, `EXTRACTION_PROFILE_PATH`, `PROMETHEUS_METRICS_PATH`:
+  observability knobs documented in
+  [docs/EXTRACTION_PROFILING.md](docs/EXTRACTION_PROFILING.md); the CLI
+  `--profile` flag enables profiling for a single run
+
 Filters:
 
 - `DL_INCLUDE_LIST`
@@ -243,6 +256,14 @@ When all tasks succeed, the cached download list is removed automatically.
 If some tasks fail, the remaining failed items are written back to `DL_LIST_CACHE_PATH`.
 
 ## Current Extraction Behavior
+
+The extract stage runs on a fixed-width worker pool by default. Optionally,
+`EXTRACT_SCHEDULER_MODE="adaptive"` adds an admission scheduler that
+classifies bundles by name hints, caps media-heavy extraction slots, and
+routes heavy bundles to a dedicated extract pool so texture work keeps
+moving — with per-bundle profiling and a documented canary/rollback
+procedure. See
+[docs/EXTRACTION_SCHEDULER_ROLLOUT.md](docs/EXTRACTION_SCHEDULER_ROLLOUT.md).
 
 Common outputs:
 
