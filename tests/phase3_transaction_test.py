@@ -20,6 +20,19 @@ def _metadata(name: str = "current", checksum: str = "new"):
     }
 
 
+def _marked(bundle: dict) -> dict:
+    return {
+        **bundle,
+        "_sekai_assets_updater": {"processed_checksum": {"field": "hash", "value": bundle["hash"]}},
+    }
+
+
+def _metadata_with_marker(name: str, checksum: str) -> dict:
+    metadata = _metadata(name, checksum)
+    metadata["bundles"][name] = _marked(metadata["bundles"][name])
+    return metadata
+
+
 def _version():
     return {"appVersion": "1.0", "assetVersion": "2"}
 
@@ -142,7 +155,9 @@ def test_main_commits_journal_targets_before_pipeline(tmp_path: Path, monkeypatc
 
     assert events == ["replay", "journal", "replay", "pipeline"]
     assert not (tmp_path / "dl.json").exists()
-    assert state.load_asset_metadata(tmp_path / "metadata.json") == _metadata()
+    assert state.load_asset_metadata(tmp_path / "metadata.json") == _metadata_with_marker(
+        "current", "new"
+    )
     assert state.load_game_version(tmp_path / "version.json") == _version()
 
 
@@ -157,7 +172,12 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
         return _fetch_result()
 
     async def fake_plan(*_args, **_kwargs):
-        return net_plan.DownloadPlan([], _metadata("fresh", "new"), _version())
+        return net_plan.DownloadPlan(
+            [],
+            _metadata("fresh", "new"),
+            _version(),
+            _metadata_with_marker("fresh", "new"),
+        )
 
     original_replay = runner.replay_journal
 
@@ -176,7 +196,7 @@ def test_empty_download_plan_commits_metadata_without_journal_replay(
         config.ASSET_BUNDLE_INFO_CACHE_PATH,
         config.GAME_VERSION_JSON_CACHE_PATH,
     )
-    assert state.load_asset_metadata(paths.asset_metadata) == _metadata("fresh", "new")
+    assert state.load_asset_metadata(paths.asset_metadata) == _metadata_with_marker("fresh", "new")
     assert state.load_game_version(paths.game_version) == _version()
     assert not paths.queue.exists()
     assert not paths.journal.exists()
@@ -309,6 +329,234 @@ def test_partial_failure_replaces_queue_and_success_deletes_queue(
     assert not paths.queue.exists()
 
 
+def test_filter_expansion_retries_until_successful_snapshot_commit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    target = "music/short/vs_0807_01"
+    previous = "music/short/previous"
+    bundles = {
+        target: {"bundleName": target, "hash": "same"},
+        previous: _marked({"bundleName": previous, "hash": "same"}),
+    }
+    cached_metadata = {"version": "v2", "os": "ios", "bundles": bundles}
+    config.DL_INCLUDE_LIST = [rf"^{target}$"]
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH, cached_metadata, state.validate_asset_metadata
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH, _version(), state.validate_game_version
+    )
+    monkeypatch.setattr(configuration, "config", config)
+    fetch_result = _fetch_result()
+    fetch_result.asset_bundle_info = {"version": "v2", "os": "ios", "bundles": bundles}
+
+    pipeline_runs: list[list[tuple[str, dict]]] = []
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def partial_then_success(items, *_args, **_kwargs):
+        pipeline_runs.append(items)
+        return items if len(pipeline_runs) == 1 else []
+
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", partial_then_success)
+    asyncio.run(runner.main())
+
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert [item[1]["bundleName"] for item in state.load_pending_queue(paths.queue)] == [target]
+    failed_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert (
+        failed_metadata["bundles"][previous]["_sekai_assets_updater"]
+        == bundles[previous]["_sekai_assets_updater"]
+    )
+    assert "_sekai_assets_updater" not in failed_metadata["bundles"][target]
+
+    asyncio.run(runner.main())
+    assert not paths.queue.exists()
+    successful_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert (
+        successful_metadata["bundles"][previous]["_sekai_assets_updater"]
+        == bundles[previous]["_sekai_assets_updater"]
+    )
+    assert successful_metadata["bundles"][target]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "same"}
+    }
+
+    # The unchanged next run sees both the durable snapshot and full manifest,
+    # so it needs no candidate even though no local bundle-cache resolver exists.
+    asyncio.run(runner.main())
+    assert len(pipeline_runs) == 2
+
+
+def test_changed_bundle_partial_failure_preserves_old_marker_until_retry_success(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    target = "music/short/changed"
+    old_bundle = _marked({"bundleName": target, "hash": "hash1"})
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        {"version": "v2", "os": "ios", "bundles": {target: old_bundle}},
+        state.validate_asset_metadata,
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH, _version(), state.validate_game_version
+    )
+    monkeypatch.setattr(configuration, "config", config)
+    fetch_result = _fetch_result()
+    fetch_result.asset_bundle_info = _metadata(target, "hash2")
+    pipeline_runs: list[list[tuple[str, dict]]] = []
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def partial_then_success(items, *_args, **_kwargs):
+        pipeline_runs.append(items)
+        return items if len(pipeline_runs) == 1 else []
+
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", partial_then_success)
+    asyncio.run(runner.main())
+
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert [item[1]["bundleName"] for item in state.load_pending_queue(paths.queue)] == [target]
+    failed_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert failed_metadata["bundles"][target]["hash"] == "hash2"
+    assert (
+        failed_metadata["bundles"][target]["_sekai_assets_updater"]
+        == old_bundle["_sekai_assets_updater"]
+    )
+
+    asyncio.run(runner.main())
+
+    assert len(pipeline_runs) == 2
+    assert not paths.queue.exists()
+    successful_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert successful_metadata["bundles"][target]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "hash2"}
+    }
+
+
+def test_pre_pipeline_journal_replay_retains_old_marker_and_pending_queue(tmp_path: Path) -> None:
+    paths = state.derive_state_paths(
+        tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"
+    )
+    target = "music/short/changed"
+    pre_pipeline_metadata = _metadata_with_marker(target, "hash1")
+    pre_pipeline_metadata["bundles"][target]["hash"] = "hash2"
+    queue = [["https://example.test/changed", {"bundleName": target, "hash": "hash2"}]]
+
+    state.create_journal(paths, queue, pre_pipeline_metadata, _version(), "pre-pipeline")
+    assert state.replay_journal(paths)
+
+    recovered_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert recovered_metadata["bundles"][target]["hash"] == "hash2"
+    assert recovered_metadata["bundles"][target]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "hash1"}
+    }
+    assert state.load_pending_queue(paths.queue) == queue
+
+
+def test_post_success_journal_replay_commits_new_marker_and_queue_together(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    target = "music/short/changed"
+    successful_metadata = _metadata_with_marker(target, "hash2")
+    pending_outside_mode = [
+        ("https://example.test/live2d", {"bundleName": "live2d/a", "hash": "h"})
+    ]
+    original_replay = lifecycle.replay_journal
+
+    def crash_before_replay(*_args, **_kwargs):
+        raise state.StatePersistenceError("simulated crash after journal publication")
+
+    monkeypatch.setattr(lifecycle, "replay_journal", crash_before_replay)
+    with pytest.raises(state.StatePersistenceError, match="after journal publication"):
+        asyncio.run(
+            lifecycle._commit_successful_selection(
+                config,
+                pending_outside_mode,
+                paths,
+                successful_metadata,
+                _version(),
+            )
+        )
+    assert paths.journal.exists()
+    assert not paths.asset_metadata.exists()
+
+    monkeypatch.setattr(lifecycle, "replay_journal", original_replay)
+    assert state.replay_journal(paths)
+    assert state.load_asset_metadata(paths.asset_metadata) == successful_metadata
+    assert state.load_pending_queue(paths.queue) == [list(item) for item in pending_outside_mode]
+
+
+def test_mode_scoped_plan_preserves_full_manifest_and_snapshots_effective_names(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    paths = state.derive_active_state_paths(
+        "live2d",
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    config.DL_LIST_CACHE_PATH = AnyioPath(paths.queue)
+    config.ASSET_BUNDLE_INFO_CACHE_PATH = AnyioPath(paths.asset_metadata)
+    config.GAME_VERSION_JSON_CACHE_PATH = AnyioPath(paths.game_version)
+    known = "live2d/model/known"
+    newly_selected = "live2d/model/new"
+    music = "music/short/vs_0807_01"
+    bundles = {
+        known: {"bundleName": known, "hash": "same"},
+        newly_selected: {"bundleName": newly_selected, "hash": "same"},
+        music: {"bundleName": music, "hash": "same"},
+    }
+    bundles[known] = _marked(bundles[known])
+    cached_metadata = {"version": "v2", "os": "ios", "bundles": bundles}
+    config.DL_INCLUDE_LIST = [rf"^{music}$"]
+    state.atomic_write_json(paths.asset_metadata, cached_metadata, state.validate_asset_metadata)
+    state.atomic_write_json(paths.game_version, _version(), state.validate_game_version)
+
+    download_list, plan = asyncio.run(
+        pending._build_new_download_list(
+            config,
+            "live2d",
+            ("live2d/",),
+            {"version": "v2", "os": "ios", "bundles": bundles},
+            _version(),
+            None,
+            "host",
+            False,
+        )
+    )
+
+    assert [bundle["bundleName"] for _, bundle in download_list] == [newly_selected]
+    assert set(plan.asset_metadata["bundles"]) == {known, newly_selected, music}
+    assert "processed_bundle_names" not in plan.asset_metadata
+    assert plan.successful_asset_metadata["bundles"][known]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "same"}
+    }
+    assert plan.successful_asset_metadata["bundles"][newly_selected]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "same"}
+    }
+
+
 def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -320,6 +568,7 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
         config.GAME_VERSION_JSON_CACHE_PATH,
     )
     normal_metadata = _metadata("normal", "stable")
+    normal_metadata["processed_bundle_names"] = ["normal"]
     normal_version = _version()
     state.atomic_write_json(paths.asset_metadata, normal_metadata, state.validate_asset_metadata)
     state.atomic_write_json(paths.game_version, normal_version, state.validate_game_version)
@@ -329,6 +578,9 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
     async def fake_fetch(*_args, **_kwargs):
         result = _fetch_result()
         result.asset_bundle_info = _metadata("observed", "fresh")
+        result.asset_bundle_info["bundles"]["observed"]["_sekai_assets_updater"] = {
+            "processed_checksum": {"field": "hash", "value": "fresh"}
+        }
         return result
 
     monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
@@ -337,6 +589,9 @@ def test_metadata_only_uses_observed_siblings_without_mutating_normal_targets(
     assert paths.game_version.read_bytes() == before_version
     assert (tmp_path / "metadata.observed.json").exists()
     assert (tmp_path / "version.observed.json").exists()
+    observed_metadata = state.load_asset_metadata(tmp_path / "metadata.observed.json")
+    assert "processed_bundle_names" not in observed_metadata
+    assert "_sekai_assets_updater" not in observed_metadata["bundles"]["observed"]
 
 
 def test_metadata_only_rejects_observed_path_aliasing_normal_target(
