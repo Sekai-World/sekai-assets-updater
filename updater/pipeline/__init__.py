@@ -238,20 +238,14 @@ class ExtractionProfiler:
     def _class_name(cost_class: str | None) -> str:
         return cost_class if cost_class is not None else "unclassified"
 
-    def record_bundle(
+    def _track_bundle(
         self,
-        label: str,
         duration_sec: float,
-        output_count: int,
-        output_bytes: int,
-        cost_class: str | None = None,
-        queue_wait_sec: float | None = None,
-        input_bytes: int | None = None,
+        cost_class: str | None,
+        queue_wait_sec: float | None,
     ) -> None:
         self.bundle_count += 1
         self.total_extraction_sec += duration_sec
-        self.output_count += output_count
-        self.output_bytes += output_bytes
         class_name = self._class_name(cost_class)
         self.class_bundles[class_name] = self.class_bundles.get(class_name, 0) + 1
         self.class_extraction_sec[class_name] = (
@@ -259,13 +253,25 @@ class ExtractionProfiler:
         )
         if queue_wait_sec is not None:
             self.queue_wait_samples.append(queue_wait_sec)
+
+    def _bundle_record(
+        self,
+        label: str,
+        status: str,
+        duration_sec: float,
+        output_count: int,
+        output_bytes: int,
+        cost_class: str | None,
+        queue_wait_sec: float | None,
+        input_bytes: int | None,
+    ) -> Dict[str, Any]:
         record: Dict[str, Any] = {
             "record": "bundle",
             "version": _EXTRACTION_PROFILE_VERSION,
             "pipeline_id": self.pipeline_id,
             "ts": round(time.time(), 3),
             "item": label,
-            "status": "ok",
+            "status": status,
             "duration_sec": round(duration_sec, 6),
             "output_count": output_count,
             "output_bytes": output_bytes,
@@ -276,7 +282,33 @@ class ExtractionProfiler:
             record["queue_wait_sec"] = round(queue_wait_sec, 6)
         if input_bytes is not None:
             record["input_bytes"] = input_bytes
-        self._write_record(record)
+        return record
+
+    def record_bundle(
+        self,
+        label: str,
+        duration_sec: float,
+        output_count: int,
+        output_bytes: int,
+        cost_class: str | None = None,
+        queue_wait_sec: float | None = None,
+        input_bytes: int | None = None,
+    ) -> None:
+        self.output_count += output_count
+        self.output_bytes += output_bytes
+        self._track_bundle(duration_sec, cost_class, queue_wait_sec)
+        self._write_record(
+            self._bundle_record(
+                label,
+                "ok",
+                duration_sec,
+                output_count,
+                output_bytes,
+                cost_class,
+                queue_wait_sec,
+                input_bytes,
+            )
+        )
 
     def record_bundle_failure(
         self,
@@ -287,35 +319,20 @@ class ExtractionProfiler:
         queue_wait_sec: float | None = None,
         input_bytes: int | None = None,
     ) -> None:
-        self.bundle_count += 1
         self.failed_count += 1
-        self.total_extraction_sec += duration_sec
-        class_name = self._class_name(cost_class)
-        self.class_bundles[class_name] = self.class_bundles.get(class_name, 0) + 1
-        self.class_extraction_sec[class_name] = (
-            self.class_extraction_sec.get(class_name, 0.0) + duration_sec
-        )
-        if queue_wait_sec is not None:
-            self.queue_wait_samples.append(queue_wait_sec)
+        self._track_bundle(duration_sec, cost_class, queue_wait_sec)
         # Only the exception class is recorded; messages can embed URLs or paths.
-        record: Dict[str, Any] = {
-            "record": "bundle",
-            "version": _EXTRACTION_PROFILE_VERSION,
-            "pipeline_id": self.pipeline_id,
-            "ts": round(time.time(), 3),
-            "item": label,
-            "status": "error",
-            "duration_sec": round(duration_sec, 6),
-            "output_count": 0,
-            "output_bytes": 0,
-            "error_class": type(error).__name__,
-        }
-        if cost_class is not None:
-            record["cost_class"] = cost_class
-        if queue_wait_sec is not None:
-            record["queue_wait_sec"] = round(queue_wait_sec, 6)
-        if input_bytes is not None:
-            record["input_bytes"] = input_bytes
+        record = self._bundle_record(
+            label,
+            "error",
+            duration_sec,
+            0,
+            0,
+            cost_class,
+            queue_wait_sec,
+            input_bytes,
+        )
+        record["error_class"] = type(error).__name__
         self._write_record(record)
 
     def record_scheduler_sample(self, active_workers: int, active_media: int) -> None:
