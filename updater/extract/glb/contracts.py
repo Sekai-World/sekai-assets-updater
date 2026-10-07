@@ -53,6 +53,15 @@ DIAG_DEPENDENCY_EXCLUDED = "dependency_excluded"
 DIAG_CACHE_MISSING = "cache_missing"
 DIAG_BUNDLE_DOWNLOAD_FAILED = "bundle_download_failed"
 
+# Collection validation codes (Phase 3).  These classify every way a
+# cross-file reference from a reachable root can fail or stay unsupported.
+DIAG_ROOT_OBJECT_MISSING = "root_object_missing"
+DIAG_NULL_REFERENCE = "null_reference"
+DIAG_MISSING_TARGET = "missing_target"
+DIAG_UNRESOLVED_EXTERNAL = "unresolved_external"
+DIAG_TYPE_MISMATCH = "type_mismatch"
+DIAG_UNSUPPORTED_REFERENCE = "unsupported_reference"
+
 
 class PlanValidationError(ValueError):
     """Raised when an extraction plan violates the Phase 0 contract."""

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 import orjson
 import unity_rs
@@ -80,6 +80,143 @@ class UnityObjectEntry:
     name: str | None
     container: str | None
     source_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class CollectionFileIdentity:
+    """Portable identity of one serialized file inside a loaded collection.
+
+    ``bundle_name`` is the caller-chosen input name (the plan's bundle
+    identity) and ``cab_name`` is the serialized file's own ``CAB-…`` name
+    read from the binding.  Both survive reordering of the inputs, unlike
+    the positional ``file_index``.
+    """
+
+    file_index: int
+    bundle_name: str
+    cab_name: str
+    unity_version: str | None
+
+
+class CollectionExternalReference:
+    """Outcome of mapping one PPtr ``m_FileID`` through the real externals."""
+
+    __slots__ = ("kind", "target_file_index", "dependency_name")
+
+    def __init__(
+        self,
+        kind: str,
+        target_file_index: int | None = None,
+        dependency_name: str | None = None,
+    ) -> None:
+        self.kind = kind
+        self.target_file_index = target_file_index
+        self.dependency_name = dependency_name
+
+
+SAME_FILE_REFERENCE = "same_file"
+RESOLVED_EXTERNAL_REFERENCE = "resolved_external"
+UNKNOWN_EXTERNAL_REFERENCE = "unknown_external"
+
+
+class CollectionFileTable:
+    """Actual file identity table of a loaded multi-file collection.
+
+    PPtr ``m_FileID`` values index the *source file's* external list.  The
+    AssetBundle record of each input exposes that list as ordered
+    ``dependencies`` (bundle or CAB names), so a non-zero file ID maps to a
+    loaded file by identity — never by position or filename guess.
+    """
+
+    def __init__(self, environment: UnityRsEnvironment) -> None:
+        file_meta = self._native_file_metadata(environment)
+        identities: list[CollectionFileIdentity] = []
+        by_bundle_name: dict[str, int] = {}
+        by_cab: dict[str, int] = {}
+        externals: dict[int, tuple[str, ...]] = {}
+        asset_bundles: dict[int, UnityRsObject] = {}
+        for obj in environment.objects:
+            if obj.class_id == 142 and obj.file_index not in asset_bundles:
+                asset_bundles[obj.file_index] = obj
+        for obj in environment.objects:
+            if obj.file_index in externals:
+                continue
+            source = getattr(obj._info, "source_path", "") or ""
+            cab = source.split("::", 1)[1] if "::" in source else source
+            meta = file_meta.get(obj.file_index)
+            bundle_name = (
+                str(getattr(meta, "path", "")).split("::", 1)[0] if meta is not None else cab
+            )
+            version = getattr(meta, "unity_version", None) if meta is not None else None
+            identity = CollectionFileIdentity(
+                file_index=obj.file_index,
+                bundle_name=bundle_name,
+                cab_name=cab,
+                unity_version=str(version) if version else None,
+            )
+            identities.append(identity)
+            by_bundle_name.setdefault(bundle_name, identity.file_index)
+            by_cab.setdefault(cab, identity.file_index)
+            externals[obj.file_index] = self._externals_of(
+                environment, asset_bundles.get(obj.file_index)
+            )
+        self.identities: tuple[CollectionFileIdentity, ...] = tuple(
+            sorted(identities, key=lambda value: value.file_index)
+        )
+        self._by_bundle_name = by_bundle_name
+        self._by_cab = by_cab
+        self._externals = externals
+
+    @staticmethod
+    def _native_file_metadata(environment: UnityRsEnvironment) -> dict[int, Any]:
+        files = getattr(environment.studio, "files", None)
+        if not callable(files):
+            return {}
+        try:
+            return {int(info.index): info for info in files()}
+        except Exception:  # NOSONAR - metadata is an enhancement, never required
+            return {}
+
+    @staticmethod
+    def _externals_of(
+        environment: UnityRsEnvironment, record: UnityRsObject | None
+    ) -> tuple[str, ...]:
+        if record is None:
+            return ()
+        try:
+            native = environment.studio.read_asset_bundle(record.file_index, record.path_id)
+            return tuple(str(name) for name in (getattr(native, "dependencies", None) or ()))
+        except Exception:  # NOSONAR - externals stay unknown; such refs report unresolved
+            return ()
+
+    def identity_for(self, file_index: int) -> CollectionFileIdentity | None:
+        for identity in self.identities:
+            if identity.file_index == file_index:
+                return identity
+        return None
+
+    def externals_of(self, file_index: int) -> tuple[str, ...]:
+        return self._externals.get(file_index, ())
+
+    def resolve_file_id(self, source_file_index: int, file_id: int) -> CollectionExternalReference:
+        """Map one non-zero PPtr file ID through the source file's externals."""
+        externals = self._externals.get(source_file_index, ())
+        position = file_id - 1
+        if position < 0 or position >= len(externals):
+            return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
+        dependency_name = externals[position]
+        target = self._by_bundle_name.get(dependency_name)
+        if target is None:
+            target = self._by_cab.get(dependency_name)
+        if target is None:
+            return CollectionExternalReference(
+                UNKNOWN_EXTERNAL_REFERENCE, dependency_name=dependency_name
+            )
+        return CollectionExternalReference(
+            RESOLVED_EXTERNAL_REFERENCE,
+            target_file_index=target,
+            dependency_name=dependency_name,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -553,6 +690,56 @@ def load_bundle(
         raise UnityRsLoadError(f"failed to load Unity bundle {path_or_bytes!s}: {exc}") from exc
 
 
+def load_collection(
+    named_bundles: Sequence[tuple[str, bytes]],
+    unity_version: str | None,
+) -> UnityRsEnvironment:
+    """Load named bundles as one cross-reference-capable collection.
+
+    Inputs are sorted by name before being handed to the binding so the
+    positional ``file_index`` values are deterministic for a given input set.
+    Names must be non-empty and unique; they become the portable bundle
+    identities exposed through :class:`CollectionFileTable`.
+    """
+
+    if not isinstance(unity_version, str) or not unity_version.strip():
+        raise UnityRsLoadError("unity-rs collection loading requires UNITY_VERSION")
+    prepared: list[tuple[str, bytes]] = []
+    seen: set[str] = set()
+    for name, payload in named_bundles:
+        if not isinstance(name, str) or not name.strip():
+            raise UnityRsLoadError("collection input names must be non-empty strings")
+        if name in seen:
+            raise UnityRsLoadError(f"duplicate collection input name: {name}")
+        if not isinstance(payload, (bytes, bytearray)):
+            raise UnityRsLoadError(f"collection input {name!r} must be bytes")
+        seen.add(name)
+        prepared.append((name, bytes(payload)))
+    if not prepared:
+        raise UnityRsLoadError("collection loading requires at least one input bundle")
+    prepared.sort(key=lambda item: item[0])
+    try:
+        studio = unity_rs.UnityRs.from_memory_files(prepared, unity_version=unity_version)
+    except Exception as exc:
+        names = [name for name, _ in prepared]
+        raise UnityRsLoadError(
+            f"failed to load Unity collection from {len(names)} input(s): {exc}"
+        ) from exc
+    return UnityRsEnvironment(studio)
+
+
+def build_collection_file_table(environment: UnityRsEnvironment) -> CollectionFileTable:
+    """Read the loaded collection's actual per-file identity table."""
+
+    return CollectionFileTable(environment)
+
+
+def adapter_version() -> str | None:
+    """Version of the native unity-rs binding backing this adapter."""
+
+    return getattr(unity_rs, "__version__", None)
+
+
 def iter_container_items(
     environment: UnityRsEnvironment,
 ) -> Iterator[tuple[str, UnityRsObject]]:
@@ -610,9 +797,15 @@ def read_fbx_with_textures(
 
 __all__ = [
     "AudioPayload",
+    "CollectionExternalReference",
+    "CollectionFileIdentity",
+    "CollectionFileTable",
     "ModelFilePayload",
     "FbxPayload",
     "CLASS_ID_NAMES",
+    "RESOLVED_EXTERNAL_REFERENCE",
+    "SAME_FILE_REFERENCE",
+    "UNKNOWN_EXTERNAL_REFERENCE",
     "InvalidImageDimensions",
     "MissingContainerError",
     "RenderedImage",
@@ -623,8 +816,11 @@ __all__ = [
     "UnityRsEnvironment",
     "UnityRsLoadError",
     "UnityRsObject",
+    "adapter_version",
+    "build_collection_file_table",
     "iter_container_items",
     "load_bundle",
+    "load_collection",
     "has_mesh_scene",
     "read_fbx_with_textures",
     "read_audio_clip",

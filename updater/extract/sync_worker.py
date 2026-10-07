@@ -6,7 +6,10 @@ import re
 import shutil
 import tempfile
 from pathlib import Path as StdPath
-from typing import Any, Dict
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from updater.extract.glb.collection import GlbCollectionExtraction
 
 from updater.extract.acb_cache import (
     extract_acb_from_cached_bundles as _extract_acb_from_cached_bundles_sync,
@@ -559,3 +562,42 @@ def _extract_bundle_files_sync(
         audio_jobs,
         video_jobs,
     )
+
+
+def extract_collection_sync(
+    plan,
+    bundle_payloads: list[tuple[str, bytes]],
+    unity_version: str,
+    manifest_path: str,
+) -> "GlbCollectionExtraction":
+    """Load and validate one logical package as a Unity collection (#37).
+
+    The plan's bundles load as one cross-reference-capable collection, L2
+    reachability runs from the plan's roots, and the package manifest records
+    input checksums, versions, and L0/L2 summaries.  A package with required
+    (error) findings is not publishable: nothing is written and the refusal
+    carries the source/target identities.  Per-object export joins this path
+    in Phase 4; the one-Bundle :func:`_extract_bundle_files_sync` stays the
+    path for standard and Live2D extraction.
+    """
+
+    from updater.extract.glb.collection import (
+        GlbCollectionExtraction,
+        PackageNotPublishable,
+        build_package_manifest,
+        load_package_collection,
+        persist_package_manifest,
+        validate_collection_reachability,
+    )
+
+    environment, table = load_package_collection(plan, bundle_payloads, unity_version)
+    report = validate_collection_reachability(environment, table, plan.roots)
+    if not report.publishable:
+        raise PackageNotPublishable(report)
+    manifest = build_package_manifest(
+        plan, bundle_payloads, unity_version, report, environment, table
+    )
+    manifest_path_obj = StdPath(manifest_path)
+    manifest_path_obj.parent.mkdir(parents=True, exist_ok=True)
+    persist_package_manifest(manifest_path_obj, manifest)
+    return GlbCollectionExtraction(manifest=manifest, report=report)
