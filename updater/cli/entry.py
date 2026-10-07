@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import cast
 
 from updater.cli import configuration
@@ -12,6 +13,18 @@ from updater.model import ConfigLike
 from updater.runtime import shutdown_process_pools
 
 logger = logging.getLogger("asset_updater")
+
+
+def apply_profile_option(config, enabled: bool) -> None:
+    """Turn --profile into per-run profiling config (extraction-worker roadmap Phase 5)."""
+
+    if not enabled:
+        return
+    config.EXTRACTION_PROFILING = True
+    if not getattr(config, "EXTRACTION_PROFILE_PATH", None):
+        config.EXTRACTION_PROFILE_PATH = (
+            f"extraction-profile-{time.strftime('%Y%m%dT%H%M%S')}.jsonl"
+        )
 
 
 def cli():
@@ -55,6 +68,16 @@ def cli():
             "dl_list.json from current metadata, then download/process all matched bundles."
         ),
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Enable extraction profiling for this single run and write a timestamped "
+            "JSON-lines profile (docs/EXTRACTION_PROFILING.md). Overrides a disabled "
+            "EXTRACTION_PROFILING config; an explicit EXTRACTION_PROFILE_PATH wins over "
+            "the timestamped default."
+        ),
+    )
     args = parser.parse_args()
 
     # Load the config python file as dynamic module
@@ -70,6 +93,7 @@ def cli():
     sys.modules["config"] = loaded_config
     configuration.config = cast(ConfigLike, loaded_config)
     validate_config(configuration.config, mode=args.mode)
+    apply_profile_option(configuration.config, args.profile)
 
     # Set the logging level
     log_level = logging.INFO

@@ -58,9 +58,11 @@ _QUEUE_SENTINEL = object()
 
 # Extraction-worker roadmap Phase 0: queue-depth sampling cadence and the
 # versioned extraction profile record format (docs/EXTRACTION_PROFILING.md).
-# Version 2 adds the optional per-bundle cost_class routing tag (Phase 3).
+# Version 2 added the optional per-bundle cost_class routing tag (Phase 3);
+# version 3 adds queue_wait_sec/input_bytes per bundle and aggregate
+# scheduler/resource statistics in the summary record (Phase 5).
 _QUEUE_DEPTH_SAMPLE_INTERVAL_SEC = 1.0
-_EXTRACTION_PROFILE_VERSION = 2
+_EXTRACTION_PROFILE_VERSION = 3
 
 
 def _reserve_temporary_bundle_path() -> str:
@@ -84,6 +86,9 @@ class PipelineArtifact:
     # Advisory classification stamped by the adaptive scheduler on claim
     # (extraction-worker roadmap Phase 3); None keeps the legacy shared pool.
     cost_class: str | None = None
+    # Monotonic timestamp taken by the download worker just before the
+    # artifact is enqueued; the extract worker derives its queue wait from it.
+    enqueued_monotonic: float | None = None
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -178,6 +183,26 @@ def _resolve_extraction_profile_path(config, pipeline_id: str) -> StdPath | None
     return StdPath(file_name)
 
 
+def _resolve_prometheus_metrics_path(config) -> StdPath | str | None:
+    """Return the Prometheus textfile metrics path, or None when disabled."""
+
+    metrics_path = getattr(config, "PROMETHEUS_METRICS_PATH", None)
+    if not metrics_path:
+        return None
+    return metrics_path
+
+
+def _file_needs_leading_newline(path: StdPath) -> bool:
+    """Whether an existing profile file lacks a trailing newline separator."""
+
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) != b"\n"
+    except (OSError, ValueError):
+        return False
+
+
 class ExtractionProfiler:
     """Aggregate extraction metrics for one pipeline run.
 
@@ -198,9 +223,66 @@ class ExtractionProfiler:
         self.output_count = 0
         self.output_bytes = 0
         self.queue_depth_samples: List[int] = []
+        # Phase 5 observability: per-cost-class aggregation, queue-wait
+        # distribution, and scheduler saturation maxima.
+        self.class_bundles: Dict[str, int] = {}
+        self.class_extraction_sec: Dict[str, float] = {}
+        self.queue_wait_samples: List[float] = []
+        self.max_active_workers = 0
+        self.max_active_media = 0
         self._profile_file = None
         self._profile_broken = False
         self._finished = False
+
+    @staticmethod
+    def _class_name(cost_class: str | None) -> str:
+        return cost_class if cost_class is not None else "unclassified"
+
+    def _track_bundle(
+        self,
+        duration_sec: float,
+        cost_class: str | None,
+        queue_wait_sec: float | None,
+    ) -> None:
+        self.bundle_count += 1
+        self.total_extraction_sec += duration_sec
+        class_name = self._class_name(cost_class)
+        self.class_bundles[class_name] = self.class_bundles.get(class_name, 0) + 1
+        self.class_extraction_sec[class_name] = (
+            self.class_extraction_sec.get(class_name, 0.0) + duration_sec
+        )
+        if queue_wait_sec is not None:
+            self.queue_wait_samples.append(queue_wait_sec)
+
+    def _bundle_record(
+        self,
+        label: str,
+        status: str,
+        duration_sec: float,
+        output_count: int,
+        output_bytes: int,
+        cost_class: str | None,
+        queue_wait_sec: float | None,
+        input_bytes: int | None,
+    ) -> Dict[str, Any]:
+        record: Dict[str, Any] = {
+            "record": "bundle",
+            "version": _EXTRACTION_PROFILE_VERSION,
+            "pipeline_id": self.pipeline_id,
+            "ts": round(time.time(), 3),
+            "item": label,
+            "status": status,
+            "duration_sec": round(duration_sec, 6),
+            "output_count": output_count,
+            "output_bytes": output_bytes,
+        }
+        if cost_class is not None:
+            record["cost_class"] = cost_class
+        if queue_wait_sec is not None:
+            record["queue_wait_sec"] = round(queue_wait_sec, 6)
+        if input_bytes is not None:
+            record["input_bytes"] = input_bytes
+        return record
 
     def record_bundle(
         self,
@@ -209,25 +291,24 @@ class ExtractionProfiler:
         output_count: int,
         output_bytes: int,
         cost_class: str | None = None,
+        queue_wait_sec: float | None = None,
+        input_bytes: int | None = None,
     ) -> None:
-        self.bundle_count += 1
-        self.total_extraction_sec += duration_sec
         self.output_count += output_count
         self.output_bytes += output_bytes
-        record: Dict[str, Any] = {
-            "record": "bundle",
-            "version": _EXTRACTION_PROFILE_VERSION,
-            "pipeline_id": self.pipeline_id,
-            "ts": round(time.time(), 3),
-            "item": label,
-            "status": "ok",
-            "duration_sec": round(duration_sec, 6),
-            "output_count": output_count,
-            "output_bytes": output_bytes,
-        }
-        if cost_class is not None:
-            record["cost_class"] = cost_class
-        self._write_record(record)
+        self._track_bundle(duration_sec, cost_class, queue_wait_sec)
+        self._write_record(
+            self._bundle_record(
+                label,
+                "ok",
+                duration_sec,
+                output_count,
+                output_bytes,
+                cost_class,
+                queue_wait_sec,
+                input_bytes,
+            )
+        )
 
     def record_bundle_failure(
         self,
@@ -235,26 +316,61 @@ class ExtractionProfiler:
         duration_sec: float,
         error: BaseException,
         cost_class: str | None = None,
+        queue_wait_sec: float | None = None,
+        input_bytes: int | None = None,
     ) -> None:
-        self.bundle_count += 1
         self.failed_count += 1
-        self.total_extraction_sec += duration_sec
+        self._track_bundle(duration_sec, cost_class, queue_wait_sec)
         # Only the exception class is recorded; messages can embed URLs or paths.
-        record: Dict[str, Any] = {
-            "record": "bundle",
-            "version": _EXTRACTION_PROFILE_VERSION,
-            "pipeline_id": self.pipeline_id,
-            "ts": round(time.time(), 3),
-            "item": label,
-            "status": "error",
-            "duration_sec": round(duration_sec, 6),
-            "output_count": 0,
-            "output_bytes": 0,
-            "error_class": type(error).__name__,
-        }
-        if cost_class is not None:
-            record["cost_class"] = cost_class
+        record = self._bundle_record(
+            label,
+            "error",
+            duration_sec,
+            0,
+            0,
+            cost_class,
+            queue_wait_sec,
+            input_bytes,
+        )
+        record["error_class"] = type(error).__name__
         self._write_record(record)
+
+    def record_scheduler_sample(self, active_workers: int, active_media: int) -> None:
+        """Track scheduler saturation maxima sampled alongside queue depth."""
+
+        self.max_active_workers = max(self.max_active_workers, active_workers)
+        self.max_active_media = max(self.max_active_media, active_media)
+
+    def performance_snapshot(
+        self, worker_count: int | None = None, wall_sec: float | None = None
+    ) -> Dict[str, Any]:
+        """Aggregate Phase 5 statistics shared by the report, summary, and metrics."""
+
+        snapshot: Dict[str, Any] = {
+            "cost_classes": {
+                name: {
+                    "bundles": self.class_bundles[name],
+                    "extraction_sec": round(self.class_extraction_sec[name], 6),
+                    "bundles_per_sec": round(
+                        self.class_bundles[name] / self.class_extraction_sec[name], 4
+                    )
+                    if self.class_extraction_sec[name] > 0
+                    else None,
+                }
+                for name in sorted(self.class_bundles)
+            },
+        }
+        if self.queue_wait_samples:
+            waits = sorted(self.queue_wait_samples)
+            snapshot["wait_sec_avg"] = round(sum(waits) / len(waits), 4)
+            snapshot["wait_sec_max"] = round(waits[-1], 4)
+            snapshot["wait_sec_p95"] = round(waits[min(len(waits) - 1, int(0.95 * len(waits)))], 4)
+        if worker_count is not None and wall_sec is not None and wall_sec > 0:
+            snapshot["worker_utilisation"] = round(
+                self.total_extraction_sec / (wall_sec * worker_count), 4
+            )
+        snapshot["media_active_max"] = self.max_active_media
+        return snapshot
 
     def record_worker_idle(self, idle_sec: float) -> None:
         self.total_idle_sec += idle_sec
@@ -284,13 +400,39 @@ class ExtractionProfiler:
             self.queue_depth_max(),
         )
 
-    def finish(self, status: str) -> None:
+    def log_performance_report(self, worker_count: int, wall_sec: float) -> None:
+        """Emit the Phase 5 completion report at INFO level."""
+
+        snapshot = self.performance_snapshot(worker_count, wall_sec)
+        throughput = ",".join(
+            f"{name}:{stats['bundles_per_sec']:.2f}"
+            if stats["bundles_per_sec"] is not None
+            else f"{name}:n/a"
+            for name, stats in snapshot["cost_classes"].items()
+        )
+        logger.info(
+            "PIPELINE | id=%s | stage=extract | status=report | worker_utilisation=%.4f | wait_sec_avg=%s | wait_sec_max=%s | wait_sec_p95=%s | media_active_max=%d | bundles_per_sec=%s",
+            self.pipeline_id,
+            snapshot.get("worker_utilisation", 0.0),
+            snapshot.get("wait_sec_avg", "n/a"),
+            snapshot.get("wait_sec_max", "n/a"),
+            snapshot.get("wait_sec_p95", "n/a"),
+            snapshot["media_active_max"],
+            throughput or "n/a",
+        )
+
+    def finish(
+        self,
+        status: str,
+        worker_count: int | None = None,
+        wall_sec: float | None = None,
+    ) -> None:
         """Append the summary record and release the profile file. Never raises."""
 
         if self._finished:
             return
         self._finished = True
-        summary = {
+        summary: Dict[str, Any] = {
             "record": "summary",
             "version": _EXTRACTION_PROFILE_VERSION,
             "pipeline_id": self.pipeline_id,
@@ -304,7 +446,9 @@ class ExtractionProfiler:
             "output_bytes": self.output_bytes,
             "queue_depth_avg": round(self.queue_depth_avg(), 4),
             "queue_depth_max": self.queue_depth_max(),
+            "max_active_workers": self.max_active_workers,
         }
+        summary.update(self.performance_snapshot(worker_count, wall_sec))
         try:
             handle = self._open_profile_file()
             if handle is not None:
@@ -321,12 +465,68 @@ class ExtractionProfiler:
                 self._profile_file.close()
                 self._profile_file = None
 
+    def write_prometheus_textfile(
+        self, metrics_path: StdPath | str, worker_count: int, wall_sec: float
+    ) -> None:
+        """Write a Prometheus textfile-format metrics snapshot. Never raises.
+
+        Advisory production monitoring (extraction-worker roadmap Phase 5):
+        the textfile collector convention turns a batch updater into scrapeable
+        metrics without a long-lived HTTP endpoint. IO failures degrade to a
+        warning and never affect extraction.
+        """
+
+        snapshot = self.performance_snapshot(worker_count, wall_sec)
+        lines = [
+            "# HELP sekai_updater_extraction_bundles_total Attempted extractions by cost class.",
+            "# TYPE sekai_updater_extraction_bundles_total counter",
+        ]
+        for name, stats in snapshot["cost_classes"].items():
+            lines.append(
+                f'sekai_updater_extraction_bundles_total{{cost_class="{name}"}} {stats["bundles"]}'
+            )
+        lines.extend(
+            [
+                "# HELP sekai_updater_extraction_failed_total Failed extractions.",
+                "# TYPE sekai_updater_extraction_failed_total counter",
+                f"sekai_updater_extraction_failed_total {self.failed_count}",
+                "# HELP sekai_updater_extraction_seconds_total Total extraction seconds across workers.",
+                "# TYPE sekai_updater_extraction_seconds_total counter",
+                f"sekai_updater_extraction_seconds_total {self.total_extraction_sec:.6f}",
+                "# HELP sekai_updater_queue_depth_max Maximum sampled extraction queue depth.",
+                "# TYPE sekai_updater_queue_depth_max gauge",
+                f"sekai_updater_queue_depth_max {self.queue_depth_max()}",
+                "# HELP sekai_updater_media_active_max Maximum concurrently active media-classified extractions.",
+                "# TYPE sekai_updater_media_active_max gauge",
+                f"sekai_updater_media_active_max {snapshot['media_active_max']}",
+                "# HELP sekai_updater_worker_utilisation_ratio Extraction busy time over worker capacity.",
+                "# TYPE sekai_updater_worker_utilisation_ratio gauge",
+            ]
+        )
+        if "worker_utilisation" in snapshot:
+            lines.append(f"sekai_updater_worker_utilisation_ratio {snapshot['worker_utilisation']}")
+        try:
+            target = StdPath(os.fspath(metrics_path))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            logger.warning(
+                "PIPELINE | id=%s | stage=extract | status=metrics_write_failed | item=%s",
+                self.pipeline_id,
+                metrics_path,
+            )
+
     def _open_profile_file(self):
         if self._profile_broken or self.profile_path is None:
             return None
         if self._profile_file is None:
             self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+            append_separator = _file_needs_leading_newline(self.profile_path)
             self._profile_file = open(self.profile_path, "a", encoding="utf-8")
+            if append_separator:
+                # A stale or crashed writer may have left a partial line; keep
+                # new records on their own lines so the file stays parseable.
+                self._profile_file.write("\n")
         return self._profile_file
 
     def _write_record(self, record: Dict[str, Any]) -> None:
@@ -617,6 +817,7 @@ async def _download_one_item(
                 bundle=bundle,
                 bundle_save_path=bundle_save_path,
                 remove_bundle_after_extract=remove_bundle_after_extract,
+                enqueued_monotonic=asyncio.get_running_loop().time(),
             )
         )
     except asyncio.CancelledError:
@@ -726,12 +927,22 @@ async def _extract_one_artifact(
     handed_to_upload = False
     loop = asyncio.get_running_loop()
     extract_started = loop.time()
+    input_bytes: int | None = None
+    try:
+        input_bytes = (await artifact.bundle_save_path.stat()).st_size
+    except OSError:
+        pass
+    queue_wait_sec = (
+        loop.time() - artifact.enqueued_monotonic
+        if artifact.enqueued_monotonic is not None
+        else None
+    )
     try:
         await extract_single_bundle(artifact, config)
         duration_sec = loop.time() - extract_started
         output_bytes = await _total_output_bytes(artifact.exported_list)
         logger.debug(
-            "PIPELINE | id=%s | worker=%s | stage=extract | action=bundle_timing | item=%s | duration_sec=%.3f | outputs=%d | output_bytes=%d | cost_class=%s",
+            "PIPELINE | id=%s | worker=%s | stage=extract | action=bundle_timing | item=%s | duration_sec=%.3f | outputs=%d | output_bytes=%d | cost_class=%s | wait_sec=%s",
             pipeline_id,
             name,
             label,
@@ -739,6 +950,7 @@ async def _extract_one_artifact(
             len(artifact.exported_list or []),
             output_bytes,
             artifact.cost_class,
+            f"{queue_wait_sec:.3f}" if queue_wait_sec is not None else "n/a",
         )
         profiler.record_bundle(
             label,
@@ -746,6 +958,8 @@ async def _extract_one_artifact(
             len(artifact.exported_list or []),
             output_bytes,
             cost_class=artifact.cost_class,
+            queue_wait_sec=queue_wait_sec,
+            input_bytes=input_bytes,
         )
         logger.debug(
             "PIPELINE | id=%s | worker=%s | stage=extract | action=done_item | item=%s | outputs=%s",
@@ -767,6 +981,8 @@ async def _extract_one_artifact(
             loop.time() - extract_started,
             exc,
             cost_class=artifact.cost_class,
+            queue_wait_sec=queue_wait_sec,
+            input_bytes=input_bytes,
         )
         logger.error(
             "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s | error=%s",
@@ -952,13 +1168,18 @@ async def _upload_stage(
 
 async def _sample_queue_depths(
     profiler: ExtractionProfiler,
-    extract_queue: asyncio.Queue,
+    extract_queue: asyncio.Queue | ExtractionScheduler,
     interval: float = _QUEUE_DEPTH_SAMPLE_INTERVAL_SEC,
 ) -> None:
-    """Sample the extraction queue depth at a fixed interval until cancelled."""
+    """Sample extraction queue depth and scheduler saturation until cancelled."""
 
     while True:
         profiler.record_queue_depth(extract_queue.qsize())
+        if isinstance(extract_queue, ExtractionScheduler):
+            profiler.record_scheduler_sample(
+                extract_queue.active_count(),
+                extract_queue.active_media_count(),
+            )
         await asyncio.sleep(interval)
 
 
@@ -1166,8 +1387,13 @@ async def run_pipeline(
 
         profile_sampler.cancel()
         await asyncio.gather(profile_sampler, return_exceptions=True)
+        wall_sec = asyncio.get_running_loop().time() - start_time
         profiler.log_summary()
-        profiler.finish("completed")
+        profiler.log_performance_report(extract_concurrency, wall_sec)
+        profiler.finish("completed", extract_concurrency, wall_sec)
+        metrics_path = _resolve_prometheus_metrics_path(config)
+        if metrics_path is not None:
+            profiler.write_prometheus_textfile(metrics_path, extract_concurrency, wall_sec)
 
     succeeded = total_items - len(failed_tasks)
     logger.info(
