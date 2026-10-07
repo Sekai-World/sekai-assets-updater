@@ -93,17 +93,17 @@ def get_extract_process_concurrency(config) -> int:
 def get_extract_core_concurrency(config) -> int:
     """Concurrency of the core extract pool (light and unclassified bundles)."""
 
-    return sanitize_concurrency(
-        getattr(config, "EXTRACT_CORE_CONCURRENCY", get_extract_process_concurrency(config))
-    )
+    fallback = get_extract_process_concurrency(config)
+    concurrency = getattr(config, "EXTRACT_CORE_CONCURRENCY", fallback)
+    return fallback if concurrency is None else sanitize_concurrency(concurrency)
 
 
 def get_extract_media_concurrency(config) -> int:
     """Concurrency of the media extract pool (media-classified bundles)."""
 
-    return sanitize_concurrency(
-        getattr(config, "EXTRACT_MEDIA_CONCURRENCY", get_extract_process_concurrency(config))
-    )
+    fallback = get_extract_process_concurrency(config)
+    concurrency = getattr(config, "EXTRACT_MEDIA_CONCURRENCY", fallback)
+    return fallback if concurrency is None else sanitize_concurrency(concurrency)
 
 
 def get_extract_executor_kind(config) -> str:

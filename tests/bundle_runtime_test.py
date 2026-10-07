@@ -101,6 +101,23 @@ def test_extract_core_and_media_concurrency_defaults() -> None:
     assert bundle_runtime.get_extract_media_concurrency(split) == 1
 
 
+@pytest.mark.parametrize(
+    ("setting", "get_concurrency"),
+    [
+        ("EXTRACT_CORE_CONCURRENCY", bundle_runtime.get_extract_core_concurrency),
+        ("EXTRACT_MEDIA_CONCURRENCY", bundle_runtime.get_extract_media_concurrency),
+    ],
+)
+@pytest.mark.parametrize("value", ["invalid", 0, -1])
+def test_extract_pool_concurrency_rejects_invalid_overrides(
+    setting, get_concurrency, value
+) -> None:
+    config = SimpleNamespace(MAX_CONCURRENCY_EXTRACTS=4, **{setting: value})
+
+    with pytest.raises(ValueError, match="positive integer"):
+        get_concurrency(config)
+
+
 def test_extract_pool_for_routes_cost_class_and_caches(monkeypatch) -> None:
     FakeExecutor.instances.clear()
     monkeypatch.setattr(bundle_runtime, "ProcessPoolExecutor", FakeExecutor)
@@ -128,3 +145,25 @@ def test_extract_pool_for_routes_cost_class_and_caches(monkeypatch) -> None:
     assert runtime._media_extract_pool is None
     assert core.shutdown_calls == [(False, False)]
     assert media.shutdown_calls == [(False, False)]
+
+
+def test_extract_pool_for_uses_default_for_explicit_none_concurrency(monkeypatch) -> None:
+    FakeExecutor.instances.clear()
+    monkeypatch.setattr(bundle_runtime, "ProcessPoolExecutor", FakeExecutor)
+    runtime = bundle_runtime.BundleRuntime()
+    config = SimpleNamespace(
+        MAX_CONCURRENCY_EXTRACTS=4,
+        EXTRACT_CORE_CONCURRENCY=None,
+        EXTRACT_MEDIA_CONCURRENCY=None,
+    )
+
+    fixed = runtime.extract_pool_for(config, None)
+    core = runtime.extract_pool_for(config, "light")
+    media = runtime.extract_pool_for(config, "media")
+
+    assert fixed is core
+    assert core is not media
+    assert core.max_workers == 4
+    assert media.max_workers == 4
+
+    runtime.shutdown()
