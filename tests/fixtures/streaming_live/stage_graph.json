@@ -1,0 +1,58 @@
+{
+  "scene3d/stage/base_007_sp_live": {
+    "bundleName": "scene3d/stage/base_007_sp_live",
+    "cacheDirectoryName": "1a2b",
+    "cacheFileName": "3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f",
+    "category": "Stage3d",
+    "crc": "1000000001",
+    "dependencies": [
+      "scene3d/stage/shared_base_stage",
+      "scene3d/shader/custom_lil_001",
+      "scene3d/texture/tex_stage_common"
+    ],
+    "fileSize": 10485760,
+    "hash": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/stage/base_007_sp_live"]
+  },
+  "scene3d/stage/shared_base_stage": {
+    "bundleName": "scene3d/stage/shared_base_stage",
+    "cacheDirectoryName": "2b3c",
+    "cacheFileName": "4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f90",
+    "category": "Stage3d",
+    "crc": "1000000002",
+    "dependencies": ["scene3d/shader/custom_lil_001"],
+    "fileSize": 2097152,
+    "hash": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/stage/shared_base_stage"]
+  },
+  "scene3d/shader/custom_lil_001": {
+    "bundleName": "scene3d/shader/custom_lil_001",
+    "cacheDirectoryName": "3c4d",
+    "cacheFileName": "5e6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2",
+    "category": "Shader3d",
+    "crc": "1000000003",
+    "dependencies": [],
+    "fileSize": 262144,
+    "hash": "2b3c4d5e6f708192a3b4c5d6e7f8091a2b3",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/shader/custom_lil_001"]
+  },
+  "scene3d/texture/tex_stage_common": {
+    "bundleName": "scene3d/texture/tex_stage_common",
+    "cacheDirectoryName": "4d5e",
+    "cacheFileName": "6f7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3",
+    "category": "Stage3d",
+    "crc": "1000000004",
+    "dependencies": [],
+    "fileSize": 5242880,
+    "hash": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+    "isBuiltin": false,
+    "isRelocate": true,
+    "paths": ["live/scene3d/texture/tex_stage_common"]
+  }
+}
