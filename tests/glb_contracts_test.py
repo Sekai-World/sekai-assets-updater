@@ -181,6 +181,8 @@ def test_stage_fixture_builds_expected_closure() -> None:
     plan = stage_plan_from_fixture()
 
     assert plan.bundle_names() == (
+        "scene3d/camera/stage_camera_decoration",
+        "scene3d/light/stage_light_rig",
         "scene3d/shader/custom_lil_001",
         "scene3d/stage/base_007_sp_live",
         "scene3d/stage/shared_base_stage",
