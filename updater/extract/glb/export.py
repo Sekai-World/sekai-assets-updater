@@ -21,7 +21,12 @@ from updater.extract.glb.collection import (
     CollectionFileTable,
     GlbCollectionExtraction,
 )
+from updater.extract.glb.contracts import DIAG_MISSING_TARGET
 from updater.extract.glb.gltf_writer import GlbScene, content_hash, validate_glb_bytes
+from updater.extract.glb.materials import convert_material
+from updater.extract.glb.math3d import mirror_position as _mirror_position
+from updater.extract.glb.math3d import mirror_rotation as _mirror_rotation
+from updater.extract.glb.skin import BindingSkinWeightsProvider, SkinWeightsProvider
 from updater.unity_rs_adapter import UnityRsEnvironment
 
 GENERATOR = "sekai-assets-updater glb-export/1"
@@ -37,7 +42,8 @@ CONVERSION_RULES = {
     "normal": MIRROR_X_TRANSLATION,
     "winding": "reversed_after_mirror",
     "node_naming": "unity_object_name_verbatim",
-    "materials": "single placeholder pbr material (converted materials join in phase 5)",
+    "materials": "converted unity materials (pbr/unlit) with embedded png textures",
+    "skins": "skeleton joints with inverse bind matrices; per-vertex weights only via provider",
 }
 
 
@@ -94,16 +100,6 @@ def select_root_subtree(scene_nodes: Sequence[Any], root_identity: tuple[int, in
         ordered.append(current)
         queue.extend(children_map.get(identity, ()))
     return ordered
-
-
-def _mirror_position(value: tuple[float, float, float]) -> tuple[float, float, float]:
-    # "+ 0.0" normalizes IEEE negative zero so identical inputs always
-    # produce byte-identical buffers.
-    return (-value[0] + 0.0, value[1] + 0.0, value[2] + 0.0)
-
-
-def _mirror_rotation(value: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-    return (value[0], -value[1], -value[2], value[3])
 
 
 def parse_obj_mesh(obj_bytes: bytes) -> dict[str, Any]:
@@ -180,6 +176,82 @@ def _hierarchy_path(nodes: dict[_NodeRef, Any], current: Any, root_identity: _No
     return "/".join(reversed(names))
 
 
+class _MaterialBinder:
+    """Converts and embeds materials for one export, deduplicated by identity
+    and texture content hash."""
+
+    def __init__(
+        self,
+        scene: GlbScene,
+        environment: UnityRsEnvironment,
+        table: CollectionFileTable,
+        identity_to_bundle: dict[int, str],
+    ) -> None:
+        self._scene = scene
+        self._environment = environment
+        self._table = table
+        self._identity_to_bundle = identity_to_bundle
+        self._by_identity: dict[tuple[int, int], int] = {}
+        self._textures_by_hash: dict[str, int] = {}
+        self.diagnostics: list[dict[str, Any]] = []
+        self.mappings: list[dict[str, Any]] = []
+
+    def index_for(self, material_ptr: tuple[int, int]) -> int | None:
+        identity = (material_ptr[0], material_ptr[1])
+        known = self._by_identity.get(identity)
+        if known is not None:
+            return known
+        material_object = self._environment.object_by_identity(*identity)
+        if material_object is None:
+            self._append_diagnostic(
+                DIAG_MISSING_TARGET,
+                f"material {identity} is not part of the collection",
+                identity,
+            )
+            return None
+        conversion = convert_material(self._environment, self._table, material_object)
+        material_index = self._scene.add_material(conversion.gltf_material)
+        for embed in conversion.textures:
+            key = content_hash(embed.png_bytes)
+            texture_index = self._textures_by_hash.get(key)
+            if texture_index is None:
+                texture_index = self._scene.add_texture(self._scene.add_image(embed.png_bytes))
+                self._textures_by_hash[key] = texture_index
+            self._scene.bind_material_texture(material_index, embed.slot, texture_index)
+        self._by_identity[identity] = material_index
+        for diagnostic in conversion.diagnostics:
+            self.diagnostics.append(
+                {
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "source": self._source(identity),
+                }
+            )
+        self.mappings.append(
+            {
+                "bundle_name": self._identity_to_bundle.get(identity[0]),
+                "file_index": identity[0],
+                "path_id": identity[1],
+                "gltf_material": material_index,
+                "texture_count": len(conversion.textures),
+                "source_name": conversion.source_name,
+            }
+        )
+        return material_index
+
+    def _append_diagnostic(self, code: str, message: str, identity: tuple[int, int]) -> None:
+        self.diagnostics.append(
+            {"code": code, "message": message, "source": self._source(identity)}
+        )
+
+    def _source(self, identity: tuple[int, int]) -> dict[str, Any]:
+        return {
+            "bundle_name": self._identity_to_bundle.get(identity[0]),
+            "file_index": identity[0],
+            "path_id": identity[1],
+        }
+
+
 def export_root_glb(
     environment: UnityRsEnvironment,
     table: CollectionFileTable,
@@ -189,6 +261,7 @@ def export_root_glb(
     bundle_name_for_file: dict[int, str] | None = None,
     include_fbx_diagnostic: bool = False,
     allow_incomplete: bool = False,
+    skin_weights_provider: SkinWeightsProvider | None = None,
 ) -> GlbExport:
     """Export one root's subtree as a deterministic GLB artifact.
 
@@ -196,8 +269,11 @@ def export_root_glb(
     publishable unless ``allow_incomplete`` marks the artifact as a local
     diagnostic (the publish path in sync_worker never passes it — required
     L2 failures make a package non-publishable).  The resulting manifest
-    embeds the conversion rules, the GLB content hash, and per-node and
-    per-mesh Unity mappings.
+    embeds the conversion rules, the GLB content hash, per-node and
+    per-mesh Unity mappings, converted materials, and any structured
+    material/skin diagnostics.  ``skin_weights_provider`` defaults to the
+    binding-backed provider, which resolves skeletons but supplies no
+    per-vertex weights.
     """
 
     if not extraction.report.publishable and not allow_incomplete:
@@ -208,12 +284,15 @@ def export_root_glb(
     identity_to_bundle = bundle_name_for_file or {
         identity.file_index: identity.bundle_name for identity in table.identities
     }
+    provider = skin_weights_provider or BindingSkinWeightsProvider(environment, table)
 
     scene = GlbScene()
+    binder = _MaterialBinder(scene, environment, table, identity_to_bundle)
     material_index = scene.add_default_material()
     node_index: dict[_NodeRef, int] = {}
     node_mappings: list[dict[str, Any]] = []
     mesh_mappings: list[dict[str, Any]] = []
+    skinned_nodes: list[tuple[Any, _NodeRef, int, int]] = []
     parents: dict[_NodeRef, Any] = {
         _NodeRef(node.file_index, node.path_id): node for node in scene_nodes
     }
@@ -237,6 +316,10 @@ def export_root_glb(
                         mesh_identity.file_index, mesh_identity.path_id
                     )
                 )
+                if node.materials:
+                    node_material = binder.index_for(node.materials[0])
+                else:
+                    node_material = None
                 hierarchy_path = _hierarchy_path(parents, node, root_ref)
                 mesh_index = scene.add_mesh(
                     name=mesh_object.name or f"mesh_{mesh_identity.path_id}",
@@ -244,7 +327,7 @@ def export_root_glb(
                     normals=geometry["normals"],
                     texcoords=geometry["texcoords"],
                     indices=geometry["indices"],
-                    material_index=material_index,
+                    material_index=node_material or material_index,
                 )
                 gltf_node["mesh"] = mesh_index
                 mesh_mappings.append(
@@ -257,6 +340,8 @@ def export_root_glb(
                         "hierarchy_path": hierarchy_path,
                     }
                 )
+                if node.bones:
+                    skinned_nodes.append((node, identity, mesh_index, len(geometry["positions"])))
         index = scene.add_node(gltf_node)
         node_index[identity] = index
         node_mappings.append(
@@ -288,6 +373,15 @@ def export_root_glb(
             root_nodes.append(node_index[identity])
     root_nodes.sort()
 
+    skin_mappings, skin_diagnostics = _attach_skins(
+        scene,
+        provider,
+        scene_nodes,
+        skinned_nodes,
+        node_index,
+        identity_to_bundle,
+    )
+
     glb_bytes = scene.encode(root_nodes=root_nodes, generator=GENERATOR)
     validate_glb_bytes(glb_bytes)
 
@@ -307,7 +401,13 @@ def export_root_glb(
         "glb_byte_length": len(glb_bytes),
         "node_count": len(subtree),
         "mesh_count": len(mesh_mappings),
-        "mappings": {"nodes": node_mappings, "meshes": mesh_mappings},
+        "mappings": {
+            "nodes": node_mappings,
+            "meshes": mesh_mappings,
+            "materials": binder.mappings,
+            "skins": skin_mappings,
+        },
+        "diagnostics": binder.diagnostics + skin_diagnostics,
         "report_summary": extraction.report.summary(),
     }
     fbx_bytes: bytes | None = None
@@ -316,6 +416,111 @@ def export_root_glb(
             root_identity[0], root_identity[1], include_animations=False
         )
     return GlbExport(glb_bytes=glb_bytes, manifest=manifest, fbx_diagnostic=fbx_bytes)
+
+
+def _attach_skins(
+    scene: GlbScene,
+    provider: SkinWeightsProvider,
+    scene_nodes: Sequence[Any],
+    skinned_nodes: Sequence[tuple[Any, _NodeRef, int, int]],
+    node_index: dict[_NodeRef, int],
+    identity_to_bundle: dict[int, str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Resolve and attach skins for the subtree's skinned nodes.
+
+    Every provider diagnostic is recorded.  A skin is attached only when the
+    provider supplied per-vertex weights, every joint is inside the exported
+    subtree, and the weight count matches the mesh's vertex count; otherwise
+    the skeleton's nodes remain in the GLB and the blocking reason becomes a
+    manifest diagnostic.
+    """
+
+    mappings: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for node, identity, mesh_index, vertex_count in skinned_nodes:
+        gltf_node = node_index[identity]
+        try:
+            weights = provider.skin_weights(node, scene_nodes)
+        except ValueError as exc:
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": f"renderer {identity} skeleton failed: {exc}",
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+        for diagnostic in weights.diagnostics:
+            diagnostics.append(
+                {
+                    "code": diagnostic.code,
+                    "message": diagnostic.message,
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+        skeleton = weights.skeleton
+        mapping: dict[str, Any] = {
+            "bundle_name": identity_to_bundle.get(identity.file_index),
+            "file_index": identity.file_index,
+            "path_id": identity.path_id,
+            "gltf_node": gltf_node,
+            "gltf_mesh": mesh_index,
+            "joints": len(skeleton.joints),
+            "weights_available": weights.weights_available,
+        }
+        mappings.append(mapping)
+        if not weights.weights_available:
+            continue
+        missing = [
+            joint for joint in skeleton.joints if _NodeRef(*joint.identity) not in node_index
+        ]
+        if missing:
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": (
+                        f"renderer {identity}: {len(missing)} joints outside the"
+                        " exported subtree; no skin attached"
+                    ),
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+        if (
+            weights.vertex_joints is None
+            or weights.vertex_weights is None
+            or len(weights.vertex_joints) != vertex_count
+            or len(weights.vertex_joints) != len(weights.vertex_weights)
+        ):
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": (
+                        f"renderer {identity}: weight count does not match the"
+                        f" mesh's {vertex_count} vertices; no skin attached"
+                    ),
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+        inverse_binds = scene.add_inverse_bind_matrices(list(skeleton.inverse_bind_matrices))
+        skin_index = scene.add_skin(
+            [node_index[_NodeRef(*joint.identity)] for joint in skeleton.joints],
+            inverse_binds,
+        )
+        joints_accessor, weights_accessor = scene.add_vertex_skin_data(
+            list(weights.vertex_joints), list(weights.vertex_weights)
+        )
+        scene.attach_skin_to_primitive(mesh_index, skin_index, joints_accessor, weights_accessor)
+    return mappings, diagnostics
+
+
+def _diagnostic_source(identity: _NodeRef, identity_to_bundle: dict[int, str]) -> dict[str, Any]:
+    return {
+        "bundle_name": identity_to_bundle.get(identity.file_index),
+        "file_index": identity.file_index,
+        "path_id": identity.path_id,
+    }
 
 
 EXPORT_MANIFEST_FIELDS = {
@@ -329,6 +534,7 @@ EXPORT_MANIFEST_FIELDS = {
     "node_count",
     "mesh_count",
     "mappings",
+    "diagnostics",
     "report_summary",
 }
 
@@ -351,8 +557,19 @@ def _validate_export_manifest(value: Any) -> dict[str, Any]:
     if not isinstance(value["conversion_rules"], dict) or not value["conversion_rules"]:
         raise ValueError("export manifest.conversion_rules must be a mapping")
     mappings = value["mappings"]
-    if not isinstance(mappings, dict) or set(mappings) != {"nodes", "meshes"}:
-        raise ValueError("export manifest.mappings must contain nodes and meshes")
+    if not isinstance(mappings, dict) or set(mappings) != {
+        "nodes",
+        "meshes",
+        "materials",
+        "skins",
+    }:
+        raise ValueError("export manifest.mappings must contain nodes, meshes, materials, skins")
+    diagnostics = value["diagnostics"]
+    if not isinstance(diagnostics, list):
+        raise ValueError("export manifest.diagnostics must be a list")
+    for diagnostic in diagnostics:
+        if not isinstance(diagnostic, dict) or not isinstance(diagnostic.get("code"), str):
+            raise ValueError("export manifest.diagnostics entries need string codes")
     return value
 
 

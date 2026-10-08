@@ -37,8 +37,8 @@ TYPE_VEC4 = "VEC4"
 TYPE_SCALAR = "SCALAR"
 
 # Byte widths per glTF component type (only the two used here).
-_COMPONENT_SIZES = {COMPONENT_FLOAT: 4, COMPONENT_UNSIGNED_INT: 4}
-_TYPE_COMPONENT_COUNTS = {TYPE_VEC2: 2, TYPE_VEC3: 3, TYPE_SCALAR: 1}
+_COMPONENT_SIZES = {COMPONENT_FLOAT: 4, COMPONENT_UNSIGNED_INT: 4, 5123: 2}
+_TYPE_COMPONENT_COUNTS = {TYPE_VEC2: 2, TYPE_VEC3: 3, TYPE_VEC4: 4, TYPE_SCALAR: 1, "MAT4": 16}
 
 
 def _pad4(size: int) -> int:
@@ -58,6 +58,7 @@ class GlbScene:
         self._images: list[dict[str, Any]] = []
         self._textures: list[dict[str, Any]] = []
         self._samplers: list[dict[str, Any]] = []
+        self._skins: list[dict[str, Any]] = []
         self._default_material_index: int | None = None
 
     # -- buffer plumbing ---------------------------------------------------
@@ -71,22 +72,15 @@ class GlbScene:
         bounds: bool = False,
     ) -> int:
         stride = _COMPONENT_SIZES[component_type] * _TYPE_COMPONENT_COUNTS[accessor_type]
-        padding = _pad4(len(self._bin))
-        self._bin.extend(b"\x00" * padding)
-        offset = len(self._bin)
-        if component_type == COMPONENT_FLOAT:
-            fmt = "<" + "f" * (stride // 4)
-            payload = b"".join(struct.pack(fmt, *element) for element in elements)
-        else:
-            payload = struct.pack(f"<{len(elements)}I", *(element[0] for element in elements))
-        self._bin.extend(payload)
+        target = (
+            TARGET_ELEMENT_ARRAY_BUFFER if accessor_type == TYPE_SCALAR else TARGET_ARRAY_BUFFER
+        )
+        offset = self._append_bin(b"".join(self._pack_elements(elements, component_type, stride)))
         view = {
             "buffer": 0,
             "byteOffset": offset,
             "byteLength": stride * len(elements),
-            "target": (
-                TARGET_ELEMENT_ARRAY_BUFFER if accessor_type == TYPE_SCALAR else TARGET_ARRAY_BUFFER
-            ),
+            "target": target,
         }
         self._buffer_views.append(view)
         accessor: dict[str, Any] = {
@@ -104,6 +98,18 @@ class GlbScene:
             ]
         self._accessors.append(accessor)
         return len(self._accessors) - 1
+
+    def _pack_elements(self, elements, component_type: int, stride: int):
+        if component_type == COMPONENT_FLOAT:
+            fmt = "<" + "f" * (stride // 4)
+            return [struct.pack(fmt, *element) for element in elements]
+        return [struct.pack("<I", element[0]) for element in elements]
+
+    def _append_bin(self, payload: bytes) -> int:
+        self._bin.extend(b"\x00" * _pad4(len(self._bin)))
+        offset = len(self._bin)
+        self._bin.extend(payload)
+        return offset
 
     def add_positions(self, positions: list[tuple[float, float, float]]) -> int:
         return self._add_accessor(positions, COMPONENT_FLOAT, TYPE_VEC3, bounds=True)
@@ -134,6 +140,116 @@ class GlbScene:
             )
             self._default_material_index = len(self._materials) - 1
         return self._default_material_index
+
+    # -- textures and skins ------------------------------------------------
+
+    def add_image(self, png_bytes: bytes) -> int:
+        """Embed one PNG payload; returns the glTF image index."""
+
+        offset = self._append_bin(png_bytes)
+        self._buffer_views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(png_bytes)})
+        self._images.append({"bufferView": len(self._buffer_views) - 1, "mimeType": "image/png"})
+        return len(self._images) - 1
+
+    def add_sampler(self, sampler: dict[str, Any] | None = None) -> int:
+        self._samplers.append(sampler or {"wrapS": 10497, "wrapT": 10497})
+        return len(self._samplers) - 1
+
+    def add_texture(self, image_index: int, sampler_index: int = 0) -> int:
+        if not self._samplers:
+            self.add_sampler()  # sampler 0 is the implicit default
+        self._textures.append({"sampler": sampler_index, "source": image_index})
+        return len(self._textures) - 1
+
+    def bind_material_texture(self, material_index: int, slot: str, texture_index: int) -> None:
+        """Bind a converted material's placeholder slot to a real texture."""
+
+        material = self._materials[material_index]
+        if slot in material:
+            material[slot]["index"] = texture_index
+        else:
+            pbr = material.get("pbrMetallicRoughness")
+            if isinstance(pbr, dict) and slot in pbr:
+                pbr[slot]["index"] = texture_index
+
+    def add_material(self, gltf_material: dict[str, Any]) -> int:
+        self._materials.append(gltf_material)
+        return len(self._materials) - 1
+
+    def add_inverse_bind_matrices(self, matrices: list[tuple[float, ...]]) -> int:
+        """Add one float32 MAT4 accessor with per-joint inverse binds."""
+
+        offset = self._append_bin(b"".join(struct.pack("<16f", *matrix) for matrix in matrices))
+        self._buffer_views.append(
+            {"buffer": 0, "byteOffset": offset, "byteLength": 64 * len(matrices)}
+        )
+        self._accessors.append(
+            {
+                "bufferView": len(self._buffer_views) - 1,
+                "componentType": COMPONENT_FLOAT,
+                "count": len(matrices),
+                "type": "MAT4",
+            }
+        )
+        return len(self._accessors) - 1
+
+    def add_skin(self, joints: list[int], inverse_bind_accessor: int) -> int:
+        self._skins.append({"joints": list(joints), "inverseBindMatrices": inverse_bind_accessor})
+        return len(self._skins) - 1
+
+    def add_vertex_skin_data(
+        self,
+        joint_indices: list[tuple[int, int, int, int]],
+        weights: list[tuple[float, float, float, float]],
+    ) -> tuple[int, int]:
+        """Add JOINTS_0 (ushort) and WEIGHTS_0 (float) accessors for one mesh."""
+
+        offset = self._append_bin(b"".join(struct.pack("<4H", *joints) for joints in joint_indices))
+        self._buffer_views.append(
+            {
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": 8 * len(joint_indices),
+                "target": TARGET_ARRAY_BUFFER,
+            }
+        )
+        self._accessors.append(
+            {
+                "bufferView": len(self._buffer_views) - 1,
+                "componentType": 5123,
+                "count": len(joint_indices),
+                "type": TYPE_VEC4,
+            }
+        )
+        joints_accessor = len(self._accessors) - 1
+
+        offset = self._append_bin(b"".join(struct.pack("<4f", *w) for w in weights))
+        self._buffer_views.append(
+            {
+                "buffer": 0,
+                "byteOffset": offset,
+                "byteLength": 16 * len(weights),
+                "target": TARGET_ARRAY_BUFFER,
+            }
+        )
+        self._accessors.append(
+            {
+                "bufferView": len(self._buffer_views) - 1,
+                "componentType": COMPONENT_FLOAT,
+                "count": len(weights),
+                "type": TYPE_VEC4,
+            }
+        )
+        weights_accessor = len(self._accessors) - 1
+        return joints_accessor, weights_accessor
+
+    def attach_skin_to_primitive(
+        self, mesh_index: int, skin_index: int, joints_accessor: int, weights_accessor: int
+    ) -> None:
+        primitive = self._meshes[mesh_index]["primitives"][0]
+        primitive["attributes"]["JOINTS_0"] = joints_accessor
+        primitive["attributes"]["WEIGHTS_0"] = weights_accessor
+        primitive["skin"] = skin_index
 
     # -- scene assembly ----------------------------------------------------
 
@@ -195,7 +311,29 @@ class GlbScene:
             doc["images"] = self._images
         if self._samplers:
             doc["samplers"] = self._samplers
+        if self._skins:
+            doc["skins"] = self._skins
+        extensions_used = self._extensions_used()
+        if extensions_used:
+            doc["extensionsUsed"] = extensions_used
         return doc
+
+    def _extensions_used(self) -> list[str]:
+        """Collect extension names used by materials and their texture slots."""
+
+        texture_slots = ("baseColorTexture", "normalTexture", "emissiveTexture")
+        names: set[str] = set()
+        for material in self._materials:
+            names.update(material.get("extensions") or {})
+            containers = [material, material.get("pbrMetallicRoughness")]
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                for slot in texture_slots:
+                    holder = container.get(slot)
+                    if isinstance(holder, dict):
+                        names.update(holder.get("extensions") or {})
+        return sorted(names)
 
     def encode(self, *, root_nodes: list[int], generator: str) -> bytes:
         """Serialize the document and binary chunk into GLB bytes."""

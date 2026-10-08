@@ -361,3 +361,9 @@ def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
+
+
+# Phase 5 material/animation codes.
+DIAG_UNSUPPORTED_SHADER = "unsupported_shader"
+DIAG_SKIN_WEIGHTS_UNAVAILABLE = "skin_weights_unavailable"
+DIAG_ANIMATION_UNSUPPORTED_BINDING = "animation_unsupported_binding"
