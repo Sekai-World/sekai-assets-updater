@@ -100,9 +100,13 @@ def _classify(
         representation = "unlit"
     else:
         representation = "pbr"
-    if floats.get("_AlphaClip", 0.0) == 1.0:
+    # NOSONAR: Unity serializes shader toggles (_AlphaClip/_Surface) as
+    # exact float 0.0/1.0 — no arithmetic rounds into or out of these.
+    if floats.get("_AlphaClip", 0.0) == 1.0:  # NOSONAR
         alpha_mode = "MASK"
-    elif floats.get("_Surface", 0.0) == 1.0 or (render_queue is not None and render_queue >= 3000):
+    elif floats.get("_Surface", 0.0) == 1.0 or (  # NOSONAR
+        render_queue is not None and render_queue >= 3000
+    ):
         alpha_mode = "BLEND"
     else:
         alpha_mode = "OPAQUE"

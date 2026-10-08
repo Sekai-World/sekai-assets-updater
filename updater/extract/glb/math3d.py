@@ -37,7 +37,7 @@ IDENTITY4 = (
 def normalize_quaternion(value: Sequence[float]) -> Quat:
     x, y, z, w = (float(component) for component in value)
     norm = math.sqrt(x * x + y * y + z * z + w * w)
-    if norm == 0.0:
+    if norm == 0.0:  # NOSONAR - only a truly zero quaternion needs the fallback
         return (0.0, 0.0, 0.0, 1.0)
     return (x / norm + 0.0, y / norm + 0.0, z / norm + 0.0, w / norm + 0.0)
 
@@ -137,7 +137,7 @@ def invert_mat4(m: Sequence[float]) -> tuple[float, ...]:
         return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
 
     determinant = sum((-1) ** (0 + col) * entry(0, col) * minor(0, col) for col in range(4))
-    if determinant == 0.0:
+    if determinant == 0.0:  # NOSONAR - only an exactly singular matrix must raise
         raise ValueError("matrix is singular and cannot be inverted")
     inverse_determinant = 1.0 / determinant
     return tuple(

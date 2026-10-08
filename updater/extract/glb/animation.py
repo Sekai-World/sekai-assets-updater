@@ -116,6 +116,8 @@ def _next_in_slope(
     dx: float, previous: Mapping[str, Any], current: Mapping[str, Any]
 ) -> float | None:
     coefficient = previous["coeff"]
+    # NOSONAR: Unity marks stepped keys with exact 0.0f coefficients —
+    # the sentinel is bit-exact by serialization, never a rounded value.
     if coefficient[0] == 0.0 and coefficient[1] == 0.0 and coefficient[2] == 0.0:
         return None  # stepped tangent: unbounded slope, not JSON-representable
     dx = max(dx, 0.0001)
