@@ -427,7 +427,7 @@ requires-dist = [
     { name = "pjsekai-scores-rs-skia-image", specifier = "==0.5.0" },
     { name = "pycryptodome", specifier = "==3.22.0" },
     { name = "u-msgpack-python", specifier = "==2.8.0" },
-    { name = "unity-rs", specifier = "==0.5.3" },
+    { name = "unity-rs", specifier = "==0.5.4" },
 ]
 
 [package.metadata.requires-dev]
@@ -457,16 +457,16 @@ wheels = [
 
 [[package]]
 name = "unity-rs"
-version = "0.5.3"
+version = "0.5.4"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/87/46/bd58a440a50e08d7f1c3b091df3f06f7a1ae74d52ee52649617bf36c6a38/unity_rs-0.5.3.tar.gz", hash = "sha256:47ccb8c6b14487a83ec0848af13648bf62e9889542064960f5f8142a1b787245", size = 1906526, upload-time = "2026-10-08T01:41:29.057Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e2/00/5a126c31d8ea7b71cd690ed450974ca2dae96838f2e11d36b01fb7a91c55/unity_rs-0.5.4.tar.gz", hash = "sha256:cfe109c07a9ec9cf9294621db35050bbecf6ab14cd6a1d74430d050ea589cc0b", size = 1914904, upload-time = "2026-10-08T04:33:00.906Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/57/33/1f7102d3d25cfe97a726a0374b46cfc648bff9f40af8438b48e7d4aea5eb/unity_rs-0.5.3-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:7e956a9a5d8ec4cb30c01d68f6612d71d4a6f6ae92a9e73a1ea03fd79b215e84", size = 2747031, upload-time = "2026-10-08T01:41:18.836Z" },
-    { url = "https://files.pythonhosted.org/packages/19/20/b461523178b442b5bdb297924f242cb4a5a8664eddcbb569bb8fe12bb6cf/unity_rs-0.5.3-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:d354d1d5a469ac6a9ab8debcafebf8d65c475970b3e53ff6d984bf4b50ea4e45", size = 2610828, upload-time = "2026-10-08T01:41:20.581Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/52/7f18a4f39ada56185fe802a72b06c1d3dfc02e1f6e495280fc8589d6e9ce/unity_rs-0.5.3-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:d0ece6ce1fc15acd5a4f8feeaad3b1e47d1153aec81ebb7e8283a5de243d371c", size = 2661998, upload-time = "2026-10-08T01:41:22.277Z" },
-    { url = "https://files.pythonhosted.org/packages/28/66/bcd80fe5a39431c63ab95d8e48c75fbdf4691d4fccc51c63a0fbb2e27ba2/unity_rs-0.5.3-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:bc6f2414f6e0b3775037966fb5c7b84d597348d070da52ede47fb68876f674a3", size = 2864790, upload-time = "2026-10-08T01:41:23.891Z" },
-    { url = "https://files.pythonhosted.org/packages/b0/0c/f62891e206ad27b8ea663b2a4b49e888cb33050c4c3c1b4adbd74c5aa856/unity_rs-0.5.3-cp39-abi3-win_amd64.whl", hash = "sha256:b25adf4fee861b2119874dcc4f09210ee85532f179cdb8f22b775f6679ad4e28", size = 2790402, upload-time = "2026-10-08T01:41:25.647Z" },
-    { url = "https://files.pythonhosted.org/packages/0a/7c/90460f7737e04e64636977e437c20725693b19c3ea562aed61cab2b5dfe9/unity_rs-0.5.3-cp39-abi3-win_arm64.whl", hash = "sha256:d71992186764194654ef969e15afe3203528dfdfb0867998a1f1a89bc9daef5f", size = 2635823, upload-time = "2026-10-08T01:41:27.343Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/d0/19e2314856348588609480c92b0c1bb1e2fe0bc4c1e2e22438e19c329609/unity_rs-0.5.4-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:46f795c43af063a887e22a2df8ec4bdf3eda9b248d9de0f36cfd15e4eb4edffa", size = 2750269, upload-time = "2026-10-08T04:32:48.691Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/31/ebfffece0eca0ed82dfc6f9018f2a8272581174b6ca88e43b8de3f2164c0/unity_rs-0.5.4-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:7b63b643f839cad969257a57c6d49a447db0a0c06f92aa33f6ea667dff985b6e", size = 2624746, upload-time = "2026-10-08T04:32:51.153Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/c2/326687dff02b2ad54b6bc1df8945a7350e26bc85e75a9d879cce68d191ce/unity_rs-0.5.4-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ecee98b8ca605c372bec3c80cf758e4c0786a82ed649d174e64703c01d07aeb9", size = 2668941, upload-time = "2026-10-08T04:32:53.189Z" },
+    { url = "https://files.pythonhosted.org/packages/21/68/6d2e9bc2013f56ffb1a32c3b3e3d2465e8619f1116c3b186cd2512f22707/unity_rs-0.5.4-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:6b22e1abcbc0be0be2e8406c77f3f446048d4260860c29dabc187dceeda48db7", size = 2876702, upload-time = "2026-10-08T04:32:55.158Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/90/35c274204e74bda3fed584b3dc9141998af47521d22a892c1bc5c34646b9/unity_rs-0.5.4-cp39-abi3-win_amd64.whl", hash = "sha256:83fa8934d6d9b9283f0c9c1bbe83ab445d390b91ab65ada19a93e997427d4323", size = 2804427, upload-time = "2026-10-08T04:32:56.981Z" },
+    { url = "https://files.pythonhosted.org/packages/62/c8/bcfcaeee2fd3b741fd129490123903b885ea38f38a4c48d97121348f59ff/unity_rs-0.5.4-cp39-abi3-win_arm64.whl", hash = "sha256:2a86feb0fb722056e1417036297f56be057d95f03febc9b098d3798b9716bc61", size = 2648724, upload-time = "2026-10-08T04:32:58.801Z" },
 ]
 
 [[package]]
