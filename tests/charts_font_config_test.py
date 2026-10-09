@@ -72,3 +72,47 @@ def test_render_chart_passes_fonts_to_the_drawing(tmp_path: Path) -> None:
     assert _FakeDrawing.created[-1]["font_dirs"] is None
     assert chart_path.read_text() == "<svg/>"
     assert (tmp_path / "master.png").read_bytes() == b"\x89PNG"
+
+
+class _RecordingScore:
+    def __init__(self) -> None:
+        self.jackets: list[str] = []
+
+    def set_meta(self, **meta) -> None:
+        if "jacket" in meta:
+            self.jackets.append(meta["jacket"])
+
+
+class _JacketDrawing(_FakeDrawing):
+    def svg(self, score) -> str:
+        return f"<svg>{score.jackets[-1]}</svg>"
+
+    def png(self, score) -> bytes:
+        return score.jackets[-1].encode()
+
+
+def test_render_chart_links_the_public_jacket_in_the_svg(tmp_path: Path) -> None:
+    score = _RecordingScore()
+    scores = SimpleNamespace(
+        Score=SimpleNamespace(open_sus=lambda path: score),
+        Drawing=_JacketDrawing,
+    )
+    jacket_url = "https://jackets.example/jacket_s_001/jacket_s_001.png"
+    local_uri = (tmp_path / "jacket.png").as_uri()
+
+    async def prepare(jacket):
+        return local_uri, None
+
+    chart_path = tmp_path / "master.svg"
+    with (
+        patch.object(charts, "_load_scores_module", return_value=scores),
+        patch.object(charts, "_prepare_jacket", new=prepare),
+    ):
+        asyncio.run(
+            charts.render_chart(
+                str(tmp_path / "master.txt"), str(chart_path), {"title": "Song"}, jacket_url
+            )
+        )
+
+    assert chart_path.read_text() == f"<svg>{jacket_url}</svg>"
+    assert (tmp_path / "master.png").read_bytes() == local_uri.encode()

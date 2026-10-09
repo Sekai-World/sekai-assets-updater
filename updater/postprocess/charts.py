@@ -79,8 +79,12 @@ async def render_chart(
     scores = _load_scores_module()
     score = await asyncio.to_thread(scores.Score.open_sus, score_path)
     jacket_uri, jacket_tmpdir = await _prepare_jacket(jacket)
+    # The published SVG links the jacket, so it keeps the public URL; only the
+    # PNG renderer needs the local copy, whose temporary directory is removed
+    # below.
+    svg_jacket = jacket if urlparse(jacket).scheme in ("http", "https") else jacket_uri
     try:
-        score.set_meta(title=music["title"], jacket=jacket_uri)
+        score.set_meta(title=music["title"], jacket=svg_jacket)
         drawing = scores.Drawing(
             note_host="https://asset3.pjsekai.moe/live/note/custom01",
             style_sheet=DEFAULT_STYLE_SHEET,
@@ -95,6 +99,7 @@ async def render_chart(
         async with await open_file(chart_path, "wb") as f:
             await f.write(svg.encode("utf-8"))
 
+        score.set_meta(jacket=jacket_uri)
         png = await asyncio.to_thread(drawing.png, score)
         async with await open_file(png_path, "wb") as f:
             await f.write(png)
