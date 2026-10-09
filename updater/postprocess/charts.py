@@ -95,12 +95,14 @@ async def render_chart(
 
         png_path = chart_path.replace(".svg", ".png")
 
+        # Render both before writing either, so a failed PNG render (for
+        # example, no fonts) does not leave a lone SVG behind.
         svg = await asyncio.to_thread(drawing.svg, score)
-        async with await open_file(chart_path, "wb") as f:
-            await f.write(svg.encode("utf-8"))
-
         score.set_meta(jacket=jacket_uri)
         png = await asyncio.to_thread(drawing.png, score)
+
+        async with await open_file(chart_path, "wb") as f:
+            await f.write(svg.encode("utf-8"))
         async with await open_file(png_path, "wb") as f:
             await f.write(png)
     finally:

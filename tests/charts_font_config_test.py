@@ -116,3 +116,32 @@ def test_render_chart_links_the_public_jacket_in_the_svg(tmp_path: Path) -> None
 
     assert chart_path.read_text() == f"<svg>{jacket_url}</svg>"
     assert (tmp_path / "master.png").read_bytes() == local_uri.encode()
+
+
+class _FailingPngDrawing(_FakeDrawing):
+    def png(self, score) -> bytes:
+        raise RuntimeError("Failed to render PNG: no fonts to draw text with")
+
+
+def test_render_chart_writes_nothing_when_the_png_fails(tmp_path: Path) -> None:
+    scores = SimpleNamespace(
+        Score=SimpleNamespace(open_sus=lambda path: _FakeScore()),
+        Drawing=_FailingPngDrawing,
+    )
+    jacket = tmp_path / "jacket.png"
+    jacket.write_bytes(b"")
+    chart_path = tmp_path / "master.svg"
+    with patch.object(charts, "_load_scores_module", return_value=scores):
+        try:
+            asyncio.run(
+                charts.render_chart(
+                    str(tmp_path / "master.txt"), str(chart_path), {"title": "Song"}, str(jacket)
+                )
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("render_chart should propagate the PNG error")
+
+    assert not chart_path.exists()
+    assert not (tmp_path / "master.png").exists()
