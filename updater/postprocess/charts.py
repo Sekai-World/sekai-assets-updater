@@ -1,9 +1,6 @@
 import asyncio
-import ctypes
-import ctypes.util
 import logging
 import re
-import sys
 import tempfile
 from pathlib import Path
 from pathlib import Path as StdPath
@@ -17,15 +14,14 @@ from updater.net.http import get_request_timeout
 from updater.postprocess.config import (
     _region_name,
     get_chart_data_server,
+    get_chart_font_kwargs,
     get_chart_jacket_url,
     get_normal_storage_candidates,
 )
 
 # The fetch/render flows came from specialized.py and keep its channel so
-# name-based log filtering is unchanged; the renderer preload keeps the
-# historic "charts" channel from utils/chart.py.
+# name-based log filtering is unchanged.
 logger = logging.getLogger("asset_updater")
-_renderer_logger = logging.getLogger("charts")
 DEFAULT_STYLE_SHEET = (
     Path(__file__).with_name("pjsekai_scores_default.css").read_text(encoding="utf-8")
 )
@@ -33,28 +29,14 @@ _scores = None
 
 
 def _load_scores_module():
+    # pjsekai-scores-rs 0.6+ renders PNG with a pure-Rust backend: no FreeType
+    # or other system library has to be preloaded.
     global _scores
-    if _scores is not None:
-        return _scores
-
-    if sys.platform.startswith("linux"):
-        freetype = ctypes.util.find_library("freetype")
-        if freetype:
-            try:
-                ctypes.CDLL(freetype, mode=getattr(ctypes, "RTLD_GLOBAL", 0))
-            except OSError:
-                _renderer_logger.debug("Failed to preload %s", freetype, exc_info=True)
-
-    try:
+    if _scores is None:
         import pjsekai_scores_rs as scores
-    except ImportError as exc:
-        raise ImportError(
-            "Failed to import pjsekai_scores_rs. On Linux, a freetype library "
-            "exporting FT_Palette_Data_Get must be available."
-        ) from exc
 
-    _scores = scores
-    return scores
+        _scores = scores
+    return _scores
 
 
 async def _prepare_jacket(jacket: str) -> tuple[str, tempfile.TemporaryDirectory | None]:
@@ -81,25 +63,46 @@ async def _prepare_jacket(jacket: str) -> tuple[str, tempfile.TemporaryDirectory
     return target_path.as_uri(), tmpdir
 
 
-async def render_chart(score_path: str, chart_path: str, music: dict, jacket: str):
+async def render_chart(
+    score_path: str,
+    chart_path: str,
+    music: dict,
+    jacket: str,
+    font_paths: list[str] | None = None,
+    font_dirs: list[str] | None = None,
+):
+    """Write the chart SVG to *chart_path* and the PNG next to it.
+
+    The PNG needs fonts in *font_paths* / *font_dirs*: pjsekai-scores-rs 0.6+
+    has no system-font fallback and raises when it has no font to draw with.
+    """
     scores = _load_scores_module()
     score = await asyncio.to_thread(scores.Score.open_sus, score_path)
     jacket_uri, jacket_tmpdir = await _prepare_jacket(jacket)
+    # The published SVG links the jacket, so it keeps the public URL; only the
+    # PNG renderer needs the local copy, whose temporary directory is removed
+    # below.
+    svg_jacket = jacket if urlparse(jacket).scheme in ("http", "https") else jacket_uri
     try:
-        score.set_meta(title=music["title"], jacket=jacket_uri)
+        score.set_meta(title=music["title"], jacket=svg_jacket)
         drawing = scores.Drawing(
             note_host="https://asset3.pjsekai.moe/live/note/custom01",
             style_sheet=DEFAULT_STYLE_SHEET,
             generator="Sekai Viewer",
+            font_paths=font_paths,
+            font_dirs=font_dirs,
         )
 
         png_path = chart_path.replace(".svg", ".png")
 
+        # Render both before writing either, so a failed PNG render (for
+        # example, no fonts) does not leave a lone SVG behind.
         svg = await asyncio.to_thread(drawing.svg, score)
+        score.set_meta(jacket=jacket_uri)
+        png = await asyncio.to_thread(drawing.png, score)
+
         async with await open_file(chart_path, "wb") as f:
             await f.write(svg.encode("utf-8"))
-
-        png = await asyncio.to_thread(drawing.png, score)
         async with await open_file(png_path, "wb") as f:
             await f.write(png)
     finally:
@@ -280,6 +283,7 @@ async def _render_charts(
     region = _region_name(config)
     rendered: set[str] = set()
     semaphore = asyncio.Semaphore(CHART_SOURCE_CONCURRENCY)
+    font_kwargs = get_chart_font_kwargs(config)
 
     async def render_score(score_file: StdPath) -> None:
         try:
@@ -305,6 +309,7 @@ async def _render_charts(
                 chart_path.as_posix(),
                 music,
                 get_chart_jacket_url(config, region, music_id),
+                **font_kwargs,
             )
         rel = score_file.relative_to(extracted_dir / "music" / "music_score").as_posix()
         rendered.add(rel)

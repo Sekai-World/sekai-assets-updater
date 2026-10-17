@@ -61,6 +61,8 @@ class ConfigLike(Protocol):
     LIVE2D_ASSOCIATION_MASTER_DB_VERSION: str
     CHART_DATA_SERVER: Optional[str]
     CHART_JACKET_BASE_URL: Optional[str]
+    CHART_FONT_PATHS: Optional[List[str]]
+    CHART_FONT_DIRS: Optional[List[str]]
     ASSET_REMOTE_STORAGE: Optional[list[dict[str, Any]]]
 
 
