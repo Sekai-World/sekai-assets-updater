@@ -1,8 +1,19 @@
 """Config accessors for post-processing storage, regions, and jackets."""
 
+from pathlib import Path
+
 from updater.modes import SPECIALIZED_MODES
 
 DEFAULT_CHART_JACKET_BASE_URL = "https://storage.sekai.best/sekai-{region}-assets/music/jacket"
+# Searched (recursively) for chart fonts when neither CHART_FONT_PATHS nor
+# CHART_FONT_DIRS is configured.
+DEFAULT_CHART_FONT_DIRS = (
+    "/usr/share/fonts",
+    "/usr/local/share/fonts",
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+    "C:\\Windows\\Fonts",
+)
 
 
 def get_specialized_storage(config, mode: str) -> list[dict]:
@@ -53,3 +64,21 @@ def _resolve_chart_jacket_base_url(config, region: str) -> str:
     if not jacket_base_url:
         jacket_base_url = DEFAULT_CHART_JACKET_BASE_URL.format(region=region)
     return jacket_base_url
+
+
+def get_chart_font_kwargs(config) -> dict[str, list[str]]:
+    """Return the ``font_paths`` / ``font_dirs`` arguments for chart PNG rendering.
+
+    pjsekai-scores-rs 0.6+ only draws text with the fonts it is given, so when
+    nothing is configured the existing system font directories are passed.
+    """
+    font_paths = [str(path) for path in getattr(config, "CHART_FONT_PATHS", None) or []]
+    font_dirs = [str(path) for path in getattr(config, "CHART_FONT_DIRS", None) or []]
+    if not font_paths and not font_dirs:
+        font_dirs = [path for path in DEFAULT_CHART_FONT_DIRS if Path(path).is_dir()]
+    kwargs: dict[str, list[str]] = {}
+    if font_paths:
+        kwargs["font_paths"] = font_paths
+    if font_dirs:
+        kwargs["font_dirs"] = font_dirs
+    return kwargs

@@ -286,3 +286,11 @@ CHART_DATA_SERVER = None
 # Optional base URL for chart jacket images. When unset, charts use
 # https://storage.sekai.best/sekai-{region}-assets/music/jacket.
 CHART_JACKET_BASE_URL = None
+# Fonts for chart PNGs. pjsekai-scores-rs has no system-font fallback since 0.6.0,
+# so the renderer needs font files: explicit paths (preferred; include a CJK font
+# such as Noto Sans CJK JP for Japanese titles) or directories scanned recursively.
+# When both are unset, the system font directories that exist are scanned
+# (/usr/share/fonts, /usr/local/share/fonts, /System/Library/Fonts, /Library/Fonts,
+# C:\Windows\Fonts).
+CHART_FONT_PATHS = None
+CHART_FONT_DIRS = None
