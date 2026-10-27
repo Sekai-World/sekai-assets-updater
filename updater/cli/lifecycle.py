@@ -20,6 +20,7 @@ from updater.net.plan import (
     DownloadItem,
     _sanitize_asset_bundle_info,
     dedupe_download_items,
+    get_regional_music_selection_for_config,
     select_bundles_for_download,
 )
 from updater.pipeline import run_pipeline
@@ -121,13 +122,24 @@ async def _write_metadata_only_cache(
     if not current_bundles:
         raise ValueError("bundles must be set in asset bundle info")
 
-    current_bundles = select_bundles_for_download(
-        filter_bundles_for_mode(current_bundles, mode),
-        include_list=cfg.DL_INCLUDE_LIST,
-        exclude_list=cfg.DL_EXCLUDE_LIST,
-        automatic_prefixes=automatic_prefixes,
-    )
-    if not current_bundles:
+    scoped_bundles = filter_bundles_for_mode(current_bundles, mode)
+    selection_kwargs = {
+        "include_list": cfg.DL_INCLUDE_LIST,
+        "exclude_list": cfg.DL_EXCLUDE_LIST,
+        "automatic_prefixes": automatic_prefixes,
+    }
+    regional_music_selection = get_regional_music_selection_for_config(cfg, mode=mode)
+    if regional_music_selection is None:
+        current_bundles = select_bundles_for_download(scoped_bundles, **selection_kwargs)
+        selected_before_regional = current_bundles
+    else:
+        selected_before_regional = select_bundles_for_download(scoped_bundles, **selection_kwargs)
+        current_bundles = select_bundles_for_download(
+            scoped_bundles,
+            **selection_kwargs,
+            music_selection=regional_music_selection,
+        )
+    if not current_bundles and not selected_before_regional:
         raise ValueError("No bundles found after filtering")
 
     metadata = {

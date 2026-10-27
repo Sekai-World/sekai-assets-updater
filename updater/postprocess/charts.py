@@ -140,8 +140,19 @@ def _score_matches_include_list(score_path: StdPath, include_list: list[str] | N
     return any(re.match(pattern, score_directory) for pattern in include_list)
 
 
+def _score_matches_music_scope(score_path: StdPath, music_ids: frozenset[int] | None) -> bool:
+    if music_ids is None:
+        return True
+    try:
+        return music_id_from_score_path(score_path) in music_ids
+    except ValueError:
+        return False
+
+
 def collect_score_files(
-    extracted_dir: StdPath, include_list: list[str] | None = None
+    extracted_dir: StdPath,
+    include_list: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
 ) -> list[StdPath]:
     """Collect eligible chart TextAsset outputs with deterministic de-duplication."""
     score_root = extracted_dir / "music" / "music_score"
@@ -149,24 +160,39 @@ def collect_score_files(
         {
             path
             for path in score_root.rglob("*.txt")
-            if path.is_file() and _score_matches_include_list(path, include_list)
+            if path.is_file()
+            and _score_matches_include_list(path, include_list)
+            and _score_matches_music_scope(path, music_ids)
         }
     )
 
 
-def has_local_chart_sources(extracted_dir: StdPath, include_list: list[str] | None = None) -> bool:
+def has_local_chart_sources(
+    extracted_dir: StdPath,
+    include_list: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
+) -> bool:
     """Whether an extraction root already contains usable chart source files."""
-    return bool(collect_score_files(extracted_dir, include_list))
+    return bool(collect_score_files(extracted_dir, include_list, music_ids))
 
 
-def _missing_chart_sources_reason(extracted_dir: StdPath, include_list: list[str] | None) -> str:
+def _missing_chart_sources_reason(
+    extracted_dir: StdPath,
+    include_list: list[str] | None,
+    music_ids: frozenset[int] | None = None,
+) -> str:
     """Explain whether storage lacked scores or the download scope excluded them."""
-    if include_list:
+    if include_list or music_ids is not None:
         score_dirs = {path.parent.name for path in collect_score_files(extracted_dir)}
-        if score_dirs:
+        if score_dirs and include_list:
             return (
                 f"storage provided {len(score_dirs)} music/music_score directories, but "
                 "DL_INCLUDE_LIST matches none of them"
+            )
+        if score_dirs and music_ids is not None:
+            return (
+                f"storage provided {len(score_dirs)} music/music_score directories, but "
+                "the active regional music selection matches none of them"
             )
     return "storage did not provide any chart .txt files"
 
@@ -175,10 +201,11 @@ def needs_temporary_chart_source(
     extracted_dir: StdPath,
     configured_extracted_dir,
     include_list: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
 ) -> bool:
     """Avoid writing remote chart sources into a user's persistent extraction root."""
     return configured_extracted_dir is not None and not has_local_chart_sources(
-        extracted_dir, include_list
+        extracted_dir, include_list, music_ids
     )
 
 
@@ -228,7 +255,10 @@ async def _copy_chart_sources_from_one_storage(
 
 
 async def fetch_chart_sources_from_storage(
-    config, extracted_dir: StdPath, include_list: list[str] | None = None
+    config,
+    extracted_dir: StdPath,
+    include_list: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
 ) -> None:
     """Copy chart sources from the first successful normal asset mirror."""
     target_dir = extracted_dir / "music" / "music_score"
@@ -237,8 +267,10 @@ async def fetch_chart_sources_from_storage(
     for storage in get_normal_storage_candidates(config):
         try:
             await _copy_chart_sources_from_one_storage(storage, target_dir, config)
-            if not has_local_chart_sources(extracted_dir, include_list):
-                raise RuntimeError(_missing_chart_sources_reason(extracted_dir, include_list))
+            if not has_local_chart_sources(extracted_dir, include_list, music_ids):
+                raise RuntimeError(
+                    _missing_chart_sources_reason(extracted_dir, include_list, music_ids)
+                )
             logger.info("Loaded chart sources from normal storage %s", storage["base"])
             return
         except Exception as exc:
@@ -260,6 +292,7 @@ async def _render_charts(
     extracted_dir: StdPath,
     include_list: list[str] | None = None,
     score_files: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
 ) -> set[str]:
     """Render chart SVGs and return the set of relative posix paths rendered.
 
@@ -271,9 +304,13 @@ async def _render_charts(
     """
     if score_files is not None:
         score_root = extracted_dir / "music" / "music_score"
-        resolved = sorted(score_root / rel for rel in score_files)
+        resolved = sorted(
+            score_root / rel
+            for rel in score_files
+            if _score_matches_music_scope(score_root / rel, music_ids)
+        )
     else:
-        resolved = collect_score_files(extracted_dir, include_list)
+        resolved = collect_score_files(extracted_dir, include_list, music_ids)
     if not resolved:
         logger.info("No music score TextAssets found")
         return set()

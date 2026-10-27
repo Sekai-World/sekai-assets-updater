@@ -1,6 +1,7 @@
 """aiohttp session/timeout options and request-header builders."""
 
 import logging
+from typing import TypedDict
 
 import aiohttp
 
@@ -31,7 +32,12 @@ def get_request_timeout(config=None) -> aiohttp.ClientTimeout:
     return aiohttp.ClientTimeout(total=timeout_seconds)
 
 
-def get_http_session_options(config=None) -> dict[str, object]:
+class HTTPSessionOptions(TypedDict):
+    proxy: str | None
+    timeout: aiohttp.ClientTimeout
+
+
+def get_http_session_options(config=None) -> HTTPSessionOptions:
     """Build the common aiohttp session options for configured HTTP requests."""
     return {
         "proxy": getattr(config, "PROXY_URL", None),

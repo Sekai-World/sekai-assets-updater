@@ -85,6 +85,7 @@ include = [
     "updater/crypto.py",
     "updater/external_process.py",
     "updater/model.py",
+    "updater/music_selection.py",
     "updater/security.py",
     "updater/state.py",
     "updater/media/acb.py",

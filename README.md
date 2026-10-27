@@ -139,6 +139,16 @@ Filters:
 - `DL_EXCLUDE_LIST`
 - `DL_PRIORITY_LIST`
 
+Set `ENABLE_REGION_EXCLUSIVE_MUSIC = True` to automatically limit non-JP music
+to song IDs absent from JP master data, including those songs' audio versions,
+jackets, and charts. Shared songs are excluded even when their vocal bundles or
+credited singers differ. JP and non-music assets keep their existing filter
+behavior. The automatic scope intersects the include/exclude filters: replace
+per-song includes with `r"^music/"` once, preserving any unrelated include
+patterns. Master-data failures stop the run rather than falling back to all music. See
+[regional music selection](docs/REGIONAL_MUSIC_SELECTION.md) for details and
+verified examples.
+
 Storage:
 
 - `ASSET_LOCAL_EXTRACTED_DIR`: keep extracted files locally; if `None`, use a temp dir
