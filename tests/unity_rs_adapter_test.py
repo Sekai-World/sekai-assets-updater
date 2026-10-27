@@ -43,6 +43,24 @@ class _Studio:
         return b"fixture\xff"
 
 
+def _external_reference_environment():
+    objects = [
+        _Info(file_index=0, object_index=0, path_id=1, class_id=142, source_path="CAB-a"),
+        _Info(file_index=0, object_index=1, path_id=42, class_id=114, source_path="CAB-a"),
+        _Info(file_index=1, object_index=0, path_id=1, class_id=142, source_path="CAB-b"),
+        _Info(file_index=1, object_index=1, path_id=42, class_id=48, source_path="CAB-b"),
+        _Info(file_index=2, object_index=0, path_id=1, class_id=142, source_path="CAB-c"),
+        _Info(file_index=2, object_index=1, path_id=42, class_id=28, source_path="CAB-c"),
+    ]
+
+    class _ExternalStudio(_Studio):
+        def read_asset_bundle(self, file_index, _path_id):
+            dependencies = {0: ["CAB-c", "CAB-b"], 1: [], 2: []}
+            return SimpleNamespace(container=[], dependencies=dependencies[file_index])
+
+    return unity_rs_adapter.UnityRsEnvironment(_ExternalStudio(objects))
+
+
 class _FontStudio(_Studio):
     def __init__(self, objects: list[_Info], font):
         super().__init__(objects)
@@ -82,6 +100,65 @@ def test_environment_uses_asset_bundle_container_targets() -> None:
 
     assert environment.container["actual.playable"].path_id == 42
     assert environment.container["actual.playable"].container == "actual.playable"
+
+
+def test_asset_bundle_container_file_zero_reference_uses_owner_file_identity() -> None:
+    path = "actual.playable"
+    collision = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    target = _Info(file_index=1, object_index=0, path_id=42, class_id=114)
+    bundles = [
+        _Info(file_index=0, object_index=1, path_id=1, class_id=142),
+        _Info(file_index=1, object_index=1, path_id=2, class_id=142),
+    ]
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, file_index, _path_id):
+            container = [(path, 0, 1, (0, 42))] if file_index == 1 else []
+            return SimpleNamespace(container=container)
+
+    environment = unity_rs_adapter.UnityRsEnvironment(
+        _AssetBundleStudio([collision, target, *bundles])
+    )
+
+    assert environment.container[path] is environment.object_by_identity(1, 42)
+    assert environment.object_by_identity(1, 42).container == path
+    assert environment.object_by_identity(0, 42).container is None
+
+
+def test_asset_bundle_container_does_not_guess_missing_owner_target() -> None:
+    collision = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    asset_bundle = _Info(file_index=1, object_index=0, path_id=1, class_id=142)
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, _file_index, _path_id):
+            return SimpleNamespace(container=[("wrong.playable", 0, 1, (0, 42))])
+
+    environment = unity_rs_adapter.UnityRsEnvironment(_AssetBundleStudio([collision, asset_bundle]))
+
+    assert "wrong.playable" not in environment.container
+    assert environment.object_by_identity(0, 42).container is None
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [(1, 42), (-1, 42), (0, 0), ("0", 42), (0, "42"), (0, 42, 43)],
+)
+def test_asset_bundle_container_ignores_unsupported_or_malformed_references(reference) -> None:
+    target = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    collision = _Info(file_index=1, object_index=0, path_id=42, class_id=114)
+    asset_bundle = _Info(file_index=0, object_index=1, path_id=1, class_id=142)
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, _file_index, _path_id):
+            return SimpleNamespace(container=[("unresolved.playable", 0, 1, reference)])
+
+    environment = unity_rs_adapter.UnityRsEnvironment(
+        _AssetBundleStudio([target, collision, asset_bundle])
+    )
+
+    assert "unresolved.playable" not in environment.container
+    assert environment.object_by_identity(0, 42).container is None
+    assert environment.object_by_identity(1, 42).container is None
 
 
 @pytest.mark.parametrize("order", [(28, 213), (213, 28)])
@@ -171,6 +248,73 @@ def test_nonzero_pptr_does_not_silently_resolve_to_a_wrong_file() -> None:
     pointer = obj.read()["m_Asset"]
     with pytest.raises(unity_rs_adapter.UnsupportedReferenceError):
         pointer.deref()
+
+
+def test_external_resolution_without_serialized_table_never_uses_dependencies() -> None:
+    environment = _external_reference_environment()
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+    resolution = table.resolve_file_id(0, 1)
+
+    assert table.externals_of(0) == ()
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name is None
+
+
+def test_authoritative_serialized_external_order_beats_dependency_order_and_path_collisions() -> (
+    None
+):
+    environment = _external_reference_environment()
+    serialized_names = ["CAB-b", "CAB-c"]
+
+    table = unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: serialized_names}
+    )
+    serialized_names[0] = "CAB-c"  # the table must own a snapshot
+    resolution = table.resolve_file_id(0, 1)
+
+    assert table.externals_of(0) == ("CAB-b", "CAB-c")
+    assert resolution.kind == unity_rs_adapter.RESOLVED_EXTERNAL_REFERENCE
+    assert resolution.target_file_index == 1
+    assert environment.object_by_identity(resolution.target_file_index, 42).class_id == 48
+    assert resolution.dependency_name == "CAB-b"
+
+
+def test_authoritative_but_unmatched_external_name_is_preserved_without_guessing() -> None:
+    environment = _external_reference_environment()
+    table = unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: ("CAB-not-loaded",)}
+    )
+
+    resolution = table.resolve_file_id(0, 1)
+
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name == "CAB-not-loaded"
+
+
+@pytest.mark.parametrize(
+    ("serialized_externals", "error"),
+    [
+        ({"0": ("CAB-b",)}, TypeError),
+        ({True: ("CAB-b",)}, TypeError),
+        ({9: ("CAB-b",)}, ValueError),
+        ({0: "CAB-b"}, TypeError),
+        ({0: (None,)}, TypeError),
+        ({0: ("",)}, ValueError),
+        ({0: ("  ",)}, ValueError),
+    ],
+)
+def test_serialized_external_metadata_rejects_invalid_indices_and_entries(
+    serialized_externals, error
+) -> None:
+    environment = _external_reference_environment()
+
+    with pytest.raises(error):
+        unity_rs_adapter.build_collection_file_table(
+            environment, serialized_externals=serialized_externals
+        )
 
 
 def test_image_contract_rejects_malformed_native_image() -> None:

@@ -8,6 +8,7 @@ involved, so identical inputs always produce byte-identical output.
 Encodings (fixed by contract):
 - positions: FLOAT32 VEC3, normals: FLOAT32 VEC3, texcoords: FLOAT32 VEC2
 - indices: UNSIGNED_INT SCALAR
+- JOINTS_0: UNSIGNED_SHORT VEC4, WEIGHTS_0: FLOAT VEC4
 - JSON: orjson with sorted keys, padded with 0x20 to 4 bytes
 - BIN: zero-padded to 4 bytes
 """
@@ -243,13 +244,23 @@ class GlbScene:
         weights_accessor = len(self._accessors) - 1
         return joints_accessor, weights_accessor
 
-    def attach_skin_to_primitive(
-        self, mesh_index: int, skin_index: int, joints_accessor: int, weights_accessor: int
+    def attach_skin_to_node(
+        self,
+        node_index: int,
+        mesh_index: int,
+        skin_index: int,
+        joints_accessor: int,
+        weights_accessor: int,
     ) -> None:
-        primitive = self._meshes[mesh_index]["primitives"][0]
-        primitive["attributes"]["JOINTS_0"] = joints_accessor
-        primitive["attributes"]["WEIGHTS_0"] = weights_accessor
-        primitive["skin"] = skin_index
+        """Attach skin attributes to every mesh primitive and skin to its node."""
+
+        node = self._nodes[node_index]
+        if node.get("mesh") != mesh_index:
+            raise ValueError("skinned node does not own the specified mesh")
+        node["skin"] = skin_index
+        for primitive in self._meshes[mesh_index]["primitives"]:
+            primitive["attributes"]["JOINTS_0"] = joints_accessor
+            primitive["attributes"]["WEIGHTS_0"] = weights_accessor
 
     # -- scene assembly ----------------------------------------------------
 
@@ -260,20 +271,50 @@ class GlbScene:
         positions: list[tuple[float, float, float]],
         normals: list[tuple[float, float, float]],
         texcoords: list[tuple[float, float]],
-        indices: list[int],
-        material_index: int,
+        indices: list[int] | None = None,
+        material_index: int | None = None,
+        primitives: list[dict[str, Any]] | None = None,
     ) -> int:
-        primitive = {
-            "attributes": {
-                "POSITION": self.add_positions(positions),
-                "NORMAL": self.add_normals(normals),
-                "TEXCOORD_0": self.add_texcoords(texcoords),
-            },
-            "indices": self.add_indices(indices),
-            "material": material_index,
-            "mode": 4,
+        if len(normals) != len(positions) or len(texcoords) != len(positions):
+            raise ValueError("mesh POSITION, NORMAL, and TEXCOORD_0 counts must match")
+        if primitives is None:
+            if indices is None or material_index is None:
+                raise ValueError("add_mesh requires indices/material_index or primitives")
+            primitive_specs = [{"indices": indices, "material_index": material_index}]
+        else:
+            if indices is not None or material_index is not None:
+                raise ValueError("add_mesh cannot combine primitives with indices/material_index")
+            primitive_specs = primitives
+        if not primitive_specs:
+            raise ValueError("mesh must contain at least one primitive")
+        for primitive_spec in primitive_specs:
+            primitive_indices = primitive_spec.get("indices")
+            primitive_material = primitive_spec.get("material_index")
+            if not isinstance(primitive_indices, list):
+                raise ValueError("primitive indices must be a list")
+            if not isinstance(primitive_material, int) or primitive_material < 0:
+                raise ValueError("primitive material_index must be a non-negative integer")
+            if any(
+                not isinstance(index, int) or index < 0 or index >= len(positions)
+                for index in primitive_indices
+            ):
+                raise ValueError("primitive index is outside the mesh vertex range")
+
+        attributes = {
+            "POSITION": self.add_positions(positions),
+            "NORMAL": self.add_normals(normals),
+            "TEXCOORD_0": self.add_texcoords(texcoords),
         }
-        self._meshes.append({"name": name, "primitives": [primitive]})
+        gltf_primitives = [
+            {
+                "attributes": dict(attributes),
+                "indices": self.add_indices(spec["indices"]),
+                "material": spec["material_index"],
+                "mode": 4,
+            }
+            for spec in primitive_specs
+        ]
+        self._meshes.append({"name": name, "primitives": gltf_primitives})
         return len(self._meshes) - 1
 
     def add_node(self, node: dict[str, Any]) -> int:
@@ -358,7 +399,8 @@ def validate_glb_bytes(data: bytes) -> dict[str, Any]:
 
     Enforces the reference-integrity rules an offline glTF validator applies
     to the subset this writer emits: chunk layout, accessor/bufferView bounds,
-    mesh/material/node references, and POSITION min/max requirements.
+    mesh/material/node/skin references, matching vertex accessor counts, and
+    POSITION min/max requirements.
     """
 
     if len(data) < 20:
@@ -424,13 +466,55 @@ def validate_glb_bytes(data: bytes) -> dict[str, Any]:
             raise ValueError(f"node references unknown mesh {node['mesh']}")
     for mesh in document.get("meshes", []):
         for primitive in mesh["primitives"]:
+            if "skin" in primitive:
+                raise ValueError("skin references belong on nodes, not primitives")
             if primitive["indices"] >= len(accessors):
                 raise ValueError("primitive references unknown index accessor")
             for attribute, accessor_index in primitive["attributes"].items():
                 if accessor_index >= len(accessors):
                     raise ValueError(f"attribute {attribute} references unknown accessor")
+            attributes = primitive["attributes"]
+            if "POSITION" not in attributes:
+                raise ValueError("primitive is missing POSITION")
+            position_count = accessors[attributes["POSITION"]]["count"]
+            if any(accessors[index]["count"] != position_count for index in attributes.values()):
+                raise ValueError("primitive attribute accessor counts do not match POSITION")
+            has_joints = "JOINTS_0" in attributes
+            has_weights = "WEIGHTS_0" in attributes
+            if has_joints != has_weights:
+                raise ValueError("primitive must provide both JOINTS_0 and WEIGHTS_0")
             if "material" in primitive and primitive["material"] not in material_ids:
                 raise ValueError("primitive references unknown material")
+    skin_ids = set(range(len(document.get("skins", []))))
+    for node in document.get("nodes", []):
+        if "skin" not in node:
+            continue
+        skin_index = node["skin"]
+        if skin_index not in skin_ids:
+            raise ValueError(f"node references unknown skin {skin_index}")
+        if "mesh" not in node:
+            raise ValueError("node with skin must reference a mesh")
+        skin = document["skins"][skin_index]
+        joints = skin.get("joints", [])
+        if not joints or any(joint not in node_ids for joint in joints):
+            raise ValueError("skin joints must reference existing nodes")
+        inverse_bind = skin.get("inverseBindMatrices")
+        if inverse_bind is not None:
+            if inverse_bind >= len(accessors):
+                raise ValueError("skin references unknown inverse bind accessor")
+            accessor = accessors[inverse_bind]
+            if accessor["type"] != "MAT4" or accessor["count"] != len(joints):
+                raise ValueError("inverse bind accessor count must match skin joints")
+        for primitive in document["meshes"][node["mesh"]]["primitives"]:
+            attributes = primitive["attributes"]
+            if "JOINTS_0" not in attributes or "WEIGHTS_0" not in attributes:
+                raise ValueError("skinned mesh primitives must provide JOINTS_0 and WEIGHTS_0")
+    skinned_mesh_ids = {node["mesh"] for node in document.get("nodes", []) if "skin" in node}
+    for mesh_index, mesh in enumerate(document.get("meshes", [])):
+        for primitive in mesh["primitives"]:
+            attributes = primitive["attributes"]
+            if "JOINTS_0" in attributes and mesh_index not in skinned_mesh_ids:
+                raise ValueError("primitive skin attributes require a skinned node")
     return document
 
 

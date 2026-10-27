@@ -7,18 +7,17 @@ Transform is resolved through its typetree and mapped to its
 inverse bind matrix: its world matrix in glTF space — composed from
 X-mirrored local transforms up the ``m_Father`` chain — inverted, which by
 the mirror-conjugation identity stays consistent with the mirrored exported
-hierarchy.  Per-vertex joint/weight data arrives through a provider
-pipeline: the bundled binding-backed provider resolves the full skeleton
-but records a structured diagnostic instead of weights, because unity_rs
-0.5.x exposes no weight streams (its FBX exporter fails on skinned meshes
-and raw vertex channels carry stream offsets, not samples).  Converted
-GLBs therefore keep the animated skeleton, and the diagnostic names
-exactly what is missing.
+hierarchy. Per-vertex joint/weight data arrives through a provider pipeline.
+The unity_rs-backed provider reads native skin streams and bind poses when
+available, and records a structured diagnostic when those streams are missing
+or malformed.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+import struct
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, Sequence
 
 from updater.extract.glb.contracts import DIAG_MISSING_TARGET, DIAG_SKIN_WEIGHTS_UNAVAILABLE
@@ -29,11 +28,17 @@ from updater.extract.glb.math3d import (
     mirror_rotation,
     multiply_mat4,
 )
-from updater.unity_rs_adapter import CollectionFileTable, UnityRsEnvironment
+from updater.unity_rs_adapter import (
+    RESOLVED_EXTERNAL_REFERENCE,
+    CollectionFileTable,
+    UnityRsEnvironment,
+)
 
 JointIdentity = tuple[int, int]
 
 TRANSFORM_OBJECT_CLASS = 4
+_WEIGHT_SUM_TOLERANCE = 1e-3
+_UINT16_MAX = 0xFFFF
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,30 +96,28 @@ class _SkeletonResolver:
     """Composes glTF-space world matrices for Transform identities.
 
     Transforms resolve through typetrees (the scene graph is GameObject
-    keyed); results cache per transform path ID so shared parents compose
-    once.
+    keyed); results cache per full transform identity so shared parents
+    compose once without colliding across serialized files.
     """
 
     def __init__(
         self,
         environment: UnityRsEnvironment,
         table: CollectionFileTable,
-        source_file_index: int,
     ) -> None:
         self._environment = environment
         self._table = table
-        self._source_file_index = source_file_index
-        self._world_cache: dict[int, tuple[float, ...]] = {}
-        self._in_flight: set[int] = set()
+        self._world_cache: dict[JointIdentity, tuple[float, ...]] = {}
+        self._in_flight: set[JointIdentity] = set()
 
     def world_of(self, transform_identity: JointIdentity) -> tuple[float, ...] | None:
         """Return the mirrored glTF world matrix of one Transform, or
         ``None`` when it cannot be resolved."""
 
-        cached = self._world_cache.get(transform_identity[1])
+        cached = self._world_cache.get(transform_identity)
         if cached is not None:
             return cached
-        if transform_identity[1] in self._in_flight:
+        if transform_identity in self._in_flight:
             return None  # parent cycle: stop composing at the cycle
         transform = self._environment.object_by_identity(*transform_identity)
         if transform is None or transform.class_id != TRANSFORM_OBJECT_CLASS:
@@ -125,18 +128,23 @@ class _SkeletonResolver:
             mirror_rotation(_local_rotation(typetree)),
             _local_scale(typetree),
         )
-        self._in_flight.add(transform_identity[1])
+        self._in_flight.add(transform_identity)
         try:
             father = typetree.get("m_Father") or {}
             father_identity = (
-                self._resolve_file(int(father.get("m_FileID", 0))),
+                self._resolve_file(int(father.get("m_FileID", 0)), transform_identity[0]),
                 int(father.get("m_PathID", 0)),
             )
-            parent_world = self.world_of(father_identity) if father_identity[1] != 0 else None
-            world = multiply_mat4(parent_world, local) if parent_world is not None else local
+            if father_identity[1] == 0:
+                world = local
+            else:
+                parent_world = self.world_of(father_identity)
+                world = multiply_mat4(parent_world, local) if parent_world is not None else None
         finally:
-            self._in_flight.discard(transform_identity[1])
-        self._world_cache[transform_identity[1]] = world
+            self._in_flight.discard(transform_identity)
+        if world is None:
+            return None
+        self._world_cache[transform_identity] = world
         return world
 
     def game_object_identity(self, transform_identity: JointIdentity) -> JointIdentity | None:
@@ -148,11 +156,11 @@ class _SkeletonResolver:
         pointer = (transform.read_typetree().get("m_GameObject") or {}).get("m_PathID", 0)
         return (transform_identity[0], int(pointer))
 
-    def _resolve_file(self, file_id: int) -> int:
+    def _resolve_file(self, file_id: int, source_file_index: int) -> int:
         if file_id == 0:
-            return self._source_file_index
-        external = self._table.resolve_file_id(self._source_file_index, file_id)
-        if external.kind == "resolved_external_reference":
+            return source_file_index
+        external = self._table.resolve_file_id(source_file_index, file_id)
+        if external.kind == RESOLVED_EXTERNAL_REFERENCE:
             return external.target_file_index
         return -1  # unresolvable: the object lookup will miss
 
@@ -196,12 +204,21 @@ def build_skeleton(
     collection objects.
     """
 
-    resolver = _SkeletonResolver(environment, table, node.file_index)
+    resolver = _SkeletonResolver(environment, table)
     joints: list[SkinJoint] = []
     diagnostics: list[SkinDiagnostic] = []
     renderer_identity = (node.file_index, node.path_id)
-    for bone in node.bones:
-        bone_identity = (int(bone[0]), int(bone[1]))
+    for bone in getattr(node, "bones", ()) or ():
+        try:
+            bone_identity = (int(bone[0]), int(bone[1]))
+        except (IndexError, TypeError, ValueError):
+            diagnostics.append(
+                SkinDiagnostic(
+                    code=DIAG_MISSING_TARGET,
+                    message=f"renderer {renderer_identity} has an invalid bone reference {bone!r}",
+                )
+            )
+            continue
         game_object = resolver.game_object_identity(bone_identity)
         if game_object is None:
             diagnostics.append(
@@ -249,31 +266,165 @@ def _joint_name(environment: UnityRsEnvironment, game_object: JointIdentity) -> 
 
 @dataclass(frozen=True, slots=True)
 class BindingSkinWeightsProvider:
-    """unity_rs-backed provider: full skeleton, no per-vertex weights.
-
-    The binding cannot supply skin weights (see module docstring), so every
-    result carries DIAG_SKIN_WEIGHTS_UNAVAILABLE and no GLB skin is attached
-    from this provider.
-    """
+    """unity_rs-backed provider for native mesh skin streams and bind poses."""
 
     environment: UnityRsEnvironment
     table: CollectionFileTable
 
     def skin_weights(self, node: Any, scene_nodes: Sequence[Any]) -> SkinWeights:
         skeleton = build_skeleton(node, scene_nodes, self.environment, self.table)
-        unavailable = SkinDiagnostic(
-            code=DIAG_SKIN_WEIGHTS_UNAVAILABLE,
-            message=(
-                f"renderer {(node.file_index, node.path_id)} ({node.name!r}):"
-                f" {len(skeleton.joints)} joints resolved; the unity_rs binding"
-                " exposes no per-vertex skin-weight streams, so no glTF skin"
-                " is attached"
-            ),
+        renderer_identity = (node.file_index, node.path_id)
+
+        def unavailable(reason: str) -> SkinWeights:
+            diagnostic = SkinDiagnostic(
+                code=DIAG_SKIN_WEIGHTS_UNAVAILABLE,
+                message=(
+                    f"renderer {renderer_identity} ({getattr(node, 'name', '')!r}): "
+                    f"{reason}; no skin attached"
+                ),
+            )
+            return SkinWeights(
+                skeleton=skeleton,
+                diagnostics=(diagnostic, *skeleton.diagnostics),
+            )
+
+        bones = tuple(getattr(node, "bones", ()) or ())
+        if not bones:
+            return unavailable("renderer has no bone references")
+        if skeleton.diagnostics or len(skeleton.joints) != len(bones):
+            return unavailable("one or more bone references could not be resolved")
+
+        mesh_identity = getattr(node, "mesh", None)
+        if not isinstance(mesh_identity, (tuple, list)) or len(mesh_identity) != 2:
+            return unavailable("renderer has no resolvable mesh identity")
+        read_mesh = getattr(self.environment.studio, "read_mesh", None)
+        if not callable(read_mesh):
+            return unavailable("unity_rs does not expose read_mesh")
+        try:
+            mesh = read_mesh(int(mesh_identity[0]), int(mesh_identity[1]))
+        except Exception as exc:  # NOSONAR - native mesh data is optional per renderer
+            return unavailable(f"native mesh read failed: {exc}")
+        if mesh is None:
+            return unavailable("native mesh read returned no mesh")
+
+        try:
+            vertex_count = int(mesh.vertex_count)
+            raw_weights = mesh.skin_weights
+            raw_indices = mesh.skin_bone_indices
+            raw_bind_poses = mesh.bind_poses
+            vertex_joints, vertex_weights = _decode_skin_streams(
+                vertex_count, len(bones), raw_indices, raw_weights
+            )
+            bind_poses = _decode_bind_poses(raw_bind_poses, len(bones))
+        except Exception as exc:  # NOSONAR - malformed native fields must not abort export
+            return unavailable(f"native mesh skin data is unavailable or invalid: {exc}")
+
+        joints = tuple(
+            replace(joint, inverse_bind_matrix=bind_pose)
+            for joint, bind_pose in zip(skeleton.joints, bind_poses, strict=True)
         )
+        skeleton = replace(skeleton, joints=joints)
         return SkinWeights(
             skeleton=skeleton,
-            diagnostics=(unavailable, *skeleton.diagnostics),
+            vertex_joints=vertex_joints,
+            vertex_weights=vertex_weights,
+            diagnostics=skeleton.diagnostics,
         )
+
+
+def _decode_skin_streams(
+    vertex_count: int,
+    bone_count: int,
+    raw_indices: bytes | bytearray | memoryview | None,
+    raw_weights: bytes | bytearray | memoryview | None,
+) -> tuple[
+    tuple[tuple[int, int, int, int], ...],
+    tuple[tuple[float, float, float, float], ...],
+]:
+    if vertex_count < 0:
+        raise ValueError(f"negative mesh vertex_count {vertex_count}")
+    if raw_indices is None or raw_weights is None:
+        raise ValueError("skin_bone_indices or skin_weights is None")
+    try:
+        indices_data = bytes(raw_indices)
+        weights_data = bytes(raw_weights)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("skin streams are not byte data") from exc
+    expected_bytes = vertex_count * 16
+    if len(indices_data) != expected_bytes:
+        raise ValueError(
+            f"skin_bone_indices has {len(indices_data)} bytes; expected {expected_bytes}"
+        )
+    if len(weights_data) != expected_bytes:
+        raise ValueError(f"skin_weights has {len(weights_data)} bytes; expected {expected_bytes}")
+
+    vertex_joints: list[tuple[int, int, int, int]] = []
+    vertex_weights: list[tuple[float, float, float, float]] = []
+    for offset in range(0, expected_bytes, 16):
+        weights = struct.unpack_from("<4f", weights_data, offset)
+        indices = struct.unpack_from("<4I", indices_data, offset)
+        if any(not math.isfinite(weight) or weight < 0.0 for weight in weights):
+            raise ValueError(f"vertex {offset // 16} has non-finite or negative weights")
+        total = sum(weights)
+        if total <= 0.0:
+            raise ValueError(f"vertex {offset // 16} has zero total weight")
+        if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+            raise ValueError(
+                f"vertex {offset // 16} weights sum to {total}, outside normalization tolerance"
+            )
+
+        normalized_indices: list[int] = []
+        for index, weight in zip(indices, weights, strict=True):
+            if weight == 0.0:
+                normalized_indices.append(0)
+                continue
+            if index >= bone_count:
+                raise ValueError(
+                    f"vertex {offset // 16} positive-weight bone index {index} "
+                    f"is outside {bone_count} renderer bones"
+                )
+            if index > _UINT16_MAX:
+                raise ValueError(
+                    f"vertex {offset // 16} positive-weight bone index {index} exceeds uint16"
+                )
+            normalized_indices.append(index)
+        vertex_joints.append(tuple(normalized_indices))
+        vertex_weights.append(tuple(weight / total for weight in weights))
+
+    return tuple(vertex_joints), tuple(vertex_weights)
+
+
+def _decode_bind_poses(
+    raw_bind_poses: bytes | bytearray | memoryview | None,
+    bone_count: int,
+) -> tuple[tuple[float, ...], ...]:
+    if raw_bind_poses is None:
+        raise ValueError("bind_poses is None")
+    try:
+        data = bytes(raw_bind_poses)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bind_poses are not byte data") from exc
+    expected_bytes = bone_count * 64
+    if len(data) != expected_bytes:
+        raise ValueError(f"bind_poses has {len(data)} bytes; expected {expected_bytes}")
+
+    signs = (-1.0, 1.0, 1.0, 1.0)
+    matrices: list[tuple[float, ...]] = []
+    for bone_index, offset in enumerate(range(0, expected_bytes, 64)):
+        matrix = struct.unpack_from("<16f", data, offset)
+        if any(not math.isfinite(value) for value in matrix):
+            raise ValueError(f"bind pose {bone_index} contains non-finite values")
+        # Unity and glTF both encode matrices column-major. C*B*C changes the
+        # signs by row and column and does not transpose the matrix.
+        mirrored = tuple(
+            value * signs[index % 4] * signs[index // 4] for index, value in enumerate(matrix)
+        )
+        try:
+            invert_mat4(mirrored)
+        except ValueError as exc:
+            raise ValueError(f"bind pose {bone_index} is singular") from exc
+        matrices.append(mirrored)
+    return tuple(matrices)
 
 
 __all__ = [

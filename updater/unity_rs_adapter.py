@@ -8,6 +8,7 @@ second UnityPy implementation.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,24 +121,51 @@ UNKNOWN_EXTERNAL_REFERENCE = "unknown_external"
 
 
 class CollectionFileTable:
-    """Actual file identity table of a loaded multi-file collection.
+    """File identities plus explicitly verified serialized external lists.
 
     PPtr ``m_FileID`` values index the *source file's* external list.  The
-    AssetBundle record of each input exposes that list as ordered
-    ``dependencies`` (bundle or CAB names), so a non-zero file ID maps to a
-    loaded file by identity — never by position or filename guess.
+    public unity-rs 0.6.1 ``FileInfo`` API exposes index, path, version, and
+    object count, but not serialized ``m_Externals``.  AssetBundle
+    ``dependencies`` are not that table.  Callers may inject verified
+    serialized externals; without them, non-zero file IDs remain unknown.
     """
 
-    def __init__(self, environment: UnityRsEnvironment) -> None:
+    def __init__(
+        self,
+        environment: UnityRsEnvironment,
+        *,
+        serialized_externals: Mapping[int, Sequence[str]] | None = None,
+    ) -> None:
         file_meta = self._native_file_metadata(environment)
+        known_file_indices = set(file_meta)
+        known_file_indices.update(obj.file_index for obj in environment.objects)
+        external_snapshot: dict[int, tuple[str, ...]] = {}
+        if serialized_externals is not None:
+            if not isinstance(serialized_externals, Mapping):
+                raise TypeError("serialized_externals must be a mapping of file indices to names")
+            for file_index, entries in serialized_externals.items():
+                if type(file_index) is not int:
+                    raise TypeError("serialized external file indices must be integers")
+                if file_index not in known_file_indices:
+                    raise ValueError(f"serialized external file index {file_index} is not loaded")
+                if isinstance(entries, (str, bytes, bytearray)) or not isinstance(
+                    entries, Sequence
+                ):
+                    raise TypeError(
+                        f"serialized externals for file {file_index} must be a sequence of names"
+                    )
+                names = tuple(entries)
+                for name in names:
+                    if not isinstance(name, str):
+                        raise TypeError("serialized external entries must be strings")
+                    if not name.strip():
+                        raise ValueError("serialized external entries must be non-empty names")
+                external_snapshot[file_index] = names
+
         identities: list[CollectionFileIdentity] = []
-        by_bundle_name: dict[str, int] = {}
-        by_cab: dict[str, int] = {}
+        by_bundle_name: dict[str, set[int]] = {}
+        by_cab: dict[str, set[int]] = {}
         externals: dict[int, tuple[str, ...]] = {}
-        asset_bundles: dict[int, UnityRsObject] = {}
-        for obj in environment.objects:
-            if obj.class_id == 142 and obj.file_index not in asset_bundles:
-                asset_bundles[obj.file_index] = obj
         for obj in environment.objects:
             if obj.file_index in externals:
                 continue
@@ -155,16 +183,16 @@ class CollectionFileTable:
                 unity_version=str(version) if version else None,
             )
             identities.append(identity)
-            by_bundle_name.setdefault(bundle_name, identity.file_index)
-            by_cab.setdefault(cab, identity.file_index)
-            externals[obj.file_index] = self._externals_of(
-                environment, asset_bundles.get(obj.file_index)
-            )
+            by_bundle_name.setdefault(bundle_name, set()).add(identity.file_index)
+            by_cab.setdefault(cab, set()).add(identity.file_index)
+            externals[obj.file_index] = external_snapshot.get(obj.file_index, ())
         self.identities: tuple[CollectionFileIdentity, ...] = tuple(
             sorted(identities, key=lambda value: value.file_index)
         )
-        self._by_bundle_name = by_bundle_name
-        self._by_cab = by_cab
+        self._by_bundle_name = {
+            name: frozenset(indices) for name, indices in by_bundle_name.items()
+        }
+        self._by_cab = {name: frozenset(indices) for name, indices in by_cab.items()}
         self._externals = externals
 
     @staticmethod
@@ -177,18 +205,6 @@ class CollectionFileTable:
         except Exception:  # NOSONAR - metadata is an enhancement, never required
             return {}
 
-    @staticmethod
-    def _externals_of(
-        environment: UnityRsEnvironment, record: UnityRsObject | None
-    ) -> tuple[str, ...]:
-        if record is None:
-            return ()
-        try:
-            native = environment.studio.read_asset_bundle(record.file_index, record.path_id)
-            return tuple(str(name) for name in (getattr(native, "dependencies", None) or ()))
-        except Exception:  # NOSONAR - externals stay unknown; such refs report unresolved
-            return ()
-
     def identity_for(self, file_index: int) -> CollectionFileIdentity | None:
         for identity in self.identities:
             if identity.file_index == file_index:
@@ -196,6 +212,7 @@ class CollectionFileTable:
         return None
 
     def externals_of(self, file_index: int) -> tuple[str, ...]:
+        """Return verified serialized externals, or empty when none were supplied."""
         return self._externals.get(file_index, ())
 
     def resolve_file_id(self, source_file_index: int, file_id: int) -> CollectionExternalReference:
@@ -205,13 +222,14 @@ class CollectionFileTable:
         if position < 0 or position >= len(externals):
             return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
         dependency_name = externals[position]
-        target = self._by_bundle_name.get(dependency_name)
-        if target is None:
-            target = self._by_cab.get(dependency_name)
-        if target is None:
+        targets = self._by_bundle_name.get(dependency_name, frozenset()) | self._by_cab.get(
+            dependency_name, frozenset()
+        )
+        if len(targets) != 1:
             return CollectionExternalReference(
                 UNKNOWN_EXTERNAL_REFERENCE, dependency_name=dependency_name
             )
+        target = next(iter(targets))
         return CollectionExternalReference(
             RESOLVED_EXTERNAL_REFERENCE,
             target_file_index=target,
@@ -429,12 +447,25 @@ class UnityRsEnvironment:
         if not self.container:
             self._load_object_containers()
 
-    def _register_container_item(self, item) -> None:
-        if len(item) != 4:
+    def _register_container_item(self, item: Any, source_file_index: int) -> None:
+        if not isinstance(item, tuple) or len(item) != 4:
             return
-        container_path, _preload_index, _preload_size, identity = item
-        if not isinstance(container_path, str) or not isinstance(identity, tuple):
+        container_path, _preload_index, _preload_size, reference = item
+        if (
+            not isinstance(container_path, str)
+            or not isinstance(reference, tuple)
+            or len(reference) != 2
+        ):
             return
+        file_id, path_id = reference
+        if type(file_id) is not int or type(path_id) is not int:
+            return
+        # unity-rs exposes the container target as the owner's PPtr
+        # (file_id, path_id), not as a collection-global file identity.
+        # Only same-file PPtrs can be resolved without the serialized external table.
+        if file_id != 0 or path_id == 0:
+            return
+        identity = (source_file_index, path_id)
         target = self._by_identity.get(identity)
         if target is None:
             return
@@ -448,7 +479,7 @@ class UnityRsEnvironment:
             if obj.class_id != 142:
                 continue
             for item in read_asset_bundle(obj.file_index, obj.path_id).container:
-                self._register_container_item(item)
+                self._register_container_item(item, obj.file_index)
 
     def _load_object_containers(self) -> None:
         for obj in self.objects:
@@ -728,10 +759,14 @@ def load_collection(
     return UnityRsEnvironment(studio)
 
 
-def build_collection_file_table(environment: UnityRsEnvironment) -> CollectionFileTable:
-    """Read the loaded collection's actual per-file identity table."""
+def build_collection_file_table(
+    environment: UnityRsEnvironment,
+    *,
+    serialized_externals: Mapping[int, Sequence[str]] | None = None,
+) -> CollectionFileTable:
+    """Build file identities, optionally injecting verified serialized externals."""
 
-    return CollectionFileTable(environment)
+    return CollectionFileTable(environment, serialized_externals=serialized_externals)
 
 
 def adapter_version() -> str | None:

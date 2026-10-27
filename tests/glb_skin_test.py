@@ -25,6 +25,7 @@ from updater.extract.glb.math3d import IDENTITY4, compose_trs, invert_mat4, mult
 from updater.extract.glb.skin import (
     BindingSkinWeightsProvider,
     SkinWeights,
+    _decode_skin_streams,
     _SingularJointMatrixError,
     build_skeleton,
 )
@@ -49,6 +50,8 @@ class _SkinStudio:
 
     def __init__(self) -> None:
         self._files = [SimpleNamespace(index=0, path=STAGE_SOURCE, unity_version="2022.3.21f1")]
+        self._dependencies = {0: []}
+        self._meshes = {}
         self._objects = [
             SimpleNamespace(
                 file_index=0,
@@ -114,7 +117,10 @@ class _SkinStudio:
         return []
 
     def read_asset_bundle(self, _file_index: int, _path_id: int):
-        return SimpleNamespace(container=[], dependencies=[])
+        return SimpleNamespace(container=[], dependencies=self._dependencies.get(_file_index, []))
+
+    def read_mesh(self, file_index: int, path_id: int):
+        return self._meshes[(file_index, path_id)]
 
     def read_type_tree_json(self, file_index: int, path_id: int):
         import orjson
@@ -122,8 +128,91 @@ class _SkinStudio:
         return orjson.dumps(self._typetrees[(file_index, path_id)])
 
 
-def _renderer(bones: list[tuple[int, int]]):
-    return SimpleNamespace(name="Body", file_index=0, path_id=50, bones=bones)
+class _CrossFileSkinStudio(_SkinStudio):
+    """Two files with colliding Transform path IDs and file-relative parents."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        other_source = "OTHER::CAB-b"
+        self._files.append(SimpleNamespace(index=1, path=other_source, unity_version="2022.3.21f1"))
+        self._dependencies = {0: ["OTHER"], 1: ["CAB-a"]}
+        self._objects.extend(
+            [
+                SimpleNamespace(
+                    file_index=1,
+                    object_index=0,
+                    path_id=1,
+                    class_id=142,
+                    name="OTHER",
+                    container=None,
+                    source_path=other_source,
+                ),
+                SimpleNamespace(
+                    file_index=1,
+                    object_index=1,
+                    path_id=90,
+                    class_id=4,
+                    name=None,
+                    container=None,
+                    source_path=other_source,
+                ),
+                SimpleNamespace(
+                    file_index=1,
+                    object_index=2,
+                    path_id=20,
+                    class_id=1,
+                    name="OtherHip",
+                    container=None,
+                    source_path=other_source,
+                ),
+            ]
+        )
+        other_transform = _transform_typetree(position=(0.0, 0.0, 3.0), father=91, game_object=20)
+        other_transform["m_Father"]["m_FileID"] = 1
+        self._typetrees[(1, 90)] = other_transform
+        self._typetrees[(1, 20)] = {"m_Name": "OtherHip"}
+
+
+def _renderer(bones: list[tuple[int, int]], *, mesh=None):
+    return SimpleNamespace(name="Body", file_index=0, path_id=50, bones=bones, mesh=mesh)
+
+
+def _native_mesh(
+    *,
+    vertex_count=1,
+    weights=None,
+    indices=None,
+    bind_poses=None,
+):
+    if weights is None:
+        weights = struct.pack("<4f", 0.5, 0.5, 0.0, 0.0) * vertex_count
+    if indices is None:
+        indices = struct.pack("<4I", 0, 1, 0, 0) * vertex_count
+    if bind_poses is None:
+        bind_poses = struct.pack("<16f", *IDENTITY4) * 2
+    return SimpleNamespace(
+        vertex_count=vertex_count,
+        skin_weights=weights,
+        skin_bone_indices=indices,
+        bind_poses=bind_poses,
+    )
+
+
+def _provider_with_mesh(mesh, *, bones=None):
+    studio = _SkinStudio()
+    studio._meshes[(0, 60)] = mesh
+    environment = unity_rs_adapter.UnityRsEnvironment(studio)
+    table = _table(environment)
+    renderer = _renderer(bones or [(0, 90), (0, 91)], mesh=(0, 60))
+    return BindingSkinWeightsProvider(environment, table), renderer
+
+
+def _table(environment, *, serialized_externals=None):
+    if serialized_externals is None:
+        serialized_externals = {0: ()}
+    return unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals=serialized_externals
+    )
 
 
 def _skin_environment():
@@ -132,7 +221,7 @@ def _skin_environment():
 
 def test_build_skeleton_maps_bones_to_game_objects_and_composes_worlds() -> None:
     environment = _skin_environment()
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     skeleton = build_skeleton(_renderer([(0, 90), (0, 91)]), [], environment, table)
 
@@ -158,12 +247,28 @@ def test_build_skeleton_maps_bones_to_game_objects_and_composes_worlds() -> None
 
 def test_build_skeleton_reports_unresolvable_bones() -> None:
     environment = _skin_environment()
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     skeleton = build_skeleton(_renderer([(0, 90), (0, 999)]), [], environment, table)
 
     assert [joint.name for joint in skeleton.joints] == ["Hip"]
     assert [diagnostic.code for diagnostic in skeleton.diagnostics] == [DIAG_MISSING_TARGET]
+
+
+@pytest.mark.parametrize("father", [91, 999])
+def test_build_skeleton_rejects_cycles_and_unresolved_nonempty_fathers(father) -> None:
+    studio = _SkinStudio()
+    studio._typetrees[(0, 90)] = _transform_typetree(
+        position=(1.0, 0.0, 0.0), father=father, game_object=10
+    )
+    environment = unity_rs_adapter.UnityRsEnvironment(studio)
+    table = _table(environment)
+
+    skeleton = build_skeleton(_renderer([(0, 90)]), [], environment, table)
+
+    assert skeleton.joints == ()
+    assert [diagnostic.code for diagnostic in skeleton.diagnostics] == [DIAG_MISSING_TARGET]
+    assert "unresolvable parent chain" in skeleton.diagnostics[0].message
 
 
 def test_build_skeleton_raises_on_singular_joint() -> None:
@@ -195,7 +300,7 @@ def test_build_skeleton_raises_on_singular_joint() -> None:
     )
     studio._typetrees[(0, 12)] = {"m_Name": "Collapsed"}
     environment = unity_rs_adapter.UnityRsEnvironment(studio)
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     with pytest.raises(_SingularJointMatrixError, match="singular"):
         build_skeleton(_renderer([(0, 92)]), [], environment, table)
@@ -203,7 +308,7 @@ def test_build_skeleton_raises_on_singular_joint() -> None:
 
 def test_binding_provider_resolves_skeleton_but_marks_weights_unavailable() -> None:
     environment = _skin_environment()
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     weights = BindingSkinWeightsProvider(environment, table).skin_weights(
         _renderer([(0, 90), (0, 91)]), []
@@ -213,8 +318,126 @@ def test_binding_provider_resolves_skeleton_but_marks_weights_unavailable() -> N
     assert not weights.weights_available
     assert weights.vertex_joints is None and weights.vertex_weights is None
     assert [d.code for d in weights.diagnostics] == [DIAG_SKIN_WEIGHTS_UNAVAILABLE]
-    assert "2 joints resolved" in weights.diagnostics[0].message
+    assert "mesh identity" in weights.diagnostics[0].message
     assert len(weights.skeleton.joints) == 2
+
+
+def test_binding_provider_reads_native_weights_and_mirrors_bind_poses() -> None:
+    native_pose = compose_trs((3.0, 4.0, 5.0), (0.0, 0.0, 0.0, 1.0), (2.0, 1.0, 1.0))
+    mesh = _native_mesh(
+        vertex_count=1,
+        weights=struct.pack("<4f", 0.50025, 0.50025, 0.0, 0.0),
+        indices=struct.pack("<4I", 1, 0, 0xFFFFFFFF, 0xFFFFFFFE),
+        bind_poses=struct.pack("<16f", *native_pose) + struct.pack("<16f", *IDENTITY4),
+    )
+    provider, renderer = _provider_with_mesh(mesh)
+
+    result = provider.skin_weights(renderer, [])
+
+    assert result.weights_available
+    assert result.vertex_joints == ((1, 0, 0, 0),)
+    assert result.vertex_weights is not None
+    assert sum(result.vertex_weights[0]) == pytest.approx(1.0)
+    assert result.vertex_weights[0][0] == pytest.approx(0.5)
+    assert result.skeleton.joints[0].inverse_bind_matrix[12] == pytest.approx(-3.0)
+    assert result.skeleton.joints[0].inverse_bind_matrix[13:15] == pytest.approx((4.0, 5.0))
+    assert result.skeleton.joints[0].inverse_bind_matrix[0] == pytest.approx(2.0)
+    assert result.skeleton.joints[1].inverse_bind_matrix == IDENTITY4
+    assert result.diagnostics == ()
+
+
+@pytest.mark.parametrize(
+    ("mesh", "message"),
+    [
+        (_native_mesh(weights=b"\x00" * 15), "skin_weights has"),
+        (_native_mesh(indices=b"\x00" * 15), "skin_bone_indices has"),
+        (_native_mesh(weights=struct.pack("<4f", float("nan"), 1.0, 0.0, 0.0)), "non-finite"),
+        (_native_mesh(weights=struct.pack("<4f", -0.1, 1.1, 0.0, 0.0)), "negative weights"),
+        (_native_mesh(weights=struct.pack("<4f", 0.0, 0.0, 0.0, 0.0)), "zero total weight"),
+        (
+            _native_mesh(weights=struct.pack("<4f", 0.5, 0.0, 0.0, 0.0)),
+            "outside normalization tolerance",
+        ),
+        (_native_mesh(indices=struct.pack("<4I", 2, 0, 0, 0)), "outside 2 renderer bones"),
+        (_native_mesh(bind_poses=b"\x00" * 127), "bind_poses has"),
+        (
+            _native_mesh(bind_poses=struct.pack("<16f", float("nan"), *IDENTITY4[1:]) * 2),
+            "contains non-finite",
+        ),
+        (_native_mesh(bind_poses=struct.pack("<16f", *([0.0] * 16)) * 2), "is singular"),
+        (
+            SimpleNamespace(
+                vertex_count=1,
+                skin_weights=None,
+                skin_bone_indices=struct.pack("<4I", 0, 1, 0, 0),
+                bind_poses=struct.pack("<16f", *IDENTITY4) * 2,
+            ),
+            "skin_bone_indices or skin_weights is None",
+        ),
+        (
+            SimpleNamespace(
+                vertex_count=1,
+                skin_weights=struct.pack("<4f", 0.5, 0.5, 0.0, 0.0),
+                skin_bone_indices=struct.pack("<4I", 0, 1, 0, 0),
+                bind_poses=None,
+            ),
+            "bind_poses is None",
+        ),
+    ],
+)
+def test_binding_provider_rejects_invalid_native_skin_data(mesh, message) -> None:
+    provider, renderer = _provider_with_mesh(mesh)
+
+    result = provider.skin_weights(renderer, [])
+
+    assert not result.weights_available
+    assert result.vertex_joints is None and result.vertex_weights is None
+    assert result.diagnostics[0].code == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+    assert message in result.diagnostics[0].message
+
+
+def test_binding_provider_reports_missing_bones_without_compressing_skin_indices() -> None:
+    provider, renderer = _provider_with_mesh(_native_mesh(), bones=[(0, 90), (0, 999)])
+
+    result = provider.skin_weights(renderer, [])
+
+    assert not result.weights_available
+    assert [diagnostic.code for diagnostic in result.diagnostics] == [
+        DIAG_SKIN_WEIGHTS_UNAVAILABLE,
+        DIAG_MISSING_TARGET,
+    ]
+
+
+def test_binding_provider_rejects_missing_native_mesh_api() -> None:
+    provider, renderer = _provider_with_mesh(_native_mesh())
+    provider.environment.studio.read_mesh = None
+
+    result = provider.skin_weights(renderer, [])
+
+    assert not result.weights_available
+    assert result.diagnostics[0].code == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+    assert "does not expose read_mesh" in result.diagnostics[0].message
+
+
+def test_binding_provider_rejects_positive_joint_indices_above_uint16() -> None:
+    with pytest.raises(ValueError, match="exceeds uint16"):
+        _decode_skin_streams(
+            1,
+            65_537,
+            struct.pack("<4I", 65_536, 0, 0, 0),
+            struct.pack("<4f", 1.0, 0.0, 0.0, 0.0),
+        )
+
+
+def test_skeleton_resolves_cross_file_fathers_and_caches_full_identity() -> None:
+    environment = unity_rs_adapter.UnityRsEnvironment(_CrossFileSkinStudio())
+    table = _table(environment, serialized_externals={0: ("OTHER",), 1: ("CAB-a",)})
+
+    skeleton = build_skeleton(_renderer([(0, 90), (1, 90)]), [], environment, table)
+
+    assert [joint.identity for joint in skeleton.joints] == [(0, 10), (1, 20)]
+    assert skeleton.joints[0].world_matrix[12:15] == (-1.0, 0.0, 0.0)
+    assert skeleton.joints[1].world_matrix[12:15] == (-1.0, 2.0, 3.0)
 
 
 class _WeightedProvider:
@@ -254,7 +477,7 @@ def test_export_attaches_skin_from_provider() -> None:
     document = validate_glb_bytes(export.glb_bytes)
     skin = document["skins"][0]
     primitive = document["meshes"][0]["primitives"][0]
-    assert primitive["skin"] == 0
+    assert document["nodes"][1]["skin"] == 0
     assert skin["joints"] == [0]  # root_a is glTF node 0
     ibm_view = document["accessors"][skin["inverseBindMatrices"]]
     assert ibm_view["type"] == "MAT4" and ibm_view["count"] == 1
@@ -270,9 +493,12 @@ def test_export_attaches_skin_from_provider() -> None:
             "gltf_mesh": 0,
             "joints": 1,
             "weights_available": True,
+            "skin_attached": True,
         }
     ]
-    assert export.manifest["diagnostics"] == []
+    assert len(export.manifest["diagnostics"]) == 1
+    assert export.manifest["diagnostics"][0]["code"] == DIAG_MISSING_TARGET
+    assert "no material slot" in export.manifest["diagnostics"][0]["message"]
 
 
 def test_export_default_provider_keeps_skeleton_and_records_diagnostic() -> None:

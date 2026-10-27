@@ -238,6 +238,12 @@ def _environment(include_shader_pack: bool = True):
     )
 
 
+def _table(environment):
+    return unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: (SHADER_BUNDLE,)}
+    )
+
+
 def _extraction(environment):
     from updater.extract.glb.collection import (
         GlbCollectionExtraction,
@@ -245,7 +251,7 @@ def _extraction(environment):
         validate_collection_reachability,
     )
 
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
     plan = _plan()
     payloads = [(STAGE_BUNDLE, b"stage"), (SHADER_BUNDLE, b"shader")]
     report = validate_collection_reachability(environment, table, plan.roots)
@@ -415,6 +421,7 @@ def test_export_root_glb_sync_publishes_all_artifacts(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=True),
     )
+    monkeypatch.setattr(glb_collection, "build_collection_file_table", _table)
     glb_path = tmp_path / "out" / "stage.glb"
     export_manifest_path = tmp_path / "out" / "stage.export.json"
     package_manifest_path = tmp_path / "out" / "stage.package.json"
@@ -449,6 +456,7 @@ def test_export_root_glb_sync_refuses_before_writing(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=False),
     )
+    monkeypatch.setattr(glb_collection, "build_collection_file_table", _table)
     glb_path = tmp_path / "out" / "stage.glb"
 
     with pytest.raises(PackageNotPublishable):
@@ -477,6 +485,7 @@ def test_export_root_glb_sync_writes_optional_fbx_diagnostic(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=True),
     )
+    monkeypatch.setattr(glb_collection, "build_collection_file_table", _table)
     fbx_path = tmp_path / "out" / "stage.fbx"
 
     export_root_glb_sync(
@@ -557,21 +566,10 @@ def test_real_stage_export_is_root_scoped_and_deterministic() -> None:
     manifest = build_package_manifest(plan, inputs, "2022.3.21f1", report, environment, table)
     extraction = GlbCollectionExtraction(manifest=manifest, report=report)
 
-    # With only part of the closure cached, the required shader/light
-    # externals stay unresolved: the publish gate must refuse.
-    if not extraction.report.publishable:
-        with pytest.raises(ValueError, match="required L2"):
-            export_root_glb(environment, table, extraction, (root.file_index, root.path_id))
-        export_kwargs = {"allow_incomplete": True}
-    else:
-        export_kwargs = {}
+    assert extraction.report.publishable, extraction.report.findings
 
-    first = export_root_glb(
-        environment, table, extraction, (root.file_index, root.path_id), **export_kwargs
-    )
-    second = export_root_glb(
-        environment, table, extraction, (root.file_index, root.path_id), **export_kwargs
-    )
+    first = export_root_glb(environment, table, extraction, (root.file_index, root.path_id))
+    second = export_root_glb(environment, table, extraction, (root.file_index, root.path_id))
 
     assert first.glb_bytes == second.glb_bytes
     document = validate_glb_bytes(first.glb_bytes)

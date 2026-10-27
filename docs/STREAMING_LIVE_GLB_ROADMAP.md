@@ -501,6 +501,11 @@ controlled GLB writer/converter implementation.
 
 **Dependencies:** Phase 4 root-scoped GLB and object mappings.
 
+**Real-input status (2026-10-27):** executed, but full acceptance is blocked by
+the native serialized-externals API gap and incomplete real animation binding
+coverage. See [real-model acceptance evidence](GLB_PHASE5_REAL_MODEL_ACCEPTANCE.md).
+Passing unit tests or diagnostic GLBs do not establish publication readiness.
+
 **Work:**
 
 1. Resolve and deduplicate Material, Texture2D/Sprite/TextureArray, and Shader

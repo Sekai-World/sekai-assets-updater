@@ -115,7 +115,9 @@ def _material_environment(**kwargs):
 
 def _convert(studio):
     environment = unity_rs_adapter.UnityRsEnvironment(studio)
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: (SHADER_BUNDLE,)}
+    )
     material = environment.object_by_identity(0, 300)
     return convert_material(environment, table, material)
 

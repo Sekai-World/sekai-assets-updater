@@ -221,7 +221,13 @@ def _environment(include_shader_pack: bool = True):
 
 
 def _table(environment):
-    return unity_rs_adapter.build_collection_file_table(environment)
+    return unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: (SHADER_BUNDLE,)}
+    )
+
+
+def _patch_fake_external_metadata(monkeypatch, collection_module) -> None:
+    monkeypatch.setattr(collection_module, "build_collection_file_table", _table)
 
 
 def test_iter_pptr_locations_walks_nested_trees_deterministically() -> None:
@@ -259,6 +265,21 @@ def test_collection_file_table_builds_portable_identities_and_externals() -> Non
     unknown = table.resolve_file_id(1, 1)
     assert unknown.kind == "unknown_external"
     assert unknown.dependency_name is None
+
+
+def test_missing_serialized_externals_stay_unknown_and_block_reachability() -> None:
+    environment = _environment()
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    external = table.resolve_file_id(0, 1)
+    report = validate_collection_reachability(environment, table, _plan().roots)
+
+    assert external.kind == "unknown_external"
+    assert external.dependency_name is None
+    assert not report.publishable
+    finding = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert finding.dependency_name is None
+    assert finding.severity == "error"
 
 
 def test_resolve_pptr_covers_same_file_null_and_external_cases() -> None:
@@ -515,6 +536,7 @@ def test_extract_collection_sync_publishes_manifest(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=True),
     )
+    _patch_fake_external_metadata(monkeypatch, glb_collection)
 
     result = extract_collection_sync(plan, payloads, "2022.3.21f1", str(manifest_path))
 
@@ -537,6 +559,7 @@ def test_extract_collection_sync_refuses_non_publishable_package(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=False),
     )
+    _patch_fake_external_metadata(monkeypatch, glb_collection)
 
     with pytest.raises(PackageNotPublishable) as exc_info:
         extract_collection_sync(plan, payloads, "2022.3.21f1", str(manifest_path))

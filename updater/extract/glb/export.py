@@ -14,6 +14,8 @@ Conversion rules are fixed and recorded in every export manifest:
 
 from __future__ import annotations
 
+import math
+import struct
 from dataclasses import dataclass
 from typing import Any, Sequence
 
@@ -43,7 +45,7 @@ CONVERSION_RULES = {
     "winding": "reversed_after_mirror",
     "node_naming": "unity_object_name_verbatim",
     "materials": "converted unity materials (pbr/unlit) with embedded png textures",
-    "skins": "skeleton joints with inverse bind matrices; per-vertex weights only via provider",
+    "skins": "mirrored skeleton joints and native per-vertex joint/weight channels",
 }
 
 
@@ -106,8 +108,9 @@ def parse_obj_mesh(obj_bytes: bytes) -> dict[str, Any]:
     """Decode the binding's OBJ emission into mirrored, deduplicated geometry.
 
     Faces are triangulated in reversed order so front faces survive the X
-    mirror.  Unique ``(v, vt, vn)`` corners keep first-seen order, which is
-    deterministic given a deterministic OBJ.
+    mirror.  Unique ``(v, vt, vn)`` corners keep first-seen order, and the
+    returned ``source_vertex_indices`` preserve the OBJ vertex identity for
+    remapping provider skin channels across reordered corners and UV seams.
     """
 
     positions: list[tuple[float, float, float]] = []
@@ -117,45 +120,177 @@ def parse_obj_mesh(obj_bytes: bytes) -> dict[str, Any]:
     out_positions: list[tuple[float, float, float]] = []
     out_normals: list[tuple[float, float, float]] = []
     out_uvs: list[tuple[float, float]] = []
+    source_vertex_indices: list[int] = []
     indices: list[int] = []
+
+    def _resolve_index(raw: str, count: int, channel: str) -> int:
+        value = int(raw)
+        if value == 0:
+            raise ValueError(f"OBJ {channel} indices are one-based and cannot be zero")
+        resolved = value - 1 if value > 0 else count + value
+        if resolved < 0 or resolved >= count:
+            raise ValueError(f"OBJ {channel} index {value} is out of range")
+        return resolved
 
     def _vertex(raw: str) -> int:
         v_part, _, rest = raw.partition("/")
         vt_part, _, vn_part = rest.partition("/")
-        corner = (int(v_part), int(vt_part or 0), int(vn_part or 0))
+        if not v_part:
+            raise ValueError("OBJ face corner is missing its position index")
+        vi = _resolve_index(v_part, len(positions), "position")
+        vti = _resolve_index(vt_part, len(texcoords), "texcoord") if vt_part else -1
+        vni = _resolve_index(vn_part, len(normals), "normal") if vn_part else -1
+        corner = (vi, vti, vni)
         known = corner_index.get(corner)
         if known is not None:
             return known
-        vi, vti, vni = corner
-        out_positions.append(_mirror_position(positions[vi - 1]))
-        out_uvs.append(texcoords[vti - 1] if vti else (0.0, 0.0))
-        out_normals.append(_mirror_position(normals[vni - 1]) if vni else (0.0, 1.0, 0.0))
+        out_positions.append(_mirror_position(positions[vi]))
+        out_uvs.append(texcoords[vti] if vti >= 0 else (0.0, 0.0))
+        out_normals.append(_mirror_position(normals[vni]) if vni >= 0 else (0.0, 1.0, 0.0))
+        source_vertex_indices.append(vi)
         new_index = len(out_positions) - 1
         corner_index[corner] = new_index
         return new_index
 
-    for line in obj_bytes.decode("utf-8").splitlines():
+    for line_number, line in enumerate(obj_bytes.decode("utf-8").splitlines(), start=1):
         parts = line.split()
         if not parts:
             continue
-        if parts[0] == "v":
-            positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
-        elif parts[0] == "vt":
-            texcoords.append((float(parts[1]), float(parts[2])))
-        elif parts[0] == "vn":
-            normals.append((float(parts[1]), float(parts[2]), float(parts[3])))
-        elif parts[0] == "f":
-            corners = [_vertex(part) for part in parts[1:]]
+        try:
+            if parts[0] == "v":
+                positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            elif parts[0] == "vt":
+                texcoords.append((float(parts[1]), float(parts[2])))
+            elif parts[0] == "vn":
+                normals.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            elif parts[0] == "f":
+                if len(parts) < 4:
+                    raise ValueError("OBJ face must contain at least three corners")
+                corners = [_vertex(part) for part in parts[1:]]
+            else:
+                continue
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"invalid OBJ mesh data on line {line_number}: {exc}") from exc
+        if parts[0] == "f":
             # Reversed winding: (a, b, c) becomes (a, c, b) after mirroring.
             for k in range(1, len(corners) - 1):
                 indices.append(corners[0])
                 indices.append(corners[k + 1])
                 indices.append(corners[k])
+    if any(
+        not math.isfinite(value)
+        for channel in (positions, normals, texcoords)
+        for row in channel
+        for value in row
+    ):
+        raise ValueError("OBJ mesh contains a non-finite vertex attribute")
     return {
         "positions": out_positions,
         "normals": out_normals,
         "texcoords": out_uvs,
         "indices": indices,
+        "primitives": [{"indices": indices}],
+        "source_vertex_indices": source_vertex_indices,
+        "source_vertex_count": len(positions),
+    }
+
+
+def _native_attribute(
+    attribute: Any,
+    *,
+    label: str,
+    vertex_count: int,
+    dimensions: tuple[int, ...],
+    default: tuple[float, ...] | None = None,
+) -> list[tuple[float, ...]]:
+    if attribute is None:
+        if default is None:
+            raise ValueError(f"native mesh is missing required {label}")
+        return [default] * vertex_count
+
+    dimension = attribute.dimension
+    if not isinstance(dimension, int) or dimension not in dimensions:
+        raise ValueError(f"native mesh {label} dimension {dimension!r} is invalid")
+    raw_data = attribute.data
+    if not isinstance(raw_data, (bytes, bytearray, memoryview)):
+        raise ValueError(f"native mesh {label} data must be bytes")
+    data = bytes(raw_data)
+    expected_length = vertex_count * dimension * 4
+    if len(data) != expected_length:
+        raise ValueError(
+            f"native mesh {label} byte length {len(data)} does not match "
+            f"{vertex_count} vertices x {dimension} float32 components"
+        )
+    rows = [tuple(values) for values in struct.iter_unpack(f"<{dimension}f", data)]
+    if any(not math.isfinite(value) for row in rows for value in row):
+        raise ValueError(f"native mesh {label} contains a non-finite value")
+    return rows
+
+
+def _parse_native_mesh(mesh: Any) -> dict[str, Any]:
+    """Convert unity-rs native vertex channels and submeshes to GLB space."""
+
+    vertex_count = mesh.vertex_count
+    if not isinstance(vertex_count, int) or vertex_count <= 0:
+        raise ValueError(f"native mesh vertex_count must be positive, got {vertex_count!r}")
+
+    positions = _native_attribute(
+        mesh.positions, label="positions", vertex_count=vertex_count, dimensions=(3,)
+    )
+    normals = _native_attribute(
+        mesh.normals,
+        label="normals",
+        vertex_count=vertex_count,
+        dimensions=(3,),
+        default=(0.0, 1.0, 0.0),
+    )
+    uv_channels = mesh.uvs
+    uv0 = uv_channels[0] if uv_channels else None
+    texcoords_raw = _native_attribute(
+        uv0,
+        label="uv0",
+        vertex_count=vertex_count,
+        dimensions=(2, 3, 4),
+        default=(0.0, 0.0),
+    )
+    texcoords = [(row[0], row[1]) for row in texcoords_raw]
+
+    native_submeshes = list(mesh.sub_meshes)
+    if not native_submeshes:
+        raise ValueError("native mesh has no submeshes")
+    primitives: list[dict[str, Any]] = []
+    for submesh_index, submesh in enumerate(native_submeshes):
+        index_count = submesh.index_count
+        if not isinstance(index_count, int) or index_count < 0 or index_count % 3:
+            raise ValueError(
+                f"native mesh submesh {submesh_index} index_count must be a non-negative "
+                "triangle-list length"
+            )
+        raw_indices = submesh.indices
+        if not isinstance(raw_indices, (bytes, bytearray, memoryview)):
+            raise ValueError(f"native mesh submesh {submesh_index} indices must be bytes")
+        raw_indices = bytes(raw_indices)
+        if len(raw_indices) != index_count * 4:
+            raise ValueError(
+                f"native mesh submesh {submesh_index} index byte length "
+                f"{len(raw_indices)} does not match index_count {index_count}"
+            )
+        native_indices = [values[0] for values in struct.iter_unpack("<I", raw_indices)]
+        if any(index >= vertex_count for index in native_indices):
+            raise ValueError(f"native mesh submesh {submesh_index} index exceeds vertex_count")
+        indices: list[int] = []
+        for offset in range(0, len(native_indices), 3):
+            a, b, c = native_indices[offset : offset + 3]
+            indices.extend((a, c, b))
+        primitives.append({"indices": indices})
+
+    return {
+        "positions": [_mirror_position(tuple(position)) for position in positions],
+        "normals": [_mirror_position(tuple(normal)) for normal in normals],
+        "texcoords": texcoords,
+        "primitives": primitives,
+        "source_vertex_indices": list(range(vertex_count)),
+        "source_vertex_count": vertex_count,
     }
 
 
@@ -271,9 +406,8 @@ def export_root_glb(
     L2 failures make a package non-publishable).  The resulting manifest
     embeds the conversion rules, the GLB content hash, per-node and
     per-mesh Unity mappings, converted materials, and any structured
-    material/skin diagnostics.  ``skin_weights_provider`` defaults to the
-    binding-backed provider, which resolves skeletons but supplies no
-    per-vertex weights.
+    material/skin diagnostics. ``skin_weights_provider`` defaults to the
+    binding-backed provider, which reads native mesh joint/weight channels.
     """
 
     if not extraction.report.publishable and not allow_incomplete:
@@ -292,7 +426,7 @@ def export_root_glb(
     node_index: dict[_NodeRef, int] = {}
     node_mappings: list[dict[str, Any]] = []
     mesh_mappings: list[dict[str, Any]] = []
-    skinned_nodes: list[tuple[Any, _NodeRef, int, int]] = []
+    skinned_nodes: list[tuple[Any, _NodeRef, int, list[int], int]] = []
     parents: dict[_NodeRef, Any] = {
         _NodeRef(node.file_index, node.path_id): node for node in scene_nodes
     }
@@ -311,23 +445,48 @@ def export_root_glb(
                 mesh_identity.file_index, mesh_identity.path_id
             )
             if mesh_object is not None:
-                geometry = parse_obj_mesh(
-                    environment.studio.read_mesh_obj(
-                        mesh_identity.file_index, mesh_identity.path_id
-                    )
-                )
-                if node.materials:
-                    node_material = binder.index_for(node.materials[0])
+                native_reader = getattr(environment.studio, "read_mesh", None)
+                if callable(native_reader):
+                    # A malformed native mesh must fail closed; silently
+                    # falling back to OBJ would drop its vertex identity.
+                    native_mesh = native_reader(mesh_identity.file_index, mesh_identity.path_id)
+                    geometry = _parse_native_mesh(native_mesh)
                 else:
-                    node_material = None
+                    obj_reader = getattr(environment.studio, "read_mesh_obj", None)
+                    if not callable(obj_reader):
+                        raise ValueError("studio exposes neither read_mesh nor read_mesh_obj")
+                    geometry = parse_obj_mesh(
+                        obj_reader(mesh_identity.file_index, mesh_identity.path_id)
+                    )
+
+                node_materials = tuple(node.materials or ())
+                mesh_primitives: list[dict[str, Any]] = []
+                for slot, source_primitive in enumerate(geometry["primitives"]):
+                    if slot < len(node_materials) and node_materials[slot] is not None:
+                        resolved_material = binder.index_for(node_materials[slot])
+                    else:
+                        resolved_material = None
+                        binder._append_diagnostic(
+                            DIAG_MISSING_TARGET,
+                            f"mesh {mesh_identity.path_id} submesh {slot} has no material slot; "
+                            "using the default material",
+                            (identity.file_index, identity.path_id),
+                        )
+                    mesh_primitives.append(
+                        {
+                            "indices": source_primitive["indices"],
+                            "material_index": (
+                                material_index if resolved_material is None else resolved_material
+                            ),
+                        }
+                    )
                 hierarchy_path = _hierarchy_path(parents, node, root_ref)
                 mesh_index = scene.add_mesh(
                     name=mesh_object.name or f"mesh_{mesh_identity.path_id}",
                     positions=geometry["positions"],
                     normals=geometry["normals"],
                     texcoords=geometry["texcoords"],
-                    indices=geometry["indices"],
-                    material_index=node_material or material_index,
+                    primitives=mesh_primitives,
                 )
                 gltf_node["mesh"] = mesh_index
                 mesh_mappings.append(
@@ -341,7 +500,15 @@ def export_root_glb(
                     }
                 )
                 if node.bones:
-                    skinned_nodes.append((node, identity, mesh_index, len(geometry["positions"])))
+                    skinned_nodes.append(
+                        (
+                            node,
+                            identity,
+                            mesh_index,
+                            geometry["source_vertex_indices"],
+                            geometry["source_vertex_count"],
+                        )
+                    )
         index = scene.add_node(gltf_node)
         node_index[identity] = index
         node_mappings.append(
@@ -422,7 +589,7 @@ def _attach_skins(
     scene: GlbScene,
     provider: SkinWeightsProvider,
     scene_nodes: Sequence[Any],
-    skinned_nodes: Sequence[tuple[Any, _NodeRef, int, int]],
+    skinned_nodes: Sequence[tuple[Any, _NodeRef, int, list[int], int]],
     node_index: dict[_NodeRef, int],
     identity_to_bundle: dict[int, str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -430,14 +597,15 @@ def _attach_skins(
 
     Every provider diagnostic is recorded.  A skin is attached only when the
     provider supplied per-vertex weights, every joint is inside the exported
-    subtree, and the weight count matches the mesh's vertex count; otherwise
-    the skeleton's nodes remain in the GLB and the blocking reason becomes a
-    manifest diagnostic.
+    subtree, and the source-order weight count matches the original mesh;
+    otherwise the skeleton's nodes remain in the GLB and the reason becomes a
+    manifest diagnostic. ``source_vertex_indices`` remaps native weight data
+    onto OBJ corner expansion when the compatibility reader is used.
     """
 
     mappings: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
-    for node, identity, mesh_index, vertex_count in skinned_nodes:
+    for node, identity, mesh_index, source_vertex_indices, source_vertex_count in skinned_nodes:
         gltf_node = node_index[identity]
         try:
             weights = provider.skin_weights(node, scene_nodes)
@@ -467,6 +635,7 @@ def _attach_skins(
             "gltf_mesh": mesh_index,
             "joints": len(skeleton.joints),
             "weights_available": weights.weights_available,
+            "skin_attached": False,
         }
         mappings.append(mapping)
         if not weights.weights_available:
@@ -489,29 +658,91 @@ def _attach_skins(
         if (
             weights.vertex_joints is None
             or weights.vertex_weights is None
-            or len(weights.vertex_joints) != vertex_count
+            or len(weights.vertex_joints) != source_vertex_count
             or len(weights.vertex_joints) != len(weights.vertex_weights)
         ):
             diagnostics.append(
                 {
                     "code": DIAG_MISSING_TARGET,
                     "message": (
-                        f"renderer {identity}: weight count does not match the"
-                        f" mesh's {vertex_count} vertices; no skin attached"
+                        f"renderer {identity}: weight count does not match the native"
+                        f" mesh's {source_vertex_count} vertices; no skin attached"
                     ),
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
             continue
+        if not skeleton.joints:
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": f"renderer {identity}: skeleton has no joints; no skin attached",
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+        if any(
+            source_index < 0 or source_index >= source_vertex_count
+            for source_index in source_vertex_indices
+        ):
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": f"renderer {identity}: mesh vertex remap is out of range; no skin attached",
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+
+        remapped_joints: list[tuple[int, int, int, int]] = []
+        remapped_weights: list[tuple[float, float, float, float]] = []
+        invalid_skin_data = False
+        for source_index in source_vertex_indices:
+            joints_row = weights.vertex_joints[source_index]
+            weights_row = weights.vertex_weights[source_index]
+            try:
+                converted_weights = tuple(float(weight) for weight in weights_row)
+            except (TypeError, ValueError, OverflowError):
+                invalid_skin_data = True
+                break
+            if (
+                len(joints_row) != 4
+                or any(
+                    not isinstance(joint, int)
+                    or joint < 0
+                    or joint >= len(skeleton.joints)
+                    or joint > 65535
+                    for joint in joints_row
+                )
+                or len(converted_weights) != 4
+                or any(not math.isfinite(weight) or weight < 0 for weight in converted_weights)
+            ):
+                invalid_skin_data = True
+                break
+            remapped_joints.append(tuple(joints_row))
+            remapped_weights.append(converted_weights)
+        if invalid_skin_data:
+            diagnostics.append(
+                {
+                    "code": DIAG_MISSING_TARGET,
+                    "message": f"renderer {identity}: invalid vertex joint/weight values; no skin attached",
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
+            continue
+
         inverse_binds = scene.add_inverse_bind_matrices(list(skeleton.inverse_bind_matrices))
         skin_index = scene.add_skin(
             [node_index[_NodeRef(*joint.identity)] for joint in skeleton.joints],
             inverse_binds,
         )
         joints_accessor, weights_accessor = scene.add_vertex_skin_data(
-            list(weights.vertex_joints), list(weights.vertex_weights)
+            remapped_joints, remapped_weights
         )
-        scene.attach_skin_to_primitive(mesh_index, skin_index, joints_accessor, weights_accessor)
+        scene.attach_skin_to_node(
+            gltf_node, mesh_index, skin_index, joints_accessor, weights_accessor
+        )
+        mapping["skin_attached"] = True
     return mappings, diagnostics
 
 
