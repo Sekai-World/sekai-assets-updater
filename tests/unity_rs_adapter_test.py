@@ -84,6 +84,65 @@ def test_environment_uses_asset_bundle_container_targets() -> None:
     assert environment.container["actual.playable"].container == "actual.playable"
 
 
+def test_asset_bundle_container_file_zero_reference_uses_owner_file_identity() -> None:
+    path = "actual.playable"
+    collision = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    target = _Info(file_index=1, object_index=0, path_id=42, class_id=114)
+    bundles = [
+        _Info(file_index=0, object_index=1, path_id=1, class_id=142),
+        _Info(file_index=1, object_index=1, path_id=2, class_id=142),
+    ]
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, file_index, _path_id):
+            container = [(path, 0, 1, (0, 42))] if file_index == 1 else []
+            return SimpleNamespace(container=container)
+
+    environment = unity_rs_adapter.UnityRsEnvironment(
+        _AssetBundleStudio([collision, target, *bundles])
+    )
+
+    assert environment.container[path] is environment.object_by_identity(1, 42)
+    assert environment.object_by_identity(1, 42).container == path
+    assert environment.object_by_identity(0, 42).container is None
+
+
+def test_asset_bundle_container_does_not_guess_missing_owner_target() -> None:
+    collision = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    asset_bundle = _Info(file_index=1, object_index=0, path_id=1, class_id=142)
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, _file_index, _path_id):
+            return SimpleNamespace(container=[("wrong.playable", 0, 1, (0, 42))])
+
+    environment = unity_rs_adapter.UnityRsEnvironment(_AssetBundleStudio([collision, asset_bundle]))
+
+    assert "wrong.playable" not in environment.container
+    assert environment.object_by_identity(0, 42).container is None
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [(1, 42), (-1, 42), (0, 0), ("0", 42), (0, "42"), (0, 42, 43)],
+)
+def test_asset_bundle_container_ignores_unsupported_or_malformed_references(reference) -> None:
+    target = _Info(file_index=0, object_index=0, path_id=42, class_id=114)
+    collision = _Info(file_index=1, object_index=0, path_id=42, class_id=114)
+    asset_bundle = _Info(file_index=0, object_index=1, path_id=1, class_id=142)
+
+    class _AssetBundleStudio(_Studio):
+        def read_asset_bundle(self, _file_index, _path_id):
+            return SimpleNamespace(container=[("unresolved.playable", 0, 1, reference)])
+
+    environment = unity_rs_adapter.UnityRsEnvironment(
+        _AssetBundleStudio([target, collision, asset_bundle])
+    )
+
+    assert "unresolved.playable" not in environment.container
+    assert environment.object_by_identity(0, 42).container is None
+    assert environment.object_by_identity(1, 42).container is None
+
+
 @pytest.mark.parametrize("order", [(28, 213), (213, 28)])
 def test_asset_bundle_container_keeps_texture_over_same_path_sprite(order) -> None:
     # A Sprite-imported PNG lists its Texture2D and Sprite under one path, as in

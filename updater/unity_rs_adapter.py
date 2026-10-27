@@ -429,12 +429,25 @@ class UnityRsEnvironment:
         if not self.container:
             self._load_object_containers()
 
-    def _register_container_item(self, item) -> None:
-        if len(item) != 4:
+    def _register_container_item(self, item: Any, source_file_index: int) -> None:
+        if not isinstance(item, tuple) or len(item) != 4:
             return
-        container_path, _preload_index, _preload_size, identity = item
-        if not isinstance(container_path, str) or not isinstance(identity, tuple):
+        container_path, _preload_index, _preload_size, reference = item
+        if (
+            not isinstance(container_path, str)
+            or not isinstance(reference, tuple)
+            or len(reference) != 2
+        ):
             return
+        file_id, path_id = reference
+        if type(file_id) is not int or type(path_id) is not int:
+            return
+        # unity-rs exposes the container target as the owner's PPtr
+        # (file_id, path_id), not as a collection-global file identity.
+        # Only same-file PPtrs can be resolved without the serialized external table.
+        if file_id != 0 or path_id == 0:
+            return
+        identity = (source_file_index, path_id)
         target = self._by_identity.get(identity)
         if target is None:
             return
@@ -448,7 +461,7 @@ class UnityRsEnvironment:
             if obj.class_id != 142:
                 continue
             for item in read_asset_bundle(obj.file_index, obj.path_id).container:
-                self._register_container_item(item)
+                self._register_container_item(item, obj.file_index)
 
     def _load_object_containers(self) -> None:
         for obj in self.objects:
