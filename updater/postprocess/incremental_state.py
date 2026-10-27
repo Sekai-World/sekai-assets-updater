@@ -61,6 +61,21 @@ def compute_score_hashes(
     return result
 
 
+def _validate_chart_fingerprint(value: object) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError("chart state fingerprint must be an object")
+    for field in ("region", "data_server", "jacket_base_url"):
+        if not isinstance(value.get(field), str):
+            raise ValueError(f"chart state fingerprint.{field} must be a string")
+    if "music_scope" in value and not isinstance(value["music_scope"], str):
+        raise ValueError("chart state fingerprint.music_scope must be a string")
+
+    fingerprint = {field: value[field] for field in ("region", "data_server", "jacket_base_url")}
+    if "music_scope" in value:
+        fingerprint["music_scope"] = value["music_scope"]
+    return fingerprint
+
+
 def validate_chart_state(value: object) -> dict:
     """Strict validator for ``chart_state.json`` compatible with ``atomic_write_json``."""
     if not isinstance(value, dict):
@@ -74,14 +89,7 @@ def validate_chart_state(value: object) -> dict:
             f"chart state schema_version must be {_CHART_STATE_SCHEMA_VERSION}, "
             f"got {value.get('schema_version')!r}"
         )
-    fp = value.get("fingerprint")
-    if not isinstance(fp, dict):
-        raise ValueError("chart state fingerprint must be an object")
-    for field in ("region", "data_server", "jacket_base_url"):
-        if not isinstance(fp.get(field), str):
-            raise ValueError(f"chart state fingerprint.{field} must be a string")
-    if "music_scope" in fp and not isinstance(fp["music_scope"], str):
-        raise ValueError("chart state fingerprint.music_scope must be a string")
+    fingerprint = _validate_chart_fingerprint(value.get("fingerprint"))
     scores = value.get("scores")
     if not isinstance(scores, dict):
         raise ValueError("chart state scores must be an object")
@@ -92,9 +100,6 @@ def validate_chart_state(value: object) -> dict:
             raise ValueError(
                 f"chart state score hash for {key!r} must be a 64-char lowercase hex string"
             )
-    fingerprint = {k: fp[k] for k in ("region", "data_server", "jacket_base_url")}
-    if "music_scope" in fp:
-        fingerprint["music_scope"] = fp["music_scope"]
     return {
         "schema_version": _CHART_STATE_SCHEMA_VERSION,
         "fingerprint": fingerprint,

@@ -178,6 +178,7 @@ def test_bundle_matching_is_exact_and_unknown_music_paths_fail_closed() -> None:
     assert not selection.allows_bundle("music/jacket/jacket_s_001_extra")
     assert selection.allows_bundle("music/music_score/0001_score")
     assert selection.allows_bundle("music/music_score/001_score")
+    assert not selection.allows_bundle("music/music_score/１_score")
     assert not selection.allows_bundle("music/music_score/00010_score")
     assert not selection.allows_bundle("music/music_score/not-a-score")
     assert not selection.allows_bundle("music/unknown/vs_0001_01")
@@ -233,10 +234,13 @@ def test_bad_ids_assets_and_orphan_vocals_fail_closed(
 
 
 def test_duplicate_ids_fail_closed_for_music_and_vocal_tables() -> None:
+    duplicate_music_rows = [_music(1), _music(1, "jacket_other")]
     with pytest.raises(ValueError, match="duplicate id"):
-        _build(region_musics=[_music(1), _music(1, "jacket_other")])
+        _build(region_musics=duplicate_music_rows)
+
+    duplicate_vocal_rows = [_vocal(11, 1, "vs_1"), _vocal(11, 1, "vs_2")]
     with pytest.raises(ValueError, match="duplicate id"):
-        _build(region_vocals=[_vocal(11, 1, "vs_1"), _vocal(11, 1, "vs_2")])
+        _build(region_vocals=duplicate_vocal_rows)
 
 
 def test_jp_table_cannot_be_empty_or_every_region_song_looks_exclusive() -> None:
@@ -365,9 +369,10 @@ def test_fetch_error_propagates_without_attaching_partial_state(
 
     monkeypatch.setattr(regional_music.aiohttp, "ClientSession", Session)
     config = SimpleNamespace(REGION="en", ENABLE_REGION_EXCLUSIVE_MUSIC=True)
+    preparation = prepare_regional_music_config(config)
 
     with pytest.raises(aiohttp.ClientError, match="unavailable"):
-        asyncio.run(prepare_regional_music_config(config))
+        asyncio.run(preparation)
     assert not hasattr(config, "_regional_music_selection")
     with pytest.raises(ValueError, match="must be prepared"):
         get_regional_music_selection(config)

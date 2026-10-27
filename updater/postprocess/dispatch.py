@@ -1030,22 +1030,36 @@ async def _upload_scoped_chart_outputs(
 
     with tempfile.TemporaryDirectory(prefix="sekai-chart-scope-") as temp_dir:
         staged_root = StdPath(temp_dir)
-        staged_files = 0
-        for source_music_id, score_stems in expected_outputs.items():
-            source_dir = chart_root / source_music_id
-            if source_dir.is_symlink() or not source_dir.is_dir():
-                continue
-            staged_dir = staged_root / source_music_id
-            for score_stem in score_stems:
-                for suffix in (".svg", ".png"):
-                    source_file = source_dir / f"{score_stem}{suffix}"
-                    if source_file.is_symlink() or not source_file.is_file():
-                        continue
-                    staged_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source_file, staged_dir / source_file.name)
-                    staged_files += 1
+        staged_files = sum(
+            _stage_chart_song_outputs(chart_root, staged_root, source_music_id, score_stems)
+            for source_music_id, score_stems in expected_outputs.items()
+        )
         if staged_files:
             await _upload_specialized_directory("charts", staged_root, config)
+
+
+def _stage_chart_song_outputs(
+    chart_root: StdPath,
+    staged_root: StdPath,
+    source_music_id: str,
+    score_stems: set[str],
+) -> int:
+    """Stage existing, non-symlink outputs for one selected song."""
+    source_dir = chart_root / source_music_id
+    if source_dir.is_symlink() or not source_dir.is_dir():
+        return 0
+
+    staged_dir = staged_root / source_music_id
+    staged_files = 0
+    for score_stem in score_stems:
+        for suffix in (".svg", ".png"):
+            source_file = source_dir / f"{score_stem}{suffix}"
+            if source_file.is_symlink() or not source_file.is_file():
+                continue
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_file, staged_dir / source_file.name)
+            staged_files += 1
+    return staged_files
 
 
 def _validate_postprocess_config(mode: str, config) -> None:
@@ -1212,14 +1226,14 @@ async def run_specialized_postprocess(
     raise ValueError(f"Unsupported specialized mode: {mode}")
 
 
-async def _upload_specialized_directory(mode: str, source_dir: Path, config) -> None:
+async def _upload_specialized_directory(mode: str, source_dir: StdPath, config) -> None:
     if not get_specialized_storage(config, mode) or not source_dir.exists():
         return
     region = _region_name(config)
     for storage in get_specialized_storage(config, mode):
         remote_path = Path(storage["base"]) / ("live2d" if mode == "live2d" else region)
         await upload_directory(
-            source_dir,
+            Path(source_dir),
             remote_path,
             storage["program"],
             storage["args"],

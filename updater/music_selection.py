@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 
@@ -18,7 +18,7 @@ _MASTER_DB_REGION = {"en": "en", "tw": "tc", "kr": "kr", "cn": "cn"}
 _MASTER_DB_BASE = "https://sekai-world.github.io/sekai-master-db-{region}-diff"
 _JP_MASTER_DB_BASE = "https://sekai-world.github.io/sekai-master-db-diff"
 _ASSET_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
-_MUSIC_SCORE_RE = re.compile(r"([0-9]+)_.+\Z")
+_MUSIC_SCORE_RE = re.compile(r"(\d+)_.+\Z", re.ASCII)
 
 
 @dataclass(frozen=True)
@@ -238,7 +238,8 @@ async def prepare_regional_music_config(config: ConfigLike) -> ConfigLike:
     selection = await load_regional_music_selection(config)
     if not isinstance(selection, RegionalMusicSelection):
         raise ValueError("regional music selection was not prepared")
-    return _RegionalMusicConfigProxy(config, selection)  # type: ignore[return-value]
+    proxy = _RegionalMusicConfigProxy(config, selection)
+    return cast(ConfigLike, proxy)
 
 
 def get_regional_music_selection(config: object) -> RegionalMusicSelection | None:

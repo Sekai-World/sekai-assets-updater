@@ -241,16 +241,15 @@ def test_disabled_feature_keeps_empty_user_filter_error(tmp_path: Path) -> None:
     config.DL_INCLUDE_LIST = [r"^not-a-bundle$"]
     bundles = {"music/music_score/202_shared": _bundle("music/music_score/202_shared")}
 
+    download_plan = net_plan.get_download_list(
+        _metadata(bundles),
+        _version(),
+        config=config,
+        include_list=config.DL_INCLUDE_LIST,
+        force_full_download=True,
+    )
     with pytest.raises(ValueError, match="No bundles found after filtering"):
-        asyncio.run(
-            net_plan.get_download_list(
-                _metadata(bundles),
-                _version(),
-                config=config,
-                include_list=config.DL_INCLUDE_LIST,
-                force_full_download=True,
-            )
-        )
+        asyncio.run(download_plan)
 
 
 def test_metadata_only_observation_does_not_change_success_provenance_or_queue(
@@ -366,9 +365,10 @@ def test_regional_preparation_failure_stops_before_fetch_or_state_writes(
     monkeypatch.setattr(configuration, "config", config)
     monkeypatch.setattr(music_selection, "load_regional_music_selection", fail_load)
     monkeypatch.setattr(runner, "fetch_asset_bundle_info", should_not_fetch)
+    run = runner.main()
 
     with pytest.raises(RuntimeError, match="regional music source unavailable"):
-        asyncio.run(runner.main())
+        asyncio.run(run)
 
     assert fetch_calls == 0
     assert not Path(str(config.DL_LIST_CACHE_PATH)).exists()
@@ -409,9 +409,10 @@ def test_standalone_charts_preparation_failure_skips_remote_and_render(
     render_charts = AsyncMock()
     monkeypatch.setattr(dispatch, "fetch_chart_sources_from_storage", fetch_sources)
     monkeypatch.setattr(dispatch, "_render_charts", render_charts)
+    run = runner.main(mode="charts")
 
     with pytest.raises(RuntimeError, match="regional chart selection unavailable"):
-        asyncio.run(runner.main(mode="charts"))
+        asyncio.run(run)
 
     fetch_sources.assert_not_awaited()
     render_charts.assert_not_awaited()
