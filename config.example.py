@@ -193,6 +193,16 @@ DL_EXCLUDE_LIST = None  # Example: [r"^live_pv/.*"]
 # Sorting download list by priority
 DL_PRIORITY_LIST = None  # Example: [r"^music/.*", r"^character/member.*"]
 
+# For non-JP regions, automatically keep only song IDs absent from JP master
+# data, including those songs' audio versions, jackets, and scores. Shared songs
+# remain excluded even when their vocal bundles or credited singers differ.
+# JP and non-music assets keep their existing filter behavior. This additional
+# scope still respects DL_INCLUDE_LIST/DL_EXCLUDE_LIST: replace per-song includes
+# with r"^music/" once, keeping any unrelated include patterns you already use.
+# Master-data errors stop the run; they never fall back to downloading all music.
+# See docs/REGIONAL_MUSIC_SELECTION.md for scope, evidence, and limitations.
+ENABLE_REGION_EXCLUSIVE_MUSIC = False
+
 # Local asset directories
 ASSET_LOCAL_EXTRACTED_DIR = None  # Example: Path("cache", "jp", "extracted")
 ASSET_LOCAL_BUNDLE_CACHE_DIR = None  # Example: Path("cache", "jp", "bundle")

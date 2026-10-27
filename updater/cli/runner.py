@@ -28,6 +28,7 @@ from updater.modes import (
 from updater.net.metadata import build_request_headers, fetch_asset_bundle_info
 from updater.net.plan import (
     dedupe_download_items,
+    prepare_regional_music_config_for_run,
 )
 from updater.postprocess.dispatch import run_specialized_postprocess
 from updater.state import (
@@ -180,6 +181,8 @@ async def _run_main(
     lock = StateLock(paths.lock)
     lock.acquire()
     try:
+        if mode == "assets":
+            active_cfg, _ = await prepare_regional_music_config_for_run(active_cfg)
         replay_started = time.perf_counter()
         recovered = replay_journal(paths)
         logger.info(
@@ -208,6 +211,8 @@ async def _run_main_locked(
     paths: StatePaths,
 ) -> None:
     start_time = time.monotonic()
+    if mode == "assets":
+        cfg, _ = await prepare_regional_music_config_for_run(cfg)
     automatic_prefixes = get_required_bundle_prefixes(mode, cfg)
     headers, cookie = await build_request_headers(cfg)
 

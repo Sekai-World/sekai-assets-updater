@@ -172,6 +172,8 @@ def _validate_specialized_settings(
 def validate_config(cfg: ConfigLike, mode: str = "assets") -> None:
     """Reject unsafe or unusable runtime settings before starting the pipeline."""
     errors: list[str] = []
+    if not isinstance(getattr(cfg, "ENABLE_REGION_EXCLUSIVE_MUSIC", False), bool):
+        errors.append("ENABLE_REGION_EXCLUSIVE_MUSIC must be a bool")
     if hasattr(cfg, "ENABLE_MODEL3D_FBX_EXPORT") and not isinstance(
         cfg.ENABLE_MODEL3D_FBX_EXPORT, bool
     ):

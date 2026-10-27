@@ -39,6 +39,7 @@ from updater.live2d.viewer_catalog import (
     stage_viewer_projection,
     viewer_asset_directories,
 )
+from updater.net.plan import prepare_regional_music_config_for_run
 from updater.postprocess.charts import (
     _render_charts,
     fetch_chart_sources_from_storage,
@@ -942,16 +943,28 @@ async def _process_live2d_associated(
 
 
 async def _process_charts(
-    config, workspace_dir: StdPath, include_list: list[str] | None = None
+    config,
+    workspace_dir: StdPath,
+    include_list: list[str] | None = None,
+    music_ids: frozenset[int] | None = None,
 ) -> None:
     """Compute incremental state, render pending scores, upload, and persist state.
 
     State is only written after a successful render **and** upload so that a
     crash mid-way will cause a full rebuild on the next run.
     """
-    current = compute_score_hashes(workspace_dir, include_list)
+    config, regional_music_selection = await prepare_regional_music_config_for_run(config)
+    if music_ids is None and regional_music_selection is not None:
+        music_ids = regional_music_selection.exclusive_music_ids
+    if music_ids is not None and not music_ids:
+        logger.info(
+            "No region-exclusive music scores are selected; skipping Charts post-processing"
+        )
+        return
+
+    current = compute_score_hashes(workspace_dir, include_list, music_ids)
     stored_state = load_chart_state(chart_state_path(config))
-    fingerprint = chart_fingerprint(config)
+    fingerprint = chart_fingerprint(config, music_ids)
 
     if (
         stored_state is not None
@@ -967,10 +980,18 @@ async def _process_charts(
     else:
         to_render = pending_score_paths(current, stored_state["scores"])
 
-    rendered = await _render_charts(config, workspace_dir, include_list, score_files=to_render)
-    await _upload_specialized_directory(
-        "charts", workspace_dir / "charts" / _region_name(config), config
+    rendered = await _render_charts(
+        config,
+        workspace_dir,
+        include_list,
+        score_files=to_render,
     )
+    if music_ids is None:
+        await _upload_specialized_directory(
+            "charts", workspace_dir / "charts" / _region_name(config), config
+        )
+    else:
+        await _upload_scoped_chart_outputs(config, workspace_dir, current)
 
     # Persist state only after upload succeeds.
     previous_scores = (
@@ -989,6 +1010,44 @@ async def _process_charts(
     atomic_write_json(state_file, payload, validate_chart_state)
 
 
+async def _upload_scoped_chart_outputs(
+    config, workspace_dir: StdPath, score_hashes: dict[str, str]
+) -> None:
+    """Upload only chart files for the currently in-scope score sources."""
+    chart_root = workspace_dir / "charts" / _region_name(config)
+    if not chart_root.is_dir() or not get_specialized_storage(config, "charts"):
+        return
+
+    expected_outputs: dict[str, set[str]] = {}
+    for score_path in score_hashes:
+        relative_score = StdPath(score_path)
+        source_music_id = relative_score.parent.name.split("_", 1)[0]
+        try:
+            int(source_music_id)
+        except ValueError:
+            continue
+        expected_outputs.setdefault(source_music_id, set()).add(relative_score.stem)
+
+    with tempfile.TemporaryDirectory(prefix="sekai-chart-scope-") as temp_dir:
+        staged_root = StdPath(temp_dir)
+        staged_files = 0
+        for source_music_id, score_stems in expected_outputs.items():
+            source_dir = chart_root / source_music_id
+            if source_dir.is_symlink() or not source_dir.is_dir():
+                continue
+            staged_dir = staged_root / source_music_id
+            for score_stem in score_stems:
+                for suffix in (".svg", ".png"):
+                    source_file = source_dir / f"{score_stem}{suffix}"
+                    if source_file.is_symlink() or not source_file.is_file():
+                        continue
+                    staged_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_file, staged_dir / source_file.name)
+                    staged_files += 1
+        if staged_files:
+            await _upload_specialized_directory("charts", staged_root, config)
+
+
 def _validate_postprocess_config(mode: str, config) -> None:
     if config.ASSET_LOCAL_EXTRACTED_DIR is None:
         raise ValueError("Specialized modes require ASSET_LOCAL_EXTRACTED_DIR")
@@ -1004,9 +1063,10 @@ async def _fetch_chart_sources_or_skip(
     target_dir: StdPath,
     score_include_list: list[str] | None,
     skip_missing_sources: bool,
+    music_ids: frozenset[int] | None,
 ) -> bool:
     try:
-        await fetch_chart_sources_from_storage(config, target_dir, score_include_list)
+        await fetch_chart_sources_from_storage(config, target_dir, score_include_list, music_ids)
     except Exception as exc:
         if skip_missing_sources:
             logger.warning("Skipping optional Charts post-processing: %s", exc)
@@ -1021,29 +1081,36 @@ async def _run_charts_postprocess(
     extracted_dir_is_temporary: bool,
     skip_missing_sources: bool,
     score_include_list: list[str] | None,
+    music_ids: frozenset[int] | None,
 ) -> None:
+    if music_ids is not None and not music_ids:
+        logger.info(
+            "No region-exclusive music scores are selected; skipping Charts post-processing"
+        )
+        return
+
     configured_extracted_dir = (
         None if extracted_dir_is_temporary else config.ASSET_LOCAL_EXTRACTED_DIR
     )
     temporary_source = needs_temporary_chart_source(
-        extracted_dir, configured_extracted_dir, score_include_list
+        extracted_dir, configured_extracted_dir, score_include_list, music_ids
     )
     if temporary_source:
         with tempfile.TemporaryDirectory(prefix="sekai-charts-") as temp_dir:
             chart_source_dir = StdPath(temp_dir)
             if await _fetch_chart_sources_or_skip(
-                config, chart_source_dir, score_include_list, skip_missing_sources
+                config, chart_source_dir, score_include_list, skip_missing_sources, music_ids
             ):
-                await _process_charts(config, chart_source_dir, score_include_list)
+                await _process_charts(config, chart_source_dir, score_include_list, music_ids)
         return
 
     if not has_local_chart_sources(
-        extracted_dir, score_include_list
+        extracted_dir, score_include_list, music_ids
     ) and not await _fetch_chart_sources_or_skip(
-        config, extracted_dir, score_include_list, skip_missing_sources
+        config, extracted_dir, score_include_list, skip_missing_sources, music_ids
     ):
         return
-    await _process_charts(config, extracted_dir, score_include_list)
+    await _process_charts(config, extracted_dir, score_include_list, music_ids)
 
 
 async def _run_live2d_postprocess(
@@ -1104,6 +1171,9 @@ async def run_specialized_postprocess(
 ) -> bool | None:
     """Run mode-specific work only after every bundle has succeeded."""
     _validate_postprocess_config(mode, config)
+    regional_music_selection = None
+    if mode == "charts":
+        config, regional_music_selection = await prepare_regional_music_config_for_run(config)
     extracted_dir = StdPath(str(config.ASSET_LOCAL_EXTRACTED_DIR))
     if mode == "live2d":
         motion_source = StdPath(str(config.LIVE2D_BUNDLE_CACHE_DIR)) / "live2d" / "motion"
@@ -1134,6 +1204,9 @@ async def run_specialized_postprocess(
             extracted_dir_is_temporary,
             skip_missing_sources,
             score_include_list,
+            None
+            if regional_music_selection is None
+            else regional_music_selection.exclusive_music_ids,
         )
         return
     raise ValueError(f"Unsupported specialized mode: {mode}")
