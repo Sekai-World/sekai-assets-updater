@@ -14,7 +14,7 @@ dependencies = [
     "orjson==3.13.0",
     "pillow==13.0.0",
     "pjsekai-scores-rs==0.6.0",
-    "pycryptodome==4.0.1",
+    "pycryptodome==4.2.0",
     "u-msgpack-python==2.8.0",
     "unity-rs==0.6.1",
 ]
