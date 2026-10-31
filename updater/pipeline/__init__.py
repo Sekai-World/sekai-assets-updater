@@ -89,6 +89,8 @@ class PipelineArtifact:
     # Monotonic timestamp taken by the download worker just before the
     # artifact is enqueued; the extract worker derives its queue wait from it.
     enqueued_monotonic: float | None = None
+    # True only when runner.py supplied its automatic, run-scoped shared root.
+    extracted_dir_is_temporary: bool = False
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -781,6 +783,7 @@ async def _download_one_item(
     failed_lock: asyncio.Lock,
     download_disk_space_gate: DownloadDiskSpaceGate | None,
     session: aiohttp.ClientSession,
+    extracted_dir_is_temporary: bool = False,
 ) -> None:
     url, bundle = item
     label = sanitize_log_label(bundle.get("bundleName", url))
@@ -816,6 +819,7 @@ async def _download_one_item(
                 url=url,
                 bundle=bundle,
                 bundle_save_path=bundle_save_path,
+                extracted_dir_is_temporary=extracted_dir_is_temporary,
                 remove_bundle_after_extract=remove_bundle_after_extract,
                 enqueued_monotonic=asyncio.get_running_loop().time(),
             )
@@ -850,6 +854,7 @@ async def _download_stage(
     failed_lock: asyncio.Lock,
     download_disk_space_gate: DownloadDiskSpaceGate | None,
     session: aiohttp.ClientSession,
+    extracted_dir_is_temporary: bool = False,
 ) -> None:
     del headers
     while True:
@@ -869,6 +874,7 @@ async def _download_stage(
                 failed_lock,
                 download_disk_space_gate,
                 session,
+                extracted_dir_is_temporary,
             )
         finally:
             input_queue.task_done()
@@ -880,6 +886,17 @@ def _prepare_extraction_destination(artifact: PipelineArtifact, config) -> Path:
         configured_root = Path(prepare_secure_directory(configured_extracted_root).as_posix())
         if _uses_aggregate_workspace(artifact.bundle, config):
             extracted_save_path = configured_root
+        elif artifact.extracted_dir_is_temporary:
+            identity_root = prepare_secure_directory(
+                configured_extracted_root
+                / _bundle_staging_identity(artifact.bundle.get("bundleName"))
+            )
+            tmp_extracted_save_dir = tempfile.TemporaryDirectory(
+                prefix="artifact-", dir=identity_root.as_posix(), delete=False
+            )
+            artifact.tmp_extracted_save_dir = tmp_extracted_save_dir
+            artifact.remove_extracted_after_upload = True
+            return Path(tmp_extracted_save_dir.name)
         else:
             identity_root = configured_root / _bundle_staging_identity(
                 artifact.bundle.get("bundleName")
@@ -1276,6 +1293,7 @@ async def run_pipeline(
     headers: Dict[str, str],
     cookie: str | None = None,
     download_disk_space_gate: DownloadDiskSpaceGate | None = None,
+    extracted_dir_is_temporary: bool = False,
 ) -> List[DownloadItem]:
     start_time = asyncio.get_running_loop().time()
     pipeline_id = uuid.uuid4().hex[:8]
@@ -1327,6 +1345,7 @@ async def run_pipeline(
                     failed_lock,
                     download_disk_space_gate,
                     session,
+                    extracted_dir_is_temporary,
                 )
             )
             for worker_id in range(download_concurrency)
