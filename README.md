@@ -13,7 +13,7 @@ and does not produce GLB.
 
 ## Requirements
 
-- Python `3.12`
+- Python `3.15`
 - `uv`
 - `ffmpeg`
 - `vgmstream-cli` as an optional HCA decoding fallback
