@@ -12,6 +12,8 @@ from updater import unity_rs_adapter
 from updater.extract.glb import DIAG_ANIMATION_UNSUPPORTED_BINDING
 from updater.extract.glb.animation import (
     ANIMATION_ARTIFACT_FIELDS,
+    ANIMATION_ARTIFACT_VERSION,
+    _artifact_hash,
     animation_artifact_path,
     collect_animation_artifacts,
     decode_animation_clip,
@@ -303,6 +305,23 @@ def test_artifact_round_trips_through_persist_and_load(tmp_path) -> None:
     with pytest.raises(ValueError, match="fields must be exactly"):
         validate_animation_artifact(document)
     assert set(artifact) == ANIMATION_ARTIFACT_FIELDS
+
+
+def test_v1_cache_without_diagnostic_severity_remains_loadable(tmp_path) -> None:
+    import json
+
+    environment = _clip_environment({201: MUSCLE_CLIP})
+    table = _table(environment)
+    legacy = decode_animation_clip(environment, table, _clip_object(environment, 201))
+    legacy["diagnostics"] = [
+        {"code": DIAG_ANIMATION_UNSUPPORTED_BINDING, "message": "legacy v1 warning"}
+    ]
+    legacy["content_hash"] = _artifact_hash(legacy)
+    path = animation_artifact_path(tmp_path, legacy)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert legacy["artifact_version"] == ANIMATION_ARTIFACT_VERSION == 1
+    assert load_animation_artifact(path) == legacy
 
 
 def test_collect_animation_artifacts_walks_animation_objects_sorted(tmp_path) -> None:

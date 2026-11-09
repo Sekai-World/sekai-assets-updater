@@ -318,8 +318,21 @@ def test_binding_provider_resolves_skeleton_but_marks_weights_unavailable() -> N
     assert not weights.weights_available
     assert weights.vertex_joints is None and weights.vertex_weights is None
     assert [d.code for d in weights.diagnostics] == [DIAG_SKIN_WEIGHTS_UNAVAILABLE]
+    assert weights.diagnostics[0].severity == "error"
     assert "mesh identity" in weights.diagnostics[0].message
     assert len(weights.skeleton.joints) == 2
+
+
+def test_binding_provider_keeps_boneless_renderer_unavailability_optional() -> None:
+    environment = _skin_environment()
+    table = _table(environment)
+
+    weights = BindingSkinWeightsProvider(environment, table).skin_weights(_renderer([]), [])
+
+    assert not weights.weights_available
+    assert len(weights.diagnostics) == 1
+    assert weights.diagnostics[0].code == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+    assert weights.diagnostics[0].severity == "warning"
 
 
 def test_binding_provider_reads_native_weights_and_mirrors_bind_poses() -> None:
@@ -393,6 +406,7 @@ def test_binding_provider_rejects_invalid_native_skin_data(mesh, message) -> Non
     assert not result.weights_available
     assert result.vertex_joints is None and result.vertex_weights is None
     assert result.diagnostics[0].code == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+    assert result.diagnostics[0].severity == "error"
     assert message in result.diagnostics[0].message
 
 
@@ -416,6 +430,7 @@ def test_binding_provider_rejects_missing_native_mesh_api() -> None:
 
     assert not result.weights_available
     assert result.diagnostics[0].code == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+    assert result.diagnostics[0].severity == "error"
     assert "does not expose read_mesh" in result.diagnostics[0].message
 
 
@@ -506,7 +521,10 @@ def test_export_default_provider_keeps_skeleton_and_records_diagnostic() -> None
     environment.studio._scene[1].bones = [(0, 120)]
     extraction, table = _extraction(environment)
 
-    export = export_root_glb(environment, table, extraction, ROOT_IDENTITY)
+    with pytest.raises(ValueError, match="required skin errors"):
+        export_root_glb(environment, table, extraction, ROOT_IDENTITY)
+
+    export = export_root_glb(environment, table, extraction, ROOT_IDENTITY, allow_incomplete=True)
 
     document = validate_glb_bytes(export.glb_bytes)
     assert "skins" not in document  # no weights -> no skin attached
@@ -515,6 +533,10 @@ def test_export_default_provider_keeps_skeleton_and_records_diagnostic() -> None
     assert export.manifest["mappings"]["skins"][0]["joints"] == 1
     codes = [d["code"] for d in export.manifest["diagnostics"]]
     assert DIAG_SKIN_WEIGHTS_UNAVAILABLE in codes
+    assert any(
+        diagnostic["code"] == DIAG_SKIN_WEIGHTS_UNAVAILABLE and diagnostic["severity"] == "error"
+        for diagnostic in export.manifest["diagnostics"]
+    )
 
 
 def test_export_rejects_provider_weights_that_do_not_fit_the_mesh() -> None:
@@ -529,11 +551,51 @@ def test_export_rejects_provider_weights_that_do_not_fit_the_mesh() -> None:
         extraction,
         ROOT_IDENTITY,
         skin_weights_provider=provider,
+        allow_incomplete=True,
     )
 
     document = validate_glb_bytes(export.glb_bytes)
     assert "skins" not in document
     assert any("weight count" in d["message"] for d in export.manifest["diagnostics"])
+
+
+def test_exporter_fails_closed_on_corrupt_required_skin_weight_bytes() -> None:
+    environment = _environment()
+    environment.studio._scene[1].bones = [(0, 120)]
+    extraction, table = _extraction(environment)
+    native_mesh = SimpleNamespace(
+        vertex_count=4,
+        positions=SimpleNamespace(
+            dimension=3,
+            data=struct.pack("<12f", 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0),
+        ),
+        normals=SimpleNamespace(dimension=3, data=struct.pack("<12f", *([0, 0, 1] * 4))),
+        uvs=[
+            SimpleNamespace(
+                dimension=2,
+                data=struct.pack("<8f", *([0, 0, 1, 0, 1, 1, 0, 1])),
+            )
+        ],
+        sub_meshes=[SimpleNamespace(index_count=6, indices=struct.pack("<6I", 0, 1, 2, 0, 2, 3))],
+        skin_weights=b"\x00" * 63,
+        skin_bone_indices=struct.pack("<4I", 0, 0, 0, 0) * 4,
+        bind_poses=struct.pack("<16f", *IDENTITY4),
+    )
+    environment.studio.read_mesh = lambda _file_index, _path_id: native_mesh
+
+    with pytest.raises(ValueError, match="required skin errors.*skin_weights has 63 bytes"):
+        export_root_glb(environment, table, extraction, ROOT_IDENTITY)
+
+    diagnostic_export = export_root_glb(
+        environment, table, extraction, ROOT_IDENTITY, allow_incomplete=True
+    )
+    assert diagnostic_export.manifest["mappings"]["skins"][0]["weights_available"] is False
+    assert any(
+        diagnostic["code"] == DIAG_SKIN_WEIGHTS_UNAVAILABLE
+        and diagnostic["severity"] == "error"
+        and "skin_weights has 63 bytes" in diagnostic["message"]
+        for diagnostic in diagnostic_export.manifest["diagnostics"]
+    )
 
 
 def test_provider_inverse_binds_match_skeleton_world() -> None:

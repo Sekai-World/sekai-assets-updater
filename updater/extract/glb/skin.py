@@ -47,6 +47,7 @@ class SkinDiagnostic:
 
     code: str
     message: str
+    severity: str = "warning"
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +217,7 @@ def build_skeleton(
                 SkinDiagnostic(
                     code=DIAG_MISSING_TARGET,
                     message=f"renderer {renderer_identity} has an invalid bone reference {bone!r}",
+                    severity="error",
                 )
             )
             continue
@@ -226,6 +228,7 @@ def build_skeleton(
                     code=DIAG_MISSING_TARGET,
                     message=f"bone {bone_identity} of renderer {renderer_identity}"
                     " is not a resolvable Transform",
+                    severity="error",
                 )
             )
             continue
@@ -236,6 +239,7 @@ def build_skeleton(
                     code=DIAG_MISSING_TARGET,
                     message=f"bone {bone_identity} of renderer {renderer_identity}"
                     " has an unresolvable parent chain",
+                    severity="error",
                 )
             )
             continue
@@ -274,6 +278,7 @@ class BindingSkinWeightsProvider:
     def skin_weights(self, node: Any, scene_nodes: Sequence[Any]) -> SkinWeights:
         skeleton = build_skeleton(node, scene_nodes, self.environment, self.table)
         renderer_identity = (node.file_index, node.path_id)
+        bones = tuple(getattr(node, "bones", ()) or ())
 
         def unavailable(reason: str) -> SkinWeights:
             diagnostic = SkinDiagnostic(
@@ -282,13 +287,13 @@ class BindingSkinWeightsProvider:
                     f"renderer {renderer_identity} ({getattr(node, 'name', '')!r}): "
                     f"{reason}; no skin attached"
                 ),
+                severity="error" if bones else "warning",
             )
             return SkinWeights(
                 skeleton=skeleton,
                 diagnostics=(diagnostic, *skeleton.diagnostics),
             )
 
-        bones = tuple(getattr(node, "bones", ()) or ())
         if not bones:
             return unavailable("renderer has no bone references")
         if skeleton.diagnostics or len(skeleton.joints) != len(bones):

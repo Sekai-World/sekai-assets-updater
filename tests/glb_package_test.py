@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from updater.extract.glb.animation import ANIMATION_ARTIFACT_VERSION
+from updater.extract.glb.animation import ANIMATION_ARTIFACT_VERSION, _artifact_hash
 from updater.extract.glb.gltf_writer import GlbScene, content_hash
 from updater.extract.glb.package import (
     PACKAGE_MANIFEST_URL,
@@ -15,6 +15,7 @@ from updater.extract.glb.package import (
     build_composite_manifest,
     build_release_manifest,
     glb_artifact_url,
+    glb_export_manifest_url,
     load_release_manifest,
     materialize_package,
     persist_release_manifest,
@@ -38,6 +39,7 @@ def _timeline_document(*, with_reference: bool = True):
         "path_id": 400,
         "clip_name": "dance_loop",
         "source_track_path_ids": [202],
+        "source_tracks": [{"file_index": 0, "path_id": 202}],
     }
     document = {
         "artifact_version": 1,
@@ -67,9 +69,32 @@ def _timeline_document(*, with_reference: bool = True):
                         "clip_in": 0.0,
                         "time_scale": 1.0,
                         "display_name": "Dance",
-                        "asset": {"file_id": 0, "path_id": 301, "resolved": True},
-                        "asset_data": {},
-                        "resolved_references": [],
+                        "asset": {
+                            "file_id": 0,
+                            "path_id": 301,
+                            "resolved": True,
+                            "bundle_name": "timeline/bundle",
+                            "target_file_index": 0,
+                            "target_path_id": 301,
+                            "target_class": "CharacterSpawnClip",
+                        },
+                        "asset_data": {"m_Clip": {"m_FileID": 1, "m_PathID": 400}},
+                        "resolved_references": (
+                            [
+                                {
+                                    "field_path": "m_Clip",
+                                    "file_id": 1,
+                                    "path_id": 400,
+                                    "resolved": True,
+                                    "bundle_name": "motion/bundle",
+                                    "target_file_index": 1,
+                                    "target_path_id": 400,
+                                    "target_class": "AnimationClip",
+                                }
+                            ]
+                            if with_reference
+                            else []
+                        ),
                     }
                 ],
             }
@@ -106,7 +131,7 @@ def _animation_artifact_bytes() -> bytes:
         },
         "diagnostics": [],
     }
-    document["content_hash"] = content_hash(json.dumps(document).encode("utf-8"))
+    document["content_hash"] = _artifact_hash(document)
     return json.dumps(document, sort_keys=True).encode("utf-8")
 
 
@@ -116,14 +141,72 @@ def _glb_bytes() -> bytes:
     return scene.encode(root_nodes=[root], generator="test")
 
 
-def _artifacts(*, with_animation: bool = True):
+def _export_manifest_bytes(
+    glb_bytes: bytes,
+    *,
+    publishable: bool = True,
+    findings_by_code: dict[str, int] | None = None,
+    findings_by_severity: dict[str, dict[str, int]] | None = None,
+    diagnostics: list[dict] | None = None,
+    root_bundle_name: str = "timeline/bundle",
+    root_file_index: int = 0,
+    root_path_id: int = 100,
+) -> bytes:
     import json
 
-    timeline_bytes = json.dumps(_timeline_document(), ensure_ascii=False, sort_keys=True).encode(
+    document = {
+        "export_version": 1,
+        "package_id": "pkg/mc_x",
+        "collection_id": "collection/test",
+        "roots": [
+            {
+                "file_index": root_file_index,
+                "path_id": root_path_id,
+                "bundle_name": root_bundle_name,
+            }
+        ],
+        "conversion_rules": {"handedness_conversion": "mirror_x"},
+        "content_hash": content_hash(glb_bytes),
+        "glb_byte_length": len(glb_bytes),
+        "node_count": 1,
+        "mesh_count": 0,
+        "mappings": {"nodes": [], "meshes": [], "materials": [], "skins": []},
+        "diagnostics": diagnostics or [],
+        "report_summary": {
+            "roots": ["stage_root"],
+            "visited_objects": 1,
+            "findings_by_code": findings_by_code or {},
+            "findings_by_severity": (
+                findings_by_severity
+                if findings_by_severity is not None
+                else {code: {"error": count} for code, count in (findings_by_code or {}).items()}
+            ),
+            "publishable": publishable,
+        },
+    }
+    return json.dumps(document, sort_keys=True).encode("utf-8")
+
+
+def _artifacts(
+    *,
+    with_animation: bool = True,
+    timeline_document=None,
+    export_manifest_document: bytes | None = None,
+):
+    import json
+
+    timeline_document = timeline_document or _timeline_document()
+    timeline_bytes = json.dumps(timeline_document, ensure_ascii=False, sort_keys=True).encode(
         "utf-8"
     )
+    glb_bytes = _glb_bytes()
     artifacts = [
-        PackageArtifact(url=glb_artifact_url("root_a"), kind="glb", payload=_glb_bytes()),
+        PackageArtifact(url=glb_artifact_url("root_a"), kind="glb", payload=glb_bytes),
+        PackageArtifact(
+            url=glb_export_manifest_url("root_a"),
+            kind="glb_export_manifest",
+            payload=export_manifest_document or _export_manifest_bytes(glb_bytes),
+        ),
         PackageArtifact(
             url=TIMELINE_PLAYABLE_URL, kind="timeline_playable_document", payload=timeline_bytes
         ),
@@ -147,6 +230,7 @@ def _artifacts(*, with_animation: bool = True):
 
 
 def _manifest(**overrides):
+    timeline_document = overrides.get("timeline_document", _timeline_document())
     kwargs = dict(
         package_id="pkg/mc_x",
         purpose="timeline3d",
@@ -157,12 +241,14 @@ def _manifest(**overrides):
             {"bundle_name": "timeline/bundle", "sha256": "a" * 64},
             {"bundle_name": "motion/bundle", "sha256": "b" * 64},
         ],
-        artifacts=_artifacts(),
-        timeline_document=_timeline_document(),
+        artifacts=overrides.get("artifacts", _artifacts(timeline_document=timeline_document)),
+        timeline_document=timeline_document,
         glb_roots=[
             {
                 "root_id": "stage_root",
                 "bundle_name": "timeline/bundle",
+                "file_index": 0,
+                "path_id": 100,
                 "container_path": "ondemand/mc_x.playable",
                 "glb_url": glb_artifact_url("root_a"),
                 "export_manifest_url": "export_manifests/root_a.json",
@@ -192,6 +278,231 @@ def test_release_manifest_builds_and_validates_with_timeline_summary() -> None:
     assert urls == sorted(urls)  # deterministic order
     # manifest.json itself is never an artifact — it cannot hash itself.
     assert PACKAGE_MANIFEST_URL not in urls
+
+
+def test_build_derives_unpublishable_state_from_export_manifest_errors() -> None:
+    export_manifest = _export_manifest_bytes(
+        _glb_bytes(), findings_by_code={"unresolved_external": 1}
+    )
+    manifest = _manifest(artifacts=_artifacts(export_manifest_document=export_manifest))
+
+    assert manifest["publishable"] is False
+    assert any(
+        "error finding unresolved_external" in reason for reason in manifest["incomplete_reasons"]
+    )
+    assert any(diagnostic.get("severity") == "error" for diagnostic in manifest["diagnostics"])
+
+
+def test_build_honors_unpublishable_export_manifest() -> None:
+    export_manifest = _export_manifest_bytes(_glb_bytes(), publishable=False)
+
+    manifest = _manifest(artifacts=_artifacts(export_manifest_document=export_manifest))
+
+    assert manifest["publishable"] is False
+    assert any(
+        "export report is not publishable" in reason for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_optional_warning_severity_is_not_upgraded_by_diagnostic_code() -> None:
+    export_manifest = _export_manifest_bytes(
+        _glb_bytes(),
+        findings_by_code={"unresolved_external": 1},
+        findings_by_severity={"unresolved_external": {"warning": 1}},
+        diagnostics=[
+            {
+                "code": "unresolved_external",
+                "severity": "warning",
+                "message": "optional reference outside this package",
+            }
+        ],
+    )
+
+    manifest = _manifest(
+        artifacts=_artifacts(export_manifest_document=export_manifest),
+        diagnostics=[
+            {
+                "code": "unresolved_external",
+                "severity": "warning",
+                "message": "optional package reference",
+            }
+        ],
+    )
+
+    assert manifest["publishable"] is True
+    assert manifest["incomplete_reasons"] == []
+
+
+@pytest.mark.parametrize(
+    ("root_file_index", "root_path_id"),
+    [(99, 100), (0, 999)],
+)
+def test_package_root_must_match_exported_file_path_identity(root_file_index, root_path_id) -> None:
+    export_manifest = _export_manifest_bytes(
+        _glb_bytes(), root_file_index=root_file_index, root_path_id=root_path_id
+    )
+
+    manifest = _manifest(artifacts=_artifacts(export_manifest_document=export_manifest))
+
+    assert manifest["publishable"] is False
+    assert any("root identity mismatch" in reason for reason in manifest["incomplete_reasons"])
+
+
+def test_package_root_bundle_must_be_in_declared_source_bundles() -> None:
+    manifest = _manifest(source_bundles=[{"bundle_name": "motion/bundle", "sha256": "b" * 64}])
+
+    assert manifest["publishable"] is False
+    assert any(
+        "root bundle is absent from source_bundles" in reason
+        for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_exported_root_bundle_must_match_package_root_identity() -> None:
+    export_manifest = _export_manifest_bytes(_glb_bytes(), root_bundle_name="motion/bundle")
+
+    manifest = _manifest(artifacts=_artifacts(export_manifest_document=export_manifest))
+
+    assert manifest["publishable"] is False
+    assert any("root identity mismatch" in reason for reason in manifest["incomplete_reasons"])
+
+
+def test_resolved_timeline_reference_bundle_must_be_in_package_inputs() -> None:
+    document = _timeline_document()
+    document["tracks"][0]["clips"][0]["resolved_references"][0]["bundle_name"] = (
+        "outside/unloaded_bundle"
+    )
+    document["content_hash"] = _document_hash(document)
+    artifacts = _artifacts(timeline_document=document)
+
+    manifest = _manifest(timeline_document=document, artifacts=artifacts)
+
+    assert manifest["publishable"] is False
+    assert any(
+        "resolved reference bundle 'outside/unloaded_bundle' is absent from source_bundles"
+        in reason
+        for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_build_rejects_removed_raw_pptr_derivatives_and_animation_summary() -> None:
+    document = _timeline_document()
+    clip = document["tracks"][0]["clips"][0]
+    clip["resolved_references"].clear()
+    document["animation_references"].clear()
+    document["content_hash"] = _document_hash(document)
+    artifacts = _artifacts(timeline_document=document, with_animation=False)
+
+    manifest = _manifest(timeline_document=document, artifacts=artifacts)
+
+    assert manifest["publishable"] is False
+    assert any(
+        "do not exactly cover asset_data PPtrs" in reason
+        for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_build_rejects_unreferenced_glb_and_export_manifest_artifacts() -> None:
+    manifest = _manifest(glb_roots=[])
+
+    assert manifest["publishable"] is False
+    assert any("unreferenced GLB artifact" in reason for reason in manifest["incomplete_reasons"])
+    assert any(
+        "unreferenced export manifest artifact" in reason
+        for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_build_does_not_trust_empty_incomplete_reasons_with_error_diagnostics() -> None:
+    manifest = _manifest(
+        diagnostics=[
+            {
+                "code": "unresolved_external",
+                "severity": "error",
+                "message": "external object did not resolve",
+            }
+        ]
+    )
+
+    assert manifest["publishable"] is False
+    assert any(
+        "external object did not resolve" in reason for reason in manifest["incomplete_reasons"]
+    )
+
+
+def test_build_fails_closed_when_a_glb_export_manifest_is_missing() -> None:
+    export_url = glb_export_manifest_url("root_a")
+    artifacts = [artifact for artifact in _artifacts() if artifact.url != export_url]
+
+    manifest = _manifest(artifacts=artifacts)
+
+    assert manifest["publishable"] is False
+    assert any("missing export manifest" in reason for reason in manifest["incomplete_reasons"])
+
+
+def test_unresolved_required_clip_asset_blocks_build_and_readiness(tmp_path) -> None:
+    document = _timeline_document()
+    document["tracks"][0]["clips"][0]["asset"]["resolved"] = False
+    document["content_hash"] = _document_hash(document)
+    artifacts = _artifacts(timeline_document=document)
+
+    manifest = _manifest(timeline_document=document, artifacts=artifacts)
+
+    assert manifest["publishable"] is False
+    assert any(
+        "unresolved required clip asset" in reason for reason in manifest["incomplete_reasons"]
+    )
+    assert any(
+        "unresolved required clip asset" in problem
+        for problem in validate_package_references(manifest, document)
+    )
+    output = tmp_path / "package"
+    with pytest.raises(ValueError, match="unresolved required clip asset"):
+        materialize_package(manifest, artifacts, output)
+    assert not output.exists()
+
+
+def test_publish_rechecks_timeline_payload_even_if_manifest_claims_publishable() -> None:
+    valid_manifest = _manifest()
+    document = _timeline_document()
+    document["tracks"][0]["clips"][0]["asset"]["resolved"] = False
+    document["content_hash"] = _document_hash(document)
+    broken_artifacts = _artifacts(timeline_document=document)
+    timeline_artifact = next(
+        artifact for artifact in broken_artifacts if artifact.url == TIMELINE_PLAYABLE_URL
+    )
+    timeline_record = next(
+        record for record in valid_manifest["artifacts"] if record["url"] == TIMELINE_PLAYABLE_URL
+    )
+    timeline_record["sha256"] = timeline_artifact.sha256
+    timeline_record["byte_length"] = timeline_artifact.byte_length
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="unresolved required clip asset"):
+        publish_package(
+            valid_manifest, broken_artifacts, lambda url, _payload: uploaded.append(url)
+        )
+    assert uploaded == []
+
+
+def test_publish_rechecks_export_manifest_errors_even_if_manifest_claims_publishable() -> None:
+    export_manifest = _export_manifest_bytes(
+        _glb_bytes(), findings_by_code={"unresolved_external": 1}
+    )
+    broken_artifacts = _artifacts(export_manifest_document=export_manifest)
+    forged_manifest = _manifest(artifacts=broken_artifacts)
+    forged_manifest["publishable"] = True
+    forged_manifest["incomplete_reasons"] = []
+    forged_manifest["diagnostics"] = []
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="error finding unresolved_external"):
+        publish_package(
+            forged_manifest,
+            broken_artifacts,
+            lambda url, _payload: uploaded.append(url),
+        )
+    assert uploaded == []
 
 
 def test_release_manifest_requires_the_playable_artifact() -> None:
@@ -285,6 +596,196 @@ def test_publication_uploads_artifacts_then_manifests_last() -> None:
     assert set(uploaded[:-2]) == {a.url for a in artifacts if a.url not in (TIMELINE_PLAYABLE_URL,)}
 
 
+def test_publish_refuses_glb_artifacts_when_root_records_are_removed() -> None:
+    manifest = _manifest()
+    manifest["glb_roots"] = []
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="unreferenced or mis-typed"):
+        publish_package(manifest, _artifacts(), lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+@pytest.mark.parametrize(
+    ("root_field", "wrong_url"),
+    [
+        ("glb_url", "glb/unrelated.glb"),
+        ("export_manifest_url", "export_manifests/unrelated.json"),
+    ],
+)
+def test_publish_refuses_root_references_without_matching_artifacts(root_field, wrong_url) -> None:
+    manifest = _manifest()
+    manifest["glb_roots"][0][root_field] = wrong_url
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused):
+        publish_package(manifest, _artifacts(), lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+def test_materialize_validates_export_payloads_before_writing(tmp_path) -> None:
+    manifest = _manifest()
+    export_manifest = _export_manifest_bytes(_glb_bytes(), publishable=False)
+    artifacts = _artifacts(export_manifest_document=export_manifest)
+    record = next(
+        record
+        for record in manifest["artifacts"]
+        if record["url"] == glb_export_manifest_url("root_a")
+    )
+    export_artifact = next(
+        artifact for artifact in artifacts if artifact.url == glb_export_manifest_url("root_a")
+    )
+    record["sha256"] = export_artifact.sha256
+    record["byte_length"] = export_artifact.byte_length
+
+    output = tmp_path / "package"
+    with pytest.raises(ValueError, match="export report is not publishable"):
+        materialize_package(manifest, artifacts, output)
+    assert not output.exists()
+
+
+def test_publish_checks_recorded_byte_length_before_upload() -> None:
+    manifest = _manifest()
+    timeline_record = next(
+        record for record in manifest["artifacts"] if record["url"] == TIMELINE_PLAYABLE_URL
+    )
+    timeline_record["byte_length"] += 1
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="byte_length"):
+        publish_package(manifest, _artifacts(), lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+def test_materialize_checks_recorded_byte_length_before_writing(tmp_path) -> None:
+    manifest = _manifest()
+    timeline_record = next(
+        record for record in manifest["artifacts"] if record["url"] == TIMELINE_PLAYABLE_URL
+    )
+    timeline_record["byte_length"] += 1
+    output = tmp_path / "package"
+
+    with pytest.raises(ValueError, match="byte_length"):
+        materialize_package(manifest, _artifacts(), output)
+    assert not output.exists()
+
+
+def test_manifest_url_is_reserved_and_cannot_be_an_artifact() -> None:
+    manifest = _manifest()
+    manifest_artifact = PackageArtifact(url=PACKAGE_MANIFEST_URL, kind="manifest", payload=b"x")
+    manifest["artifacts"].append(manifest_artifact.record())
+    artifacts = _artifacts() + [manifest_artifact]
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="manifest.json.*reserved"):
+        publish_package(manifest, artifacts, lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+def test_animation_artifact_internal_hash_is_verified() -> None:
+    import json
+
+    from updater.extract.glb.animation import validate_animation_artifact
+
+    broken = json.loads(_animation_artifact_bytes())
+    broken["content_hash"] = "0" * 64
+
+    with pytest.raises(ValueError, match="content_hash does not match"):
+        validate_animation_artifact(broken)
+
+
+def test_publish_refuses_animation_error_diagnostic_even_with_valid_outer_hash() -> None:
+    import json
+
+    manifest = _manifest()
+    artifacts = _artifacts()
+    original = _animation_artifact_bytes()
+    animation_document = json.loads(original)
+    animation_document["diagnostics"] = [
+        {"code": "animation_unsupported_binding", "severity": "error", "message": "bad"}
+    ]
+    animation_document["content_hash"] = _artifact_hash(animation_document)
+    payload = json.dumps(animation_document, sort_keys=True).encode("utf-8")
+    animation_url = next(
+        artifact.url for artifact in artifacts if artifact.kind == "animation_artifact"
+    )
+    artifact = PackageArtifact(url=animation_url, kind="animation_artifact", payload=payload)
+    artifacts = [artifact if current.url == animation_url else current for current in artifacts]
+    record = next(record for record in manifest["artifacts"] if record["url"] == animation_url)
+    record["sha256"] = artifact.sha256
+    record["byte_length"] = artifact.byte_length
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match="error diagnostic animation_unsupported_binding"):
+        publish_package(manifest, artifacts, lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+@pytest.mark.parametrize(
+    ("corruption", "reason"),
+    [
+        ("hash", "content_hash does not match"),
+        ("diagnostic", "error diagnostic invalid_animation"),
+        ("structure", "streams must contain streamed/dense/constant"),
+        ("nested_structure", "streams.streamed must be a list"),
+    ],
+)
+def test_publish_validates_unreferenced_animation_artifacts(corruption, reason) -> None:
+    import json
+
+    manifest = _manifest()
+    artifacts = _artifacts()
+    unreferenced_document = json.loads(_animation_artifact_bytes())
+    unreferenced_document["path_id"] = 401
+    if corruption == "diagnostic":
+        unreferenced_document["diagnostics"] = [
+            {"code": "invalid_animation", "message": "bad data", "severity": "error"}
+        ]
+    elif corruption == "structure":
+        unreferenced_document["streams"] = {}
+    elif corruption == "nested_structure":
+        unreferenced_document["streams"]["streamed"] = {}
+    if corruption != "hash":
+        unreferenced_document["content_hash"] = _artifact_hash(unreferenced_document)
+    unreferenced_url = animation_artifact_url(unreferenced_document)
+    unreferenced_payload = json.dumps(unreferenced_document, sort_keys=True).encode("utf-8")
+    unreferenced = PackageArtifact(
+        url=unreferenced_url,
+        kind="animation_artifact",
+        payload=unreferenced_payload,
+    )
+    artifacts.append(unreferenced)
+    manifest["artifacts"].append(unreferenced.record())
+    uploaded: list[str] = []
+
+    with pytest.raises(PublicationRefused, match=reason):
+        publish_package(manifest, artifacts, lambda url, _payload: uploaded.append(url))
+    assert uploaded == []
+
+
+def test_publish_accepts_legacy_v1_animation_warning_shape() -> None:
+    import json
+
+    manifest = _manifest()
+    artifacts = _artifacts()
+    animation_url = next(item.url for item in artifacts if item.kind == "animation_artifact")
+    document = json.loads(_animation_artifact_bytes())
+    document["diagnostics"] = [
+        {"code": "animation_unsupported_binding", "message": "legacy cache warning"}
+    ]
+    document["content_hash"] = _artifact_hash(document)
+    payload = json.dumps(document, sort_keys=True).encode("utf-8")
+    legacy_artifact = PackageArtifact(animation_url, "animation_artifact", payload)
+    artifacts = [legacy_artifact if item.url == animation_url else item for item in artifacts]
+    record = next(item for item in manifest["artifacts"] if item["url"] == animation_url)
+    record.update(legacy_artifact.record())
+    uploaded: list[str] = []
+
+    publish_package(manifest, artifacts, lambda url, _payload: uploaded.append(url))
+
+    assert uploaded[-1] == PACKAGE_MANIFEST_URL
+
+
 def test_unpublishable_package_never_reaches_remote_storage() -> None:
     manifest = _manifest(incomplete_reasons=["missing character GLB for track dance"])
     uploaded: list[str] = []
@@ -358,7 +859,11 @@ def test_composite_unions_children_without_duplicating_artifacts() -> None:
     urls = [record["url"] for record in composite["artifacts"]]
     assert len(urls) == len(set(urls))  # no duplicate physical files
     assert len(urls) == len(first["artifacts"])
-    assert composite["publishable"] is True
+    assert composite["publishable"] is False
+    assert any(
+        "composite publication is not implemented" in reason
+        for reason in composite["incomplete_reasons"]
+    )
     child_ids = [child["package_id"] for child in composite["child_packages"]]
     assert child_ids == ["pkg/mc_x", "pkg/mc_y"]
     purposes = {child["package_id"]: child["purpose"] for child in composite["child_packages"]}
@@ -370,6 +875,14 @@ def test_composite_unions_children_without_duplicating_artifacts() -> None:
     )
     assert shared["provided_by"] == ["pkg/mc_x", "pkg/mc_y"]
     assert [t["package_id"] for t in composite["timelines"]] == ["pkg/mc_x", "pkg/mc_y"]
+
+    forged_publishable = dict(composite)
+    forged_publishable["publishable"] = True
+    forged_publishable["incomplete_reasons"] = []
+    with pytest.raises(ValueError, match="composite publication is not implemented"):
+        from updater.extract.glb.package import validate_composite_manifest
+
+        validate_composite_manifest(forged_publishable)
 
 
 def test_composite_conflicts_and_unpublishable_children_propagate() -> None:

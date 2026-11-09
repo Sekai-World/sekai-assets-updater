@@ -134,12 +134,19 @@ class ReachabilityReport:
 
     def summary(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
+        severity_counts: dict[str, dict[str, int]] = {}
         for finding in self.findings:
             counts[finding.code] = counts.get(finding.code, 0) + 1
+            by_severity = severity_counts.setdefault(finding.code, {})
+            by_severity[finding.severity] = by_severity.get(finding.severity, 0) + 1
         return {
             "roots": list(self.roots),
             "visited_objects": self.visited_objects,
             "findings_by_code": dict(sorted(counts.items())),
+            "findings_by_severity": {
+                code: dict(sorted(counts_by_severity.items()))
+                for code, counts_by_severity in sorted(severity_counts.items())
+            },
             "publishable": self.publishable,
         }
 

@@ -7,8 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 from updater import unity_rs_adapter
-from updater.extract.glb import DIAG_TRACK_UNSUPPORTED, build_timeline_document, find_playable_roots
+from updater.extract.glb import (
+    DIAG_CLIP_ASSET_UNRESOLVED,
+    DIAG_TRACK_REFERENCE_UNRESOLVED,
+    DIAG_TRACK_UNSUPPORTED,
+    build_timeline_document,
+    find_playable_roots,
+)
 from updater.extract.glb.timeline import (
+    _object_class,
+    _script_classes,
     load_timeline_document,
     persist_timeline_document,
     timeline_reference_problems,
@@ -285,6 +293,7 @@ def test_timeline_document_resolves_tracks_clips_and_references() -> None:
             "path_id": 400,
             "clip_name": "dance_loop",
             "source_track_path_ids": [202],
+            "source_tracks": [{"file_index": 0, "path_id": 202}],
         }
     ]
     codes = [diagnostic["code"] for diagnostic in document["diagnostics"]]
@@ -293,6 +302,126 @@ def test_timeline_document_resolves_tracks_clips_and_references() -> None:
     assert "1 clips recorded verbatim" in document["diagnostics"][0]["message"]
     # The unknown track's clips stay in the document — nothing is lost.
     assert document["tracks"][1]["clips"][0]["display_name"] == "Mystery"
+
+
+def test_required_clip_asset_resolution_failure_is_an_error_and_reference_problem() -> None:
+    studio = _TimelineStudio()
+    studio._typetrees[(0, 201)]["m_Clips"][0]["m_Asset"] = {
+        "m_FileID": 0,
+        "m_PathID": 999,
+    }
+    environment = unity_rs_adapter.UnityRsEnvironment(studio)
+    table = _small_table(environment)
+
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+
+    errors = [
+        diagnostic for diagnostic in document["diagnostics"] if diagnostic["severity"] == "error"
+    ]
+    assert len(errors) == 1
+    assert errors[0]["code"] == DIAG_CLIP_ASSET_UNRESOLVED
+    assert "required clip asset" in errors[0]["message"]
+    assert any(
+        "unresolved required clip asset" in problem
+        for problem in timeline_reference_problems(document)
+    )
+
+
+def test_generated_animation_reference_records_full_source_track_identity() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+
+    assert document["animation_references"][0]["source_tracks"] == [
+        {"file_index": 0, "path_id": 202}
+    ]
+
+
+def test_resolved_references_require_complete_target_identity() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+    clip_reference = document["tracks"][1]["clips"][0]["resolved_references"][0]
+    clip_reference.pop("target_file_index")
+
+    problems = timeline_reference_problems(document)
+
+    assert any("incomplete resolved reference identity" in problem for problem in problems)
+
+
+def test_asset_data_pptrs_require_exact_resolved_reference_coverage() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+    clip = document["tracks"][1]["clips"][0]
+    clip["resolved_references"].clear()
+    document["animation_references"].clear()
+
+    problems = timeline_reference_problems(document)
+
+    assert any("do not exactly cover asset_data PPtrs" in problem for problem in problems)
+
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+    clip = document["tracks"][1]["clips"][0]
+    clip["resolved_references"][0]["field_path"] = "m_Clip.changed"
+    problems = timeline_reference_problems(document)
+    assert any("do not exactly cover asset_data PPtrs" in problem for problem in problems)
+
+
+def test_resolved_reference_raw_and_target_identity_must_agree() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+    clip_reference = document["tracks"][1]["clips"][0]["resolved_references"][0]
+    clip_reference["target_path_id"] = 401
+
+    problems = timeline_reference_problems(document)
+
+    assert any("path_id/target_path_id mismatch" in problem for problem in problems)
+
+
+def test_animation_references_must_be_backed_by_clip_references() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+
+    document["animation_references"].clear()
+    problems = timeline_reference_problems(document)
+    assert any("missing from animation_references" in problem for problem in problems)
+
+
+def test_animation_reference_source_track_must_match_resolved_clip() -> None:
+    environment = _timeline_environment()
+    table = _small_table(environment)
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+
+    document["animation_references"][0]["source_tracks"] = [{"file_index": 0, "path_id": 201}]
+    problems = timeline_reference_problems(document)
+    assert any("source track identities disagree" in problem for problem in problems)
+
+
+def test_monoscript_classification_uses_file_and_path_identity() -> None:
+    def script(file_index: int, class_name: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            file_index=file_index,
+            path_id=77,
+            type=SimpleNamespace(name="MonoScript"),
+            read_typetree=lambda: {"m_ClassName": class_name},
+        )
+
+    environment = SimpleNamespace(objects=[script(0, "SceneTrack"), script(1, "CharacterTrack")])
+    classes = _script_classes(environment)
+
+    assert classes == {(0, 77): "SceneTrack", (1, 77): "CharacterTrack"}
+    assert (
+        _object_class(environment, None, 0, {"m_Script": {"m_FileID": 0, "m_PathID": 77}}, classes)
+        == "SceneTrack"
+    )
+    assert (
+        _object_class(environment, None, 1, {"m_Script": {"m_FileID": 0, "m_PathID": 77}}, classes)
+        == "CharacterTrack"
+    )
 
 
 def test_non_group_track_children_are_resolved_with_parent_clips() -> None:
@@ -404,6 +533,10 @@ def test_unresolved_track_reference_is_diagnosed() -> None:
     assert len(document["diagnostics"]) == 1
     assert "did not resolve" in document["diagnostics"][0]["message"]
     assert document["diagnostics"][0]["track_path_id"] == 999
+    assert document["diagnostics"][0]["severity"] == "error"
+    assert any(
+        "unresolved required track" in problem for problem in timeline_reference_problems(document)
+    )
 
 
 @pytest.mark.parametrize(
@@ -425,7 +558,7 @@ def test_invalid_track_references_are_diagnosed(track_ref) -> None:
 
     assert document["tracks"] == []
     assert len(document["diagnostics"]) == 1
-    assert document["diagnostics"][0]["code"] == DIAG_TRACK_UNSUPPORTED
+    assert document["diagnostics"][0]["code"] == DIAG_TRACK_REFERENCE_UNRESOLVED
 
 
 def test_timeline_document_round_trips_and_rejects_corruption(tmp_path) -> None:
@@ -466,7 +599,7 @@ def test_timeline_reference_problems_flags_incomplete_references() -> None:
     }
     document["animation_references"].append(missing_bundle)
     problems = timeline_reference_problems(document)
-    assert any("no bundle name" in problem for problem in problems)
+    assert any("incomplete animation reference" in problem for problem in problems)
     document["tracks"].append(dict(document["tracks"][0]))
     problems = timeline_reference_problems(document)
     assert any("duplicate track identities" in problem for problem in problems)

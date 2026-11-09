@@ -23,7 +23,11 @@ from updater.extract.glb.collection import (
     CollectionFileTable,
     GlbCollectionExtraction,
 )
-from updater.extract.glb.contracts import DIAG_MISSING_TARGET
+from updater.extract.glb.contracts import (
+    DIAG_MISSING_TARGET,
+    DIAG_SKIN_WEIGHTS_UNAVAILABLE,
+    SEVERITIES,
+)
 from updater.extract.glb.gltf_writer import GlbScene, content_hash, validate_glb_bytes
 from updater.extract.glb.materials import convert_material
 from updater.extract.glb.math3d import mirror_position as _mirror_position
@@ -359,6 +363,7 @@ class _MaterialBinder:
                 {
                     "code": diagnostic.code,
                     "message": diagnostic.message,
+                    "severity": diagnostic.severity,
                     "source": self._source(identity),
                 }
             )
@@ -376,7 +381,12 @@ class _MaterialBinder:
 
     def _append_diagnostic(self, code: str, message: str, identity: tuple[int, int]) -> None:
         self.diagnostics.append(
-            {"code": code, "message": message, "source": self._source(identity)}
+            {
+                "code": code,
+                "message": message,
+                "severity": "error",
+                "source": self._source(identity),
+            }
         )
 
     def _source(self, identity: tuple[int, int]) -> dict[str, Any]:
@@ -402,8 +412,9 @@ def export_root_glb(
 
     ``extraction`` is the validated package from Phase 3; its report must be
     publishable unless ``allow_incomplete`` marks the artifact as a local
-    diagnostic (the publish path in sync_worker never passes it — required
-    L2 failures make a package non-publishable).  The resulting manifest
+    diagnostic. Required skin errors likewise refuse normal exports; the
+    opt-in incomplete mode exists only for local diagnosis and is not used by
+    ``sync_worker``. The resulting manifest
     embeds the conversion rules, the GLB content hash, per-node and
     per-mesh Unity mappings, converted materials, and any structured
     material/skin diagnostics. ``skin_weights_provider`` defaults to the
@@ -548,6 +559,12 @@ def export_root_glb(
         node_index,
         identity_to_bundle,
     )
+    skin_errors = [
+        diagnostic for diagnostic in skin_diagnostics if diagnostic.get("severity") == "error"
+    ]
+    if skin_errors and not allow_incomplete:
+        messages = "; ".join(diagnostic["message"] for diagnostic in skin_errors)
+        raise ValueError(f"refusing GLB export with required skin errors: {messages}")
 
     glb_bytes = scene.encode(root_nodes=root_nodes, generator=GENERATOR)
     validate_glb_bytes(glb_bytes)
@@ -614,6 +631,7 @@ def _attach_skins(
                 {
                     "code": DIAG_MISSING_TARGET,
                     "message": f"renderer {identity} skeleton failed: {exc}",
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -623,10 +641,25 @@ def _attach_skins(
                 {
                     "code": diagnostic.code,
                     "message": diagnostic.message,
+                    "severity": diagnostic.severity,
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
         skeleton = weights.skeleton
+        if not weights.weights_available and not any(
+            diagnostic.severity == "error" for diagnostic in weights.diagnostics
+        ):
+            diagnostics.append(
+                {
+                    "code": DIAG_SKIN_WEIGHTS_UNAVAILABLE,
+                    "message": (
+                        f"renderer {identity} has bone references but the provider returned "
+                        "no required skin weights"
+                    ),
+                    "severity": "error",
+                    "source": _diagnostic_source(identity, identity_to_bundle),
+                }
+            )
         mapping: dict[str, Any] = {
             "bundle_name": identity_to_bundle.get(identity.file_index),
             "file_index": identity.file_index,
@@ -651,6 +684,7 @@ def _attach_skins(
                         f"renderer {identity}: {len(missing)} joints outside the"
                         " exported subtree; no skin attached"
                     ),
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -668,6 +702,7 @@ def _attach_skins(
                         f"renderer {identity}: weight count does not match the native"
                         f" mesh's {source_vertex_count} vertices; no skin attached"
                     ),
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -677,6 +712,7 @@ def _attach_skins(
                 {
                     "code": DIAG_MISSING_TARGET,
                     "message": f"renderer {identity}: skeleton has no joints; no skin attached",
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -689,6 +725,7 @@ def _attach_skins(
                 {
                     "code": DIAG_MISSING_TARGET,
                     "message": f"renderer {identity}: mesh vertex remap is out of range; no skin attached",
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -726,6 +763,7 @@ def _attach_skins(
                 {
                     "code": DIAG_MISSING_TARGET,
                     "message": f"renderer {identity}: invalid vertex joint/weight values; no skin attached",
+                    "severity": "error",
                     "source": _diagnostic_source(identity, identity_to_bundle),
                 }
             )
@@ -799,8 +837,17 @@ def _validate_export_manifest(value: Any) -> dict[str, Any]:
     if not isinstance(diagnostics, list):
         raise ValueError("export manifest.diagnostics must be a list")
     for diagnostic in diagnostics:
-        if not isinstance(diagnostic, dict) or not isinstance(diagnostic.get("code"), str):
+        if (
+            not isinstance(diagnostic, dict)
+            or not isinstance(diagnostic.get("code"), str)
+            or not diagnostic.get("code")
+        ):
             raise ValueError("export manifest.diagnostics entries need string codes")
+        if (
+            not isinstance(diagnostic.get("message"), str)
+            or diagnostic.get("severity") not in SEVERITIES
+        ):
+            raise ValueError("export manifest.diagnostics entries need message and severity")
     return value
 
 

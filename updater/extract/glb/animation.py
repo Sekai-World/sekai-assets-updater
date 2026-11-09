@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from updater.extract.glb.collection import resolve_pptr
-from updater.extract.glb.contracts import DIAG_ANIMATION_UNSUPPORTED_BINDING
+from updater.extract.glb.contracts import DIAG_ANIMATION_UNSUPPORTED_BINDING, SEVERITIES
 from updater.extract.glb.gltf_writer import content_hash
 from updater.unity_rs_adapter import (
     CollectionFileTable,
@@ -50,6 +50,7 @@ class AnimationDiagnostic:
 
     code: str
     message: str
+    severity: str = "warning"
 
 
 def decode_streamed_clip(data: Sequence[int]) -> list[dict[str, Any]]:
@@ -316,7 +317,12 @@ def decode_animation_clip(
         "curves": curves,
         "streams": streams,
         "diagnostics": [
-            {"code": diagnostic.code, "message": diagnostic.message} for diagnostic in diagnostics
+            {
+                "code": diagnostic.code,
+                "message": diagnostic.message,
+                "severity": diagnostic.severity,
+            }
+            for diagnostic in diagnostics
         ],
     }
     document["streams"] = _json_safe(document["streams"])
@@ -350,6 +356,59 @@ def _artifact_hash(document: Mapping[str, Any]) -> str:
     )
 
 
+def _validate_artifact_number(value: Any, label: str, *, nullable: bool = False) -> None:
+    if nullable and value is None:
+        return
+    if type(value) not in (int, float) or (isinstance(value, float) and not math.isfinite(value)):
+        raise ValueError(f"animation artifact {label} must be a finite number")
+
+
+def _validate_animation_curve(curve: Any, index: int) -> None:
+    label = f"curves[{index}]"
+    if not isinstance(curve, Mapping):
+        raise ValueError(f"animation artifact {label} must be an object")
+    kind = curve.get("kind")
+    if kind not in {"rotation", "position", "scale", "float", "pptr"}:
+        raise ValueError(f"animation artifact {label}.kind is invalid")
+    if not isinstance(curve.get("path"), str):
+        raise ValueError(f"animation artifact {label}.path must be a string")
+    keys = curve.get("keys")
+    if not isinstance(keys, list):
+        raise ValueError(f"animation artifact {label}.keys must be a list")
+    if kind in {"float", "pptr"} and not isinstance(curve.get("attribute"), str):
+        raise ValueError(f"animation artifact {label}.attribute must be a string")
+    if kind == "float" and type(curve.get("class_id")) is not int:
+        raise ValueError(f"animation artifact {label}.class_id must be an integer")
+
+    for key_index, key in enumerate(keys):
+        key_label = f"{label}.keys[{key_index}]"
+        if not isinstance(key, Mapping):
+            raise ValueError(f"animation artifact {key_label} must be an object")
+        if "time" not in key:
+            raise ValueError(f"animation artifact {key_label}.time is required")
+        _validate_artifact_number(key.get("time"), f"{key_label}.time", nullable=True)
+        if kind in {"rotation", "position", "scale"}:
+            value = key.get("value")
+            dimensions = 4 if kind == "rotation" else 3
+            if "value" not in key or not isinstance(value, list) or len(value) != dimensions:
+                raise ValueError(f"animation artifact {key_label}.value has invalid dimensions")
+            for component in value:
+                _validate_artifact_number(component, f"{key_label}.value", nullable=True)
+        elif kind == "float":
+            for field in ("value", "inSlope", "outSlope"):
+                if field not in key:
+                    raise ValueError(f"animation artifact {key_label}.{field} is required")
+                _validate_artifact_number(key.get(field), f"{key_label}.{field}", nullable=True)
+        else:
+            target = key.get("target")
+            if (
+                not isinstance(target, Mapping)
+                or type(target.get("file_id")) is not int
+                or type(target.get("path_id")) is not int
+            ):
+                raise ValueError(f"animation artifact {key_label}.target has invalid identity")
+
+
 ANIMATION_ARTIFACT_FIELDS = {
     "artifact_version",
     "bundle_name",
@@ -375,17 +434,102 @@ def validate_animation_artifact(value: Any) -> dict[str, Any]:
             f"animation artifact fields must be exactly"
             f" {sorted(ANIMATION_ARTIFACT_FIELDS)}, got {sorted(value)}"
         )
-    if value["artifact_version"] != ANIMATION_ARTIFACT_VERSION:
+    if (
+        type(value["artifact_version"]) is not int
+        or value["artifact_version"] != ANIMATION_ARTIFACT_VERSION
+    ):
         raise ValueError("animation artifact_version must be 1")
+    if not isinstance(value["bundle_name"], str) or not value["bundle_name"]:
+        raise ValueError("animation artifact.bundle_name must be a non-empty string")
+    if type(value["file_index"]) is not int or type(value["path_id"]) is not int:
+        raise ValueError("animation artifact file_index and path_id must be integers")
     if not isinstance(value["clip_name"], str):
         raise ValueError("animation artifact.clip_name must be a string")
+    _validate_artifact_number(value["sample_rate"], "sample_rate")
+    _validate_artifact_number(value["duration"], "duration")
     if not isinstance(value["curves"], list):
         raise ValueError("animation artifact.curves must be a list")
+    for index, curve in enumerate(value["curves"]):
+        _validate_animation_curve(curve, index)
     streams = value["streams"]
     if not isinstance(streams, dict) or set(streams) != {"streamed", "dense", "constant"}:
         raise ValueError("animation artifact.streams must contain streamed/dense/constant")
+    if not isinstance(streams["streamed"], list):
+        raise ValueError("animation artifact.streams.streamed must be a list")
+    for frame_index, frame in enumerate(streams["streamed"]):
+        label = f"streams.streamed[{frame_index}]"
+        if not isinstance(frame, Mapping) or not isinstance(frame.get("keys"), list):
+            raise ValueError(f"animation artifact {label} has invalid structure")
+        if "time" not in frame:
+            raise ValueError(f"animation artifact {label}.time is required")
+        _validate_artifact_number(frame.get("time"), f"{label}.time", nullable=True)
+        for key_index, key in enumerate(frame["keys"]):
+            key_label = f"{label}.keys[{key_index}]"
+            if (
+                not isinstance(key, Mapping)
+                or type(key.get("index")) is not int
+                or not isinstance(key.get("coeff"), list)
+                or len(key["coeff"]) != 4
+                or not {"outSlope", "value", "inSlope"}.issubset(key)
+            ):
+                raise ValueError(f"animation artifact {key_label} has invalid structure")
+            for component in key["coeff"]:
+                _validate_artifact_number(component, f"{key_label}.coeff", nullable=True)
+            for field in ("outSlope", "value", "inSlope"):
+                _validate_artifact_number(key.get(field), f"{key_label}.{field}", nullable=True)
+    dense = streams["dense"]
+    dense_fields = {"curve_count", "frame_count", "sample_rate", "begin_time", "frames"}
+    if not isinstance(dense, Mapping) or set(dense) != dense_fields:
+        raise ValueError("animation artifact.streams.dense has invalid structure")
+    curve_count = dense["curve_count"]
+    frame_count = dense["frame_count"]
+    if type(curve_count) is not int or curve_count < 0:
+        raise ValueError("animation artifact.streams.dense.curve_count is invalid")
+    if type(frame_count) is not int or frame_count < 0:
+        raise ValueError("animation artifact.streams.dense.frame_count is invalid")
+    _validate_artifact_number(dense["sample_rate"], "streams.dense.sample_rate", nullable=True)
+    _validate_artifact_number(dense["begin_time"], "streams.dense.begin_time", nullable=True)
+    if not isinstance(dense["frames"], list) or len(dense["frames"]) != frame_count:
+        raise ValueError("animation artifact.streams.dense.frames do not match frame_count")
+    for frame_index, frame in enumerate(dense["frames"]):
+        label = f"streams.dense.frames[{frame_index}]"
+        values = frame.get("values") if isinstance(frame, Mapping) else None
+        if (
+            not isinstance(frame, Mapping)
+            or "time" not in frame
+            or not isinstance(values, list)
+            or len(values) != curve_count
+        ):
+            raise ValueError(f"animation artifact {label} has invalid structure")
+        _validate_artifact_number(frame.get("time"), f"{label}.time", nullable=True)
+        for component in values:
+            _validate_artifact_number(component, f"{label}.values", nullable=True)
+    if not isinstance(streams["constant"], list):
+        raise ValueError("animation artifact.streams.constant must be a list")
+    for value_index, component in enumerate(streams["constant"]):
+        _validate_artifact_number(component, f"streams.constant[{value_index}]", nullable=True)
     if not isinstance(value["content_hash"], str) or not value["content_hash"]:
         raise ValueError("animation artifact.content_hash must be a non-empty string")
+    if not isinstance(value["diagnostics"], list):
+        raise ValueError("animation artifact.diagnostics must be a list")
+    for diagnostic in value["diagnostics"]:
+        if (
+            not isinstance(diagnostic, dict)
+            or not isinstance(diagnostic.get("code"), str)
+            or not diagnostic.get("code")
+            or not isinstance(diagnostic.get("message"), str)
+        ):
+            raise ValueError("animation artifact diagnostic requires a code and message")
+        if "severity" not in diagnostic:
+            if diagnostic["code"] != DIAG_ANIMATION_UNSUPPORTED_BINDING:
+                raise ValueError(
+                    "legacy animation diagnostics without severity are only supported for "
+                    f"{DIAG_ANIMATION_UNSUPPORTED_BINDING}"
+                )
+        elif diagnostic["severity"] not in SEVERITIES:
+            raise ValueError("animation artifact diagnostic has invalid severity")
+    if value["content_hash"] != _artifact_hash(value):
+        raise ValueError("animation artifact.content_hash does not match its document")
     return value
 
 

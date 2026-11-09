@@ -370,5 +370,7 @@ DIAG_ANIMATION_UNSUPPORTED_BINDING = "animation_unsupported_binding"
 
 # Phase 6 timeline/package codes.
 DIAG_TRACK_UNSUPPORTED = "track_unsupported"
+DIAG_CLIP_ASSET_UNRESOLVED = "clip_asset_unresolved"
+DIAG_TRACK_REFERENCE_UNRESOLVED = "track_reference_unresolved"
 DIAG_PLAYABLE_MISSING = "playable_missing"
 DIAG_ARTIFACT_INCOMPLETE = "artifact_incomplete"
