@@ -458,7 +458,8 @@ def test_partial_chart_failure_reselects_temporary_score_sources_on_retry(
     assert extracted_names == [score_a]
     assert rendered_sources == []
     assert mirror_fetches == []
-    assert extracted_roots and all(not root.exists() for root in extracted_roots)
+    assert extracted_roots
+    assert all(not root.exists() for root in extracted_roots)
 
     first_run_download_count = len(download_calls)
     asyncio.run(runner.main())

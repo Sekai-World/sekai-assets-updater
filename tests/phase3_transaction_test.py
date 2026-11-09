@@ -509,6 +509,24 @@ def test_mixed_partial_success_commits_only_completed_bundles_and_retries_failed
     assert not paths.queue.exists()
 
 
+def test_partial_success_metadata_updates_a_deep_copy_only() -> None:
+    name = "music/short/copy-check"
+    bundle = {"bundleName": name, "hash": "current", "nested": {"value": 1}}
+    metadata = {"version": "v2", "os": "ios", "bundles": {name: bundle}}
+    item = ("https://example.test/copy-check", bundle)
+
+    updated = lifecycle._metadata_after_partial_success(metadata, [item], [item], [])
+
+    assert updated is not metadata
+    assert updated["bundles"] is not metadata["bundles"]
+    assert updated["bundles"][name] is not bundle
+    assert updated["bundles"][name]["nested"] is not bundle["nested"]
+    assert "_sekai_assets_updater" not in metadata["bundles"][name]
+    assert updated["bundles"][name]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "current"}
+    }
+
+
 def test_old_pending_metadata_is_not_stamped_with_current_checksum(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -600,8 +618,9 @@ def test_partial_commit_journal_recovers_success_provenance_and_failed_queue(
     monkeypatch.setattr(lifecycle, "run_pipeline", fail_then_succeed)
     monkeypatch.setattr(lifecycle, "replay_journal", fail_partial_replay)
 
+    main_coro = runner.main(force_full_download=True)
     with pytest.raises(state.StatePersistenceError, match="partial-commit replay"):
-        asyncio.run(runner.main(force_full_download=True))
+        asyncio.run(main_coro)
 
     paths = state.derive_state_paths(
         config.DL_LIST_CACHE_PATH,
