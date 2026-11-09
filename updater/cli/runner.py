@@ -143,6 +143,8 @@ async def _run_full_download_pipeline(
         paths,
         fetch_result.asset_bundle_info.get("bundles", {}),
         asset_metadata_version=_asset_metadata_version(fetch_result.asset_bundle_info),
+        asset_metadata=plan.asset_metadata,
+        provenance_candidates=new_download_list,
         successful_asset_metadata=successful_asset_metadata,
         successful_game_version=successful_game_version,
     )
