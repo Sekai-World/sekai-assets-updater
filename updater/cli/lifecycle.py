@@ -1,6 +1,7 @@
 """Run completion flows: download, metadata-only writes, cache restore."""
 
 import asyncio
+import copy
 import logging
 import time
 from typing import Any, Dict, List
@@ -8,18 +9,24 @@ from typing import Any, Dict, List
 import orjson as json
 from anyio import open_file
 
-from updater.cli.pending import _read_json_cache, _write_json_cache
+from updater.cli.pending import (
+    _pending_items_outside_mode,
+    _read_json_cache,
+    _write_json_cache,
+)
 from updater.model import ConfigLike
 from updater.modes import (
     filter_bundles_for_mode,
     filter_download_items_for_mode,
     get_enabled_specialized_modes,
+    is_chart_score_bundle,
 )
 from updater.net.disk_space import build_download_disk_space_gate
 from updater.net.plan import (
     DownloadItem,
     _sanitize_asset_bundle_info,
     dedupe_download_items,
+    get_bundle_checksum,
     get_regional_music_selection_for_config,
     select_bundles_for_download,
 )
@@ -40,6 +47,112 @@ from updater.state import (
 
 logger = logging.getLogger("asset_updater")
 _RUN_COMPLETED_LOG = "RUN | status=completed | duration_sec=%.2f"
+_PROVENANCE_KEY = "_sekai_assets_updater"
+
+
+def _download_item_identity(item: DownloadItem) -> tuple[str, str, str | None, str] | None:
+    url, bundle = item
+    if not isinstance(url, str) or not isinstance(bundle, dict):
+        return None
+    bundle_name = bundle.get("bundleName")
+    if not isinstance(bundle_name, str) or not bundle_name:
+        return None
+    checksum_field, checksum_value = get_bundle_checksum(bundle)
+    return url, bundle_name, checksum_field, checksum_value
+
+
+def _completed_download_items(
+    download_list: List[DownloadItem], failed_tasks: List[DownloadItem]
+) -> List[DownloadItem]:
+    """Return only task inputs not reported failed by a normally completed pipeline.
+
+    ``run_pipeline`` reports download, extract, and upload failures using the
+    original URL and bundle record. Treat an unrecognized or over-reported
+    failure as ambiguous and fail closed rather than infer success from files.
+    """
+    remaining: Dict[tuple[str, str, str | None, str], int] = {}
+    for item in download_list:
+        identity = _download_item_identity(item)
+        if identity is None:
+            return []
+        remaining[identity] = remaining.get(identity, 0) + 1
+
+    for item in failed_tasks:
+        identity = _download_item_identity(item)
+        if identity is None or remaining.get(identity, 0) == 0:
+            return []
+        remaining[identity] -= 1
+
+    completed: List[DownloadItem] = []
+    for item in download_list:
+        identity = _download_item_identity(item)
+        assert identity is not None
+        if remaining[identity] > 0:
+            completed.append(item)
+            remaining[identity] -= 1
+    return completed
+
+
+def _metadata_after_partial_success(
+    asset_metadata: Dict[str, Any],
+    provenance_candidates: List[DownloadItem],
+    completed_items: List[DownloadItem],
+    failed_items: List[DownloadItem],
+    withheld_provenance_names: set[str] | None = None,
+) -> Dict[str, Any]:
+    """Mark only current manifest candidates that completed every pipeline stage."""
+    result = copy.deepcopy(asset_metadata)
+    bundles = result.get("bundles")
+    if not isinstance(bundles, dict):
+        return result
+    withheld_provenance_names = withheld_provenance_names or set()
+    for bundle_name in withheld_provenance_names:
+        current_bundle = bundles.get(bundle_name)
+        if isinstance(current_bundle, dict):
+            # A prior marker may have been carried onto this checksum by the
+            # current plan. Remove it too: temporary post-processing inputs
+            # disappear after this partial run, so this candidate must retry.
+            current_bundle.pop(_PROVENANCE_KEY, None)
+
+    completed_identities = {
+        identity
+        for item in completed_items
+        if (identity := _download_item_identity(item)) is not None
+    }
+    failed_names = {
+        item[1].get("bundleName")
+        for item in failed_items
+        if isinstance(item[1], dict) and isinstance(item[1].get("bundleName"), str)
+    }
+    candidate_counts: Dict[str, int] = {}
+    for _, candidate in provenance_candidates:
+        name = candidate.get("bundleName")
+        if isinstance(name, str):
+            candidate_counts[name] = candidate_counts.get(name, 0) + 1
+
+    for candidate in provenance_candidates:
+        identity = _download_item_identity(candidate)
+        if identity is None:
+            continue
+        _, bundle_name, checksum_field, checksum_value = identity
+        if (
+            identity not in completed_identities
+            or bundle_name in failed_names
+            or bundle_name in withheld_provenance_names
+            or candidate_counts.get(bundle_name) != 1
+            or checksum_field not in {"hash", "crc"}
+            or not checksum_value
+        ):
+            continue
+        current_bundle = bundles.get(bundle_name)
+        if not isinstance(current_bundle, dict):
+            continue
+        if get_bundle_checksum(current_bundle) != (checksum_field, checksum_value):
+            continue
+        current_bundle[_PROVENANCE_KEY] = {
+            "processed_checksum": {"field": checksum_field, "value": checksum_value}
+        }
+    return result
 
 
 async def do_download(
@@ -50,6 +163,9 @@ async def do_download(
     paths: StatePaths | None = None,
     *,
     extracted_dir_is_temporary: bool = False,
+    failed_items_out: List[DownloadItem] | None = None,
+    completed_items_out: List[DownloadItem] | None = None,
+    defer_failed_queue_write: bool = False,
 ) -> bool:
     """
     Download the files in the download list using asyncio and aiohttp.
@@ -88,16 +204,22 @@ async def do_download(
     if pipeline_error is not None:
         raise pipeline_error
 
+    if failed_items_out is not None:
+        failed_items_out[:] = failed_tasks
+    if completed_items_out is not None:
+        completed_items_out[:] = _completed_download_items(dl_list, failed_tasks)
+
     # Replace the original download list with the failed tasks
     if failed_tasks:
         failed_path = paths.queue if paths is not None else config.DL_LIST_CACHE_PATH
-        if paths is not None:
-            atomic_write_json(
-                failed_path, [list(item) for item in failed_tasks], validate_pending_queue
-            )
-        else:
-            async with await open_file(failed_path, "wb") as f:
-                await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
+        if not defer_failed_queue_write:
+            if paths is not None:
+                atomic_write_json(
+                    failed_path, [list(item) for item in failed_tasks], validate_pending_queue
+                )
+            else:
+                async with await open_file(failed_path, "wb") as f:
+                    await f.write(json.dumps(failed_tasks, option=json.OPT_INDENT_2))
         logger.warning(
             "RUN | result=partial_failure | failed=%d | retry_list=%s",
             len(failed_tasks),
@@ -388,6 +510,8 @@ async def _complete_with_download_list(
     live2d_bundles: Dict[str, Dict[str, Any]] | None = None,
     *,
     asset_metadata_version: str | None = None,
+    asset_metadata: Dict[str, Any] | None = None,
+    provenance_candidates: List[DownloadItem] | None = None,
     successful_asset_metadata: Dict[str, Any] | None = None,
     successful_game_version: Dict[str, Any] | None = None,
 ) -> None:
@@ -401,6 +525,14 @@ async def _complete_with_download_list(
     else:
         await _write_json_cache(cfg.DL_LIST_CACHE_PATH, queue_items)
 
+    can_commit_partial_success = (
+        paths is not None
+        and asset_metadata is not None
+        and provenance_candidates is not None
+        and successful_game_version is not None
+    )
+    failed_items: List[DownloadItem] = []
+    completed_items: List[DownloadItem] = []
     is_success = await do_download(
         download_list,
         config=cfg,
@@ -408,9 +540,49 @@ async def _complete_with_download_list(
         cookie=cookie,
         paths=paths,
         extracted_dir_is_temporary=extracted_dir_is_temporary,
+        failed_items_out=failed_items if can_commit_partial_success else None,
+        completed_items_out=completed_items if can_commit_partial_success else None,
+        defer_failed_queue_write=can_commit_partial_success,
     )
     if not is_success:
-        await _restore_pending_cache_on_failure(cfg, mode, pending_items_outside_mode, paths)
+        if can_commit_partial_success and failed_items:
+            assert paths is not None
+            assert asset_metadata is not None
+            assert provenance_candidates is not None
+            assert successful_game_version is not None
+            failed_current_items = filter_download_items_for_mode(failed_items, mode)
+            attempted_outside_mode = _pending_items_outside_mode(download_list, mode)
+            final_pending = dedupe_download_items(
+                pending_items_outside_mode + attempted_outside_mode + failed_current_items
+            )
+            withheld_provenance_names = None
+            if (
+                mode == "assets"
+                and extracted_dir_is_temporary
+                and "charts" in get_enabled_specialized_modes(mode, cfg)
+            ):
+                withheld_provenance_names = {
+                    bundle_name
+                    for _, candidate in download_list
+                    if is_chart_score_bundle(candidate)
+                    and isinstance(bundle_name := candidate.get("bundleName"), str)
+                }
+            partial_metadata = _metadata_after_partial_success(
+                asset_metadata,
+                provenance_candidates,
+                completed_items,
+                failed_items,
+                withheld_provenance_names=withheld_provenance_names,
+            )
+            await _commit_successful_selection(
+                cfg,
+                final_pending,
+                paths,
+                partial_metadata,
+                successful_game_version,
+            )
+        else:
+            await _restore_pending_cache_on_failure(cfg, mode, pending_items_outside_mode, paths)
     else:
         if successful_asset_metadata is not None and successful_game_version is not None:
             await _commit_successful_selection(

@@ -447,6 +447,327 @@ def test_changed_bundle_partial_failure_preserves_old_marker_until_retry_success
     }
 
 
+def test_mixed_partial_success_commits_only_completed_bundles_and_retries_failed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(configuration, "config", config)
+    names = ["music/short/one", "music/short/two", "music/short/three"]
+    failed_name = names[1]
+    old_bundles = {name: _marked({"bundleName": name, "hash": f"old-{name}"}) for name in names}
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        {"version": "v1", "os": "ios", "bundles": old_bundles},
+        state.validate_asset_metadata,
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH, _version(), state.validate_game_version
+    )
+    fetch_result = _fetch_result()
+    fetch_result.asset_bundle_info = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {name: {"bundleName": name, "hash": f"hash-{name}"} for name in names},
+    }
+    pipeline_runs: list[list[tuple[str, dict]]] = []
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def partial_then_success(items, *_args, **_kwargs):
+        pipeline_runs.append(list(items))
+        if len(pipeline_runs) == 1:
+            return [next(item for item in items if item[1]["bundleName"] == failed_name)]
+        return []
+
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", partial_then_success)
+
+    asyncio.run(runner.main(force_full_download=True))
+
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert [item[1]["bundleName"] for item in state.load_pending_queue(paths.queue)] == [
+        failed_name
+    ]
+    partial_metadata = state.load_asset_metadata(paths.asset_metadata)
+    for name in set(names) - {failed_name}:
+        assert partial_metadata["bundles"][name]["_sekai_assets_updater"] == {
+            "processed_checksum": {"field": "hash", "value": f"hash-{name}"}
+        }
+    assert partial_metadata["bundles"][failed_name]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": f"old-{failed_name}"}
+    }
+
+    asyncio.run(runner.main())
+
+    assert len(pipeline_runs) == 2
+    assert [item[1]["bundleName"] for item in pipeline_runs[1]] == [failed_name]
+    assert not paths.queue.exists()
+
+
+def test_old_pending_metadata_is_not_stamped_with_current_checksum(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    target = "music/short/excluded"
+    selected = "music/short/included"
+    config.DL_INCLUDE_LIST = [rf"^{selected}$"]
+    cached_metadata = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {
+            target: _marked({"bundleName": target, "hash": "old"}),
+            selected: {"bundleName": selected, "hash": "stable"},
+        },
+    }
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH, cached_metadata, state.validate_asset_metadata
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH, _version(), state.validate_game_version
+    )
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    old_pending = ("https://example.test/old", {"bundleName": target, "hash": "old"})
+    state.atomic_write_json(paths.queue, [list(old_pending)], state.validate_pending_queue)
+    fetch_result = _fetch_result()
+    fetch_result.asset_bundle_info = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {
+            target: {"bundleName": target, "hash": "new"},
+            selected: {"bundleName": selected, "hash": "stable"},
+        },
+    }
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def fail_selected(items, *_args, **_kwargs):
+        return [next(item for item in items if item[1]["bundleName"] == selected)]
+
+    monkeypatch.setattr(configuration, "config", config)
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", fail_selected)
+
+    asyncio.run(runner.main())
+
+    current_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert current_metadata["bundles"][target]["hash"] == "new"
+    assert current_metadata["bundles"][target]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "old"}
+    }
+    assert [item[1]["bundleName"] for item in state.load_pending_queue(paths.queue)] == [selected]
+
+
+def test_partial_commit_journal_recovers_success_provenance_and_failed_queue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(configuration, "config", config)
+    names = ["music/short/succeeded", "music/short/retry"]
+    failed_name = names[1]
+    fetch_result = _fetch_result()
+    fetch_result.asset_bundle_info = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {name: {"bundleName": name, "hash": f"hash-{name}"} for name in names},
+    }
+    pipeline_runs: list[list[tuple[str, dict]]] = []
+
+    async def fake_fetch(*_args, **_kwargs):
+        return fetch_result
+
+    async def fail_then_succeed(items, *_args, **_kwargs):
+        pipeline_runs.append(list(items))
+        if len(pipeline_runs) == 1:
+            return [next(item for item in items if item[1]["bundleName"] == failed_name)]
+        return []
+
+    original_replay = lifecycle.replay_journal
+
+    def fail_partial_replay(*_args, **_kwargs):
+        raise state.StatePersistenceError("simulated partial-commit replay failure")
+
+    monkeypatch.setattr(runner, "fetch_asset_bundle_info", fake_fetch)
+    monkeypatch.setattr(lifecycle, "run_pipeline", fail_then_succeed)
+    monkeypatch.setattr(lifecycle, "replay_journal", fail_partial_replay)
+
+    with pytest.raises(state.StatePersistenceError, match="partial-commit replay"):
+        asyncio.run(runner.main(force_full_download=True))
+
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert paths.journal.exists()
+    journal = state.load_journal(paths.journal)
+    assert [item[1]["bundleName"] for item in journal["queue"]] == [failed_name]
+    assert journal["asset_metadata"]["bundles"][names[0]]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": f"hash-{names[0]}"}
+    }
+    assert "_sekai_assets_updater" not in journal["asset_metadata"]["bundles"][failed_name]
+
+    assert state.replay_journal(paths)
+    assert [item[1]["bundleName"] for item in state.load_pending_queue(paths.queue)] == [
+        failed_name
+    ]
+    assert state.load_asset_metadata(paths.asset_metadata)["bundles"][names[0]][
+        "_sekai_assets_updater"
+    ] == {"processed_checksum": {"field": "hash", "value": f"hash-{names[0]}"}}
+
+    monkeypatch.setattr(lifecycle, "replay_journal", original_replay)
+    asyncio.run(runner.main())
+    assert len(pipeline_runs) == 2
+    assert [item[1]["bundleName"] for item in pipeline_runs[1]] == [failed_name]
+
+
+def test_partial_live2d_commit_retains_other_mode_pending_without_marking_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    paths = state.derive_live2d_state_paths(config.DL_LIST_CACHE_PATH)
+    download_list = [
+        ("https://example.test/live2d/ok", {"bundleName": "live2d/model/ok", "hash": "ok"}),
+        (
+            "https://example.test/live2d/fail",
+            {"bundleName": "live2d/model/fail", "hash": "fail"},
+        ),
+    ]
+    other_mode_pending = (
+        "https://example.test/music/pending",
+        {"bundleName": "music/short/pending", "hash": "pending"},
+    )
+    asset_metadata = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {
+            bundle["bundleName"]: bundle for _, bundle in download_list + [other_mode_pending]
+        },
+    }
+
+    async def fail_live2d_item(*_args, **_kwargs):
+        return [download_list[1]]
+
+    monkeypatch.setattr(lifecycle, "run_pipeline", fail_live2d_item)
+    asyncio.run(
+        lifecycle._complete_with_download_list(
+            config,
+            "live2d",
+            {},
+            None,
+            download_list,
+            [other_mode_pending],
+            False,
+            0,
+            paths,
+            asset_metadata=asset_metadata,
+            provenance_candidates=download_list,
+            successful_game_version=_version(),
+        )
+    )
+
+    assert state.load_pending_queue(paths.queue) == [
+        list(other_mode_pending),
+        list(download_list[1]),
+    ]
+    committed = state.load_asset_metadata(paths.asset_metadata)
+    assert committed["bundles"]["live2d/model/ok"]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": "ok"}
+    }
+    assert "_sekai_assets_updater" not in committed["bundles"]["live2d/model/fail"]
+    assert "_sekai_assets_updater" not in committed["bundles"]["music/short/pending"]
+
+
+def test_duplicate_bundle_tasks_do_not_claim_provenance_after_one_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    target = "music/short/repeated"
+    bundle = {"bundleName": target, "hash": "same"}
+    duplicate_items = [
+        ("https://example.test/repeated", dict(bundle)),
+        ("https://example.test/repeated", dict(bundle)),
+    ]
+    asset_metadata = {
+        "version": "v2",
+        "os": "ios",
+        "bundles": {target: dict(bundle)},
+    }
+
+    async def fail_one_duplicate(*_args, **_kwargs):
+        return [duplicate_items[1]]
+
+    monkeypatch.setattr(lifecycle, "run_pipeline", fail_one_duplicate)
+    asyncio.run(
+        lifecycle._complete_with_download_list(
+            config,
+            "assets",
+            {},
+            None,
+            duplicate_items,
+            [],
+            False,
+            0,
+            paths,
+            asset_metadata=asset_metadata,
+            provenance_candidates=duplicate_items,
+            successful_game_version=_version(),
+        )
+    )
+
+    assert state.load_pending_queue(paths.queue) == [list(duplicate_items[1])]
+    assert (
+        "_sekai_assets_updater"
+        not in state.load_asset_metadata(paths.asset_metadata)["bundles"][target]
+    )
+
+
+def test_force_full_ignores_cached_retries_but_retains_other_mode_snapshot(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    live2d_item = (
+        "https://example.test/live2d/model",
+        {"bundleName": "live2d/model/unit", "hash": "live2d"},
+    )
+    asset_item = (
+        "https://example.test/music/short",
+        {"bundleName": "music/short/unit", "hash": "asset"},
+    )
+    state.atomic_write_json(
+        config.DL_LIST_CACHE_PATH,
+        [list(live2d_item), list(asset_item)],
+        state.validate_pending_queue,
+    )
+
+    cached, current_mode = asyncio.run(
+        pending._load_pending_download_lists(config, "live2d", force_full_download=True)
+    )
+
+    assert [item[1]["bundleName"] for item in cached] == [
+        "live2d/model/unit",
+        "music/short/unit",
+    ]
+    assert current_mode == []
+    assert [
+        item[1]["bundleName"] for item in pending._pending_items_outside_mode(cached, "live2d")
+    ] == ["music/short/unit"]
+
+
 def test_pre_pipeline_journal_replay_retains_old_marker_and_pending_queue(tmp_path: Path) -> None:
     paths = state.derive_state_paths(
         tmp_path / "dl.json", tmp_path / "metadata.json", tmp_path / "version.json"

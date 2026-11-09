@@ -236,6 +236,25 @@ def test_partial_failure_persists_exact_failed_subset(tmp_path: Path, monkeypatc
     assert state.load_pending_queue(paths.queue) == [list(failed[0])]
 
 
+def test_no_paths_download_call_keeps_legacy_failed_queue_behavior(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path)
+    items = [
+        ("first-url", {"bundleName": "first", "hash": "one"}),
+        ("second-url", {"bundleName": "second", "hash": "two"}),
+    ]
+    failed = [items[1]]
+
+    async def fake_pipeline(*_args, **_kwargs):
+        return failed
+
+    monkeypatch.setattr(lifecycle, "run_pipeline", fake_pipeline)
+
+    assert not asyncio.run(lifecycle.do_download(items, config, {}, None))
+    assert state.load_pending_queue(config.DL_LIST_CACHE_PATH) == [list(items[1])]
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("crash"), asyncio.CancelledError()])
 def test_unexpected_pipeline_failure_retains_full_pre_run_queue(
     tmp_path: Path, monkeypatch, failure: BaseException
