@@ -35,6 +35,40 @@ class DownloadPlan:
 _PROVENANCE_KEY = "_sekai_assets_updater"
 
 
+def _regional_music_enabled(config) -> bool:
+    enabled = getattr(config, "ENABLE_REGION_EXCLUSIVE_MUSIC", False)
+    if type(enabled) is not bool:
+        raise ValueError("ENABLE_REGION_EXCLUSIVE_MUSIC must be a bool")
+    return enabled
+
+
+async def prepare_regional_music_config_for_run(config):
+    """Prepare the opt-in music policy without importing it for legacy configs."""
+    if not _regional_music_enabled(config):
+        return config, None
+
+    from updater.music_selection import (
+        get_regional_music_selection,
+        prepare_regional_music_config,
+    )
+
+    config = await prepare_regional_music_config(config)
+    return config, get_regional_music_selection(config)
+
+
+def get_regional_music_selection_for_config(config, mode: str | None = None):
+    """Return the prepared policy, or None when regional selection is disabled."""
+    mode = mode or getattr(config, "UPDATER_MODE", "assets")
+    if mode in {"live2d", "live2d-associated"}:
+        return None
+    if not _regional_music_enabled(config):
+        return None
+
+    from updater.music_selection import get_regional_music_selection
+
+    return get_regional_music_selection(config)
+
+
 def _sanitize_asset_bundle_info(asset_bundle_info: Dict) -> Dict:
     """Copy a manifest while discarding server-supplied local provenance."""
     source_bundles = asset_bundle_info.get("bundles", {})
@@ -288,6 +322,10 @@ async def get_download_list(
     assert config, "Config must be provided to get_download_list"
     assert config.ASSET_BUNDLE_INFO_CACHE_PATH, "ASSET_BUNDLE_INFO_CACHE_PATH must be set in config"
     assert config.GAME_VERSION_JSON_CACHE_PATH, "GAME_VERSION_JSON_CACHE_PATH must be set in config"
+    if getattr(config, "UPDATER_MODE", "assets") in {"live2d", "live2d-associated"}:
+        regional_music_selection = None
+    else:
+        config, regional_music_selection = await prepare_regional_music_config_for_run(config)
     cached_asset_bundle_info, cached_game_version_json = _load_cached_metadata(
         config, force_full_download
     )
@@ -309,14 +347,23 @@ async def get_download_list(
     current_bundles: Dict[str, Dict] = sanitized_selection_info.get("bundles", {})
     assert current_bundles, "bundles must be set in asset bundle info"
     asset_bundle_url_placeholders = get_template_placeholders(config.ASSET_BUNDLE_URL)
-    current_bundles = select_bundles_for_download(
-        current_bundles,
-        include_list=include_list,
-        exclude_list=exclude_list,
-        automatic_prefixes=automatic_prefixes,
-        required_bundle_names=required_bundle_names,
-    )
-    if not current_bundles:
+    selection_kwargs = {
+        "include_list": include_list,
+        "exclude_list": exclude_list,
+        "automatic_prefixes": automatic_prefixes,
+        "required_bundle_names": required_bundle_names,
+    }
+    if regional_music_selection is None:
+        current_bundles = select_bundles_for_download(current_bundles, **selection_kwargs)
+        selected_before_regional = current_bundles
+    else:
+        selected_before_regional = select_bundles_for_download(current_bundles, **selection_kwargs)
+        current_bundles = select_bundles_for_download(
+            current_bundles,
+            **selection_kwargs,
+            music_selection=regional_music_selection,
+        )
+    if not current_bundles and not selected_before_regional:
         raise ValueError("No bundles found after filtering")
 
     metadata_source = (
@@ -397,13 +444,14 @@ def select_bundles_for_download(
     exclude_list: List[str] | None = None,
     automatic_prefixes: tuple[str, ...] = (),
     required_bundle_names: Tuple[str, ...] | List[str] = (),
+    music_selection=None,
 ) -> Dict[str, Dict]:
     """Select user bundles and merge mandatory specialized bundles.
 
     ``required_bundle_names`` unions exact bundle names (GLB package closure
     members) into the selection, bypassing include/exclude filters the same
-    way ``automatic_prefixes`` does. Empty by default, which keeps the
-    standard filtering behavior byte-for-byte unchanged.
+    way ``automatic_prefixes`` does. ``music_selection`` is an optional final
+    hard gate and can only remove entries from that existing union.
     """
 
     required = set(required_bundle_names or ())
@@ -416,8 +464,10 @@ def select_bundles_for_download(
         ) and not any(re.match(pattern, bundle_name) for pattern in (exclude_list or []))
         automatic_selected = bundle_name.startswith(automatic_prefixes)
         if (
-            user_selected or automatic_selected or bundle_name in required
-        ) and bundle_name not in selected_names:
+            (user_selected or automatic_selected or bundle_name in required)
+            and bundle_name not in selected_names
+            and (music_selection is None or music_selection.allows_bundle(bundle_name))
+        ):
             selected[key] = value
             selected_names.add(bundle_name)
     return selected

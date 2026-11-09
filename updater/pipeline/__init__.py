@@ -62,6 +62,7 @@ _QUEUE_SENTINEL = object()
 # version 3 adds queue_wait_sec/input_bytes per bundle and aggregate
 # scheduler/resource statistics in the summary record (Phase 5).
 _QUEUE_DEPTH_SAMPLE_INTERVAL_SEC = 1.0
+_PIPELINE_PROGRESS_SAMPLE_INTERVAL_SEC = 30.0
 _EXTRACTION_PROFILE_VERSION = 3
 
 
@@ -89,6 +90,138 @@ class PipelineArtifact:
     # Monotonic timestamp taken by the download worker just before the
     # artifact is enqueued; the extract worker derives its queue wait from it.
     enqueued_monotonic: float | None = None
+    # True only when runner.py supplied its automatic, run-scoped shared root.
+    extracted_dir_is_temporary: bool = False
+    # Run-local bundle counter used only for INFO progress reporting.
+    progress_token: int | None = None
+    progress_tracker: Any = None
+
+
+@dataclass(frozen=True)
+class _QueuedDownloadItem:
+    progress_token: int
+    item: DownloadItem
+
+
+class PipelineProgress:
+    """Run-local bundle-stage counters used by advisory progress logging.
+
+    A stage's ``waiting`` count includes bundles waiting to enter or execute
+    that stage, including an upstream worker blocked while handing off to a
+    full bounded queue. ``running`` means a stage worker has claimed the
+    bundle. ``remaining`` includes every bundle not yet terminally succeeded
+    or failed, whether queued, waiting for admission, or being processed.
+    """
+
+    _STAGE_STATES = (
+        "download_waiting",
+        "download_running",
+        "extract_waiting",
+        "extract_running",
+        "upload_waiting",
+        "upload_running",
+    )
+
+    def __init__(self, pipeline_id: str, total: int) -> None:
+        self.pipeline_id = pipeline_id
+        self.total = total
+        self._states = ["download_waiting"] * total
+        self._stage_counts = dict.fromkeys(self._STAGE_STATES, 0)
+        self._stage_counts["download_waiting"] = total
+        self._succeeded = 0
+        self._failed = 0
+
+    def transition(self, token: int, expected: str, next_state: str) -> None:
+        if not 0 <= token < self.total:
+            return
+        if expected not in self._stage_counts or next_state not in self._stage_counts:
+            return
+        if self._states[token] != expected:
+            return
+        self._stage_counts[expected] -= 1
+        self._stage_counts[next_state] += 1
+        self._states[token] = next_state
+
+    def finish(self, token: int, outcome: str) -> None:
+        if not 0 <= token < self.total or outcome not in ("succeeded", "failed"):
+            return
+        current = self._states[token]
+        if current in ("succeeded", "failed"):
+            return
+        if current in self._stage_counts:
+            self._stage_counts[current] -= 1
+        self._states[token] = outcome
+        if outcome == "succeeded":
+            self._succeeded += 1
+        else:
+            self._failed += 1
+
+    def snapshot(self, *, include_stages: bool = True) -> Dict[str, int]:
+        snapshot = {
+            "total": self.total,
+            "succeeded": self._succeeded,
+            "failed": self._failed,
+            "remaining": self.total - self._succeeded - self._failed,
+        }
+        if include_stages:
+            snapshot.update(self._stage_counts)
+        return snapshot
+
+
+def _log_pipeline_progress(
+    progress: PipelineProgress,
+    status: str,
+    *,
+    include_stages: bool = True,
+) -> None:
+    """Log bundle counts; waiting is stage backlog/admission, not queue size.
+
+    Running counts include only bundles claimed by a stage worker, and
+    remaining includes all queued, admission-blocked, and running bundles.
+    """
+
+    try:
+        counts = progress.snapshot(include_stages=include_stages)
+        if include_stages:
+            logger.info(
+                "PIPELINE | id=%s | stage=progress | status=%s | unit=bundles | total=%d | succeeded=%d | failed=%d | remaining=%d | download_waiting=%d | download_running=%d | extract_waiting=%d | extract_running=%d | upload_waiting=%d | upload_running=%d",
+                progress.pipeline_id,
+                status,
+                counts["total"],
+                counts["succeeded"],
+                counts["failed"],
+                counts["remaining"],
+                counts["download_waiting"],
+                counts["download_running"],
+                counts["extract_waiting"],
+                counts["extract_running"],
+                counts["upload_waiting"],
+                counts["upload_running"],
+            )
+        else:
+            logger.info(
+                "PIPELINE | id=%s | stage=progress | status=%s | unit=bundles | total=%d | succeeded=%d | failed=%d | remaining=%d",
+                progress.pipeline_id,
+                status,
+                counts["total"],
+                counts["succeeded"],
+                counts["failed"],
+                counts["remaining"],
+            )
+    except Exception:
+        # Progress is deliberately best-effort; a broken logger must not fail a run.
+        pass
+
+
+async def _sample_pipeline_progress(
+    progress: PipelineProgress,
+    interval: float = _PIPELINE_PROGRESS_SAMPLE_INTERVAL_SEC,
+) -> None:
+    """Periodically log counters; cancellation is always allowed to stop sampling."""
+
+    while True:
+        await asyncio.sleep(interval)
+        _log_pipeline_progress(progress, "periodic")
 
 
 def _sanitize_concurrency(value, default: int = 1) -> int:
@@ -781,6 +914,9 @@ async def _download_one_item(
     failed_lock: asyncio.Lock,
     download_disk_space_gate: DownloadDiskSpaceGate | None,
     session: aiohttp.ClientSession,
+    extracted_dir_is_temporary: bool = False,
+    progress: PipelineProgress | None = None,
+    progress_token: int | None = None,
 ) -> None:
     url, bundle = item
     label = sanitize_log_label(bundle.get("bundleName", url))
@@ -811,15 +947,19 @@ async def _download_one_item(
             label,
             download_disk_space_gate,
         )
-        await extract_queue.put(
-            PipelineArtifact(
-                url=url,
-                bundle=bundle,
-                bundle_save_path=bundle_save_path,
-                remove_bundle_after_extract=remove_bundle_after_extract,
-                enqueued_monotonic=asyncio.get_running_loop().time(),
-            )
+        artifact = PipelineArtifact(
+            url=url,
+            bundle=bundle,
+            bundle_save_path=bundle_save_path,
+            extracted_dir_is_temporary=extracted_dir_is_temporary,
+            remove_bundle_after_extract=remove_bundle_after_extract,
+            enqueued_monotonic=asyncio.get_running_loop().time(),
+            progress_token=progress_token,
+            progress_tracker=progress,
         )
+        if progress is not None and progress_token is not None:
+            progress.transition(progress_token, "download_running", "extract_waiting")
+        await extract_queue.put(artifact)
     except asyncio.CancelledError:
         if bundle_save_path is not None and remove_bundle_after_extract:
             await bundle_save_path.unlink(missing_ok=True)
@@ -836,6 +976,8 @@ async def _download_one_item(
         )
         async with failed_lock:
             failed_tasks.append(item)
+        if progress is not None and progress_token is not None:
+            progress.finish(progress_token, "failed")
 
 
 async def _download_stage(
@@ -850,13 +992,24 @@ async def _download_stage(
     failed_lock: asyncio.Lock,
     download_disk_space_gate: DownloadDiskSpaceGate | None,
     session: aiohttp.ClientSession,
+    extracted_dir_is_temporary: bool = False,
+    progress: PipelineProgress | None = None,
 ) -> None:
     del headers
     while True:
-        item = await input_queue.get()
+        queued_item = await input_queue.get()
         try:
-            if item is _QUEUE_SENTINEL:
+            if queued_item is _QUEUE_SENTINEL:
                 return
+
+            progress_token = None
+            if isinstance(queued_item, _QueuedDownloadItem):
+                item = queued_item.item
+                progress_token = queued_item.progress_token
+                if progress is not None:
+                    progress.transition(progress_token, "download_waiting", "download_running")
+            else:
+                item = queued_item
 
             await _download_one_item(
                 pipeline_id,
@@ -869,6 +1022,9 @@ async def _download_stage(
                 failed_lock,
                 download_disk_space_gate,
                 session,
+                extracted_dir_is_temporary,
+                progress,
+                progress_token,
             )
         finally:
             input_queue.task_done()
@@ -880,6 +1036,17 @@ def _prepare_extraction_destination(artifact: PipelineArtifact, config) -> Path:
         configured_root = Path(prepare_secure_directory(configured_extracted_root).as_posix())
         if _uses_aggregate_workspace(artifact.bundle, config):
             extracted_save_path = configured_root
+        elif artifact.extracted_dir_is_temporary:
+            identity_root = prepare_secure_directory(
+                configured_extracted_root
+                / _bundle_staging_identity(artifact.bundle.get("bundleName"))
+            )
+            tmp_extracted_save_dir = tempfile.TemporaryDirectory(
+                prefix="artifact-", dir=identity_root.as_posix(), delete=False
+            )
+            artifact.tmp_extracted_save_dir = tmp_extracted_save_dir
+            artifact.remove_extracted_after_upload = True
+            return Path(tmp_extracted_save_dir.name)
         else:
             identity_root = configured_root / _bundle_staging_identity(
                 artifact.bundle.get("bundleName")
@@ -917,6 +1084,7 @@ async def _extract_one_artifact(
     failed_lock: asyncio.Lock,
     profiler: ExtractionProfiler,
 ) -> None:
+    progress = artifact.progress_tracker
     label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
     logger.debug(
         "PIPELINE | id=%s | worker=%s | stage=extract | action=start_item | item=%s",
@@ -969,6 +1137,8 @@ async def _extract_one_artifact(
             artifact.exported_list,
         )
         await _cleanup_artifact(artifact, remove_bundle=True)
+        if progress is not None and artifact.progress_token is not None:
+            progress.transition(artifact.progress_token, "extract_running", "upload_waiting")
         await upload_queue.put(artifact)
         handed_to_upload = True
     except asyncio.CancelledError:
@@ -984,6 +1154,8 @@ async def _extract_one_artifact(
             queue_wait_sec=queue_wait_sec,
             input_bytes=input_bytes,
         )
+        if progress is not None and artifact.progress_token is not None:
+            progress.finish(artifact.progress_token, "failed")
         logger.error(
             "ERROR | pipeline_id=%s | worker=%s | stage=extract | item=%s | error=%s",
             pipeline_id,
@@ -1009,6 +1181,7 @@ async def _extract_stage(
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
     profiler: ExtractionProfiler,
+    progress: PipelineProgress | None = None,
 ) -> None:
     loop = asyncio.get_running_loop()
     while True:
@@ -1018,6 +1191,9 @@ async def _extract_stage(
         try:
             if item is _QUEUE_SENTINEL:
                 return
+
+            if progress is not None and item.progress_token is not None:
+                progress.transition(item.progress_token, "extract_waiting", "extract_running")
 
             await _extract_one_artifact(
                 pipeline_id,
@@ -1042,6 +1218,7 @@ async def _adaptive_extract_stage(
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
     profiler: ExtractionProfiler,
+    progress: PipelineProgress | None = None,
 ) -> None:
     """Extract stage worker dispatched by the Phase 2 admission scheduler."""
 
@@ -1052,6 +1229,9 @@ async def _adaptive_extract_stage(
         profiler.record_worker_idle(loop.time() - claim_started)
         if artifact is None:
             return
+
+        if progress is not None and artifact.progress_token is not None:
+            progress.transition(artifact.progress_token, "extract_waiting", "extract_running")
 
         try:
             await _extract_one_artifact(
@@ -1103,6 +1283,7 @@ async def _upload_one_artifact(
     config,
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
+    progress: PipelineProgress | None = None,
 ) -> None:
     label = sanitize_log_label(artifact.bundle.get("bundleName", artifact.url))
     logger.debug(
@@ -1113,6 +1294,8 @@ async def _upload_one_artifact(
     )
     try:
         await _upload_artifact_to_storages(artifact, config, label)
+        if progress is not None and artifact.progress_token is not None:
+            progress.finish(artifact.progress_token, "succeeded")
         logger.debug(
             "PIPELINE | id=%s | worker=%s | stage=upload | action=done_item | item=%s",
             pipeline_id,
@@ -1132,6 +1315,8 @@ async def _upload_one_artifact(
         )
         async with failed_lock:
             failed_tasks.append((artifact.url, artifact.bundle))
+        if progress is not None and artifact.progress_token is not None:
+            progress.finish(artifact.progress_token, "failed")
     finally:
         await _cleanup_artifact(
             artifact,
@@ -1147,12 +1332,16 @@ async def _upload_stage(
     config,
     failed_tasks: List[DownloadItem],
     failed_lock: asyncio.Lock,
+    progress: PipelineProgress | None = None,
 ) -> None:
     while True:
         item = await upload_queue.get()
         try:
             if item is _QUEUE_SENTINEL:
                 return
+
+            if progress is not None and item.progress_token is not None:
+                progress.transition(item.progress_token, "upload_waiting", "upload_running")
 
             await _upload_one_artifact(
                 pipeline_id,
@@ -1161,6 +1350,7 @@ async def _upload_stage(
                 config,
                 failed_tasks,
                 failed_lock,
+                progress,
             )
         finally:
             upload_queue.task_done()
@@ -1209,6 +1399,7 @@ def _start_extract_stage(
     failed_lock: asyncio.Lock,
     profiler: ExtractionProfiler,
     worker_count: int,
+    progress: PipelineProgress | None = None,
 ) -> List[asyncio.Task]:
     if isinstance(extract_queue, ExtractionScheduler):
         return [
@@ -1222,6 +1413,7 @@ def _start_extract_stage(
                     failed_tasks,
                     failed_lock,
                     profiler,
+                    progress,
                 )
             )
             for worker_id in range(worker_count)
@@ -1237,6 +1429,7 @@ def _start_extract_stage(
                 failed_tasks,
                 failed_lock,
                 profiler,
+                progress,
             )
         )
         for worker_id in range(worker_count)
@@ -1276,6 +1469,7 @@ async def run_pipeline(
     headers: Dict[str, str],
     cookie: str | None = None,
     download_disk_space_gate: DownloadDiskSpaceGate | None = None,
+    extracted_dir_is_temporary: bool = False,
 ) -> List[DownloadItem]:
     start_time = asyncio.get_running_loop().time()
     pipeline_id = uuid.uuid4().hex[:8]
@@ -1283,6 +1477,7 @@ async def run_pipeline(
         pipeline_id, _resolve_extraction_profile_path(config, pipeline_id)
     )
     total_items = len(dl_list)
+    progress = PipelineProgress(pipeline_id, total_items)
     download_concurrency = get_download_stage_concurrency(config)
     extract_concurrency, extract_queue, extract_queue_size = _create_extract_stage(config)
     upload_concurrency = get_upload_stage_concurrency(config)
@@ -1293,8 +1488,8 @@ async def run_pipeline(
     failed_tasks: List[DownloadItem] = []
     failed_lock = asyncio.Lock()
 
-    for item in dl_list:
-        await download_queue.put(item)
+    for progress_token, item in enumerate(dl_list):
+        await download_queue.put(_QueuedDownloadItem(progress_token, item))
     await _put_sentinels(download_queue, download_concurrency)
 
     logger.info(
@@ -1305,6 +1500,7 @@ async def run_pipeline(
         extract_concurrency,
         upload_concurrency,
     )
+    _log_pipeline_progress(progress, "initial")
     logger.debug(
         "PIPELINE | id=%s | queue_sizes | extract_queue=%d | upload_queue=%d",
         pipeline_id,
@@ -1327,6 +1523,8 @@ async def run_pipeline(
                     failed_lock,
                     download_disk_space_gate,
                     session,
+                    extracted_dir_is_temporary,
+                    progress,
                 )
             )
             for worker_id in range(download_concurrency)
@@ -1340,6 +1538,7 @@ async def run_pipeline(
             failed_lock,
             profiler,
             extract_concurrency,
+            progress,
         )
         upload_tasks = [
             asyncio.create_task(
@@ -1350,6 +1549,7 @@ async def run_pipeline(
                     config,
                     failed_tasks,
                     failed_lock,
+                    progress,
                 )
             )
             for worker_id in range(upload_concurrency)
@@ -1358,6 +1558,10 @@ async def run_pipeline(
         all_tasks = download_tasks + extract_tasks + upload_tasks
         worker_monitor = asyncio.create_task(_monitor_worker_failures(all_tasks))
         profile_sampler = asyncio.create_task(_sample_queue_depths(profiler, extract_queue))
+        progress_sampler = asyncio.create_task(
+            _sample_pipeline_progress(progress, _PIPELINE_PROGRESS_SAMPLE_INTERVAL_SEC),
+            name=f"pipeline-progress-{pipeline_id}",
+        )
         try:
             await _await_with_worker_monitor(download_queue.join(), worker_monitor)
             logger.info("PIPELINE | id=%s | stage=download | status=completed", pipeline_id)
@@ -1373,9 +1577,10 @@ async def run_pipeline(
             logger.info("PIPELINE | id=%s | stage=upload | status=completed", pipeline_id)
 
             await asyncio.gather(*all_tasks, worker_monitor, return_exceptions=False)
-        except BaseException:
+        except BaseException as exc:
             profile_sampler.cancel()
-            await asyncio.gather(profile_sampler, return_exceptions=True)
+            progress_sampler.cancel()
+            await asyncio.gather(profile_sampler, progress_sampler, return_exceptions=True)
             for task in all_tasks:
                 task.cancel()
             worker_monitor.cancel()
@@ -1383,10 +1588,13 @@ async def run_pipeline(
             await _cleanup_aborted_extract_stage(extract_queue)
             await _cleanup_queued_artifacts(upload_queue)
             profiler.finish("aborted")
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "aborted"
+            _log_pipeline_progress(progress, status, include_stages=False)
             raise
 
         profile_sampler.cancel()
-        await asyncio.gather(profile_sampler, return_exceptions=True)
+        progress_sampler.cancel()
+        await asyncio.gather(profile_sampler, progress_sampler, return_exceptions=True)
         wall_sec = asyncio.get_running_loop().time() - start_time
         profiler.log_summary()
         profiler.log_performance_report(extract_concurrency, wall_sec)
@@ -1395,6 +1603,7 @@ async def run_pipeline(
         if metrics_path is not None:
             profiler.write_prometheus_textfile(metrics_path, extract_concurrency, wall_sec)
 
+    _log_pipeline_progress(progress, "completed")
     succeeded = total_items - len(failed_tasks)
     logger.info(
         "PIPELINE | status=completed | id=%s | succeeded=%d | failed=%d | total=%d | duration_sec=%.2f",

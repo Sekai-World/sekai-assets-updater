@@ -13,7 +13,7 @@ and does not produce GLB.
 
 ## Requirements
 
-- Python `3.12`
+- Python `3.15`
 - `uv`
 - `ffmpeg`
 - `vgmstream-cli` as an optional HCA decoding fallback
@@ -138,6 +138,16 @@ Filters:
 - `DL_INCLUDE_LIST`
 - `DL_EXCLUDE_LIST`
 - `DL_PRIORITY_LIST`
+
+Set `ENABLE_REGION_EXCLUSIVE_MUSIC = True` to automatically limit non-JP music
+to song IDs absent from JP master data, including those songs' audio versions,
+jackets, and charts. Shared songs are excluded even when their vocal bundles or
+credited singers differ. JP and non-music assets keep their existing filter
+behavior. The automatic scope intersects the include/exclude filters: replace
+per-song includes with `r"^music/"` once, preserving any unrelated include
+patterns. Master-data failures stop the run rather than falling back to all music. See
+[regional music selection](docs/REGIONAL_MUSIC_SELECTION.md) for details and
+verified examples.
 
 Storage:
 

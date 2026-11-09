@@ -18,6 +18,7 @@ from updater.net.plan import (
     DownloadPlan,
     dedupe_download_items,
     get_download_list,
+    get_regional_music_selection_for_config,
 )
 from updater.state import (
     StateNotFoundError,
@@ -124,6 +125,13 @@ async def _load_pending_download_lists(
         return cached_pending_list, []
 
     pending_list = filter_download_items_for_mode(cached_pending_list, mode)
+    regional_music_selection = get_regional_music_selection_for_config(cfg, mode=mode)
+    if regional_music_selection is not None:
+        pending_list = [
+            item
+            for item in pending_list
+            if regional_music_selection.allows_bundle(item[1].get("bundleName") or "")
+        ]
     logger.info(
         "RUN | action=load_pending | count=%d | path=%s",
         len(pending_list),
