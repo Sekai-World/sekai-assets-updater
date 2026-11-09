@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,11 +9,11 @@ from unittest.mock import AsyncMock
 import pytest
 from anyio import Path as AnyioPath
 
-from updater import music_selection, state
+from updater import music_selection, pipeline, state
 from updater.cli import configuration, lifecycle, runner
 from updater.music_selection import RegionalMusicSelection
 from updater.net import plan as net_plan
-from updater.postprocess import dispatch
+from updater.postprocess import charts, dispatch
 from updater.postprocess.incremental_state import load_chart_state
 
 
@@ -156,6 +157,333 @@ def test_download_plan_hard_gates_required_music_after_regex_selection(
     # The regional restriction is a hard gate even for required/automatic music;
     # user regex filters continue to select non-music and exclude normal items.
     assert set(selected.asset_metadata["bundles"]) == set(bundles)
+
+
+def test_force_full_does_not_merge_old_shared_music_pending_into_pipeline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(tmp_path, selection=_selection({101}))
+    shared_song = "music/music_score/202_shared"
+    stale_bundle = "character/old_pending"
+    state.atomic_write_json(
+        config.DL_LIST_CACHE_PATH,
+        [
+            ["https://example.test/old-shared", _bundle(shared_song, "old")],
+            ["https://example.test/stale", _bundle(stale_bundle, "old")],
+        ],
+        state.validate_pending_queue,
+    )
+    bundles = {
+        "music/music_score/101_song": _bundle("music/music_score/101_song"),
+        shared_song: _bundle(shared_song),
+        "character/unit/common": _bundle("character/unit/common"),
+    }
+    pipeline_runs: list[list[tuple[str, dict]]] = []
+
+    async def capture_pipeline(items, *_args, **_kwargs):
+        pipeline_runs.append(list(items))
+        return [item for item in items if item[1]["bundleName"] == "character/unit/common"]
+
+    _install_runner_fakes(monkeypatch, config, bundles, capture_pipeline)
+    asyncio.run(runner.main(force_full_download=True))
+
+    assert len(pipeline_runs) == 1
+    assert {bundle["bundleName"] for _, bundle in pipeline_runs[0]} == {
+        "music/music_score/101_song",
+        "character/unit/common",
+    }
+    assert [
+        item[1]["bundleName"] for item in state.load_pending_queue(config.DL_LIST_CACHE_PATH)
+    ] == ["character/unit/common"]
+
+
+def test_cn_partial_pipeline_failures_commit_only_completed_candidates_and_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = _config(
+        tmp_path,
+        selection=_selection({101}, {"vocal_101"}, {"jacket_101"}),
+        region="CN",
+    )
+    download_failed = "music/music_score/101_cn_song"
+    extract_failed = "music/short/vocal_101"
+    upload_failed = "character/unit/common"
+    succeeded = "music/jacket/jacket_101"
+    shared = "music/music_score/202_shared"
+    bundles = {
+        name: _bundle(name, f"hash-{name}")
+        for name in (download_failed, extract_failed, upload_failed, succeeded, shared)
+    }
+    config.ASSET_REMOTE_STORAGE = [
+        {"type": "normal", "base": "remote:", "program": "fake", "args": []}
+    ]
+
+    fail_once = {
+        ("download", download_failed),
+        ("extract", extract_failed),
+        ("upload", upload_failed),
+    }
+    injected_failures: list[tuple[str, str]] = []
+    download_calls: list[str] = []
+    extract_calls: list[str] = []
+    upload_calls: list[str] = []
+
+    def fail_stage_once(stage: str, bundle_name: str) -> None:
+        failure = (stage, bundle_name)
+        if failure in fail_once:
+            fail_once.remove(failure)
+            injected_failures.append(failure)
+            raise RuntimeError(f"synthetic {stage} failure")
+
+    async def fake_download(url, root, relative, **_kwargs):
+        bundle_name = url.removeprefix("https://example.test/")
+        download_calls.append(bundle_name)
+        fail_stage_once("download", bundle_name)
+        await root.joinpath(relative).write_bytes(bundle_name.encode())
+
+    async def fake_extract(_bundle_path, bundle, output_root, **_kwargs):
+        bundle_name = bundle["bundleName"]
+        extract_calls.append(bundle_name)
+        fail_stage_once("extract", bundle_name)
+        output = output_root / "source.bin"
+        await output.write_bytes(bundle_name.encode())
+        return [output]
+
+    async def fake_upload(files, _root, *_args, **_kwargs):
+        bundle_name = (await files[0].read_bytes()).decode()
+        upload_calls.append(bundle_name)
+        fail_stage_once("upload", bundle_name)
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+    _install_runner_fakes(monkeypatch, config, bundles)
+
+    actual_run_pipeline = lifecycle.run_pipeline
+    pipeline_failures: list[list[tuple[str, dict]]] = []
+
+    async def capture_pipeline_failures(items, *args, **kwargs):
+        failures = await actual_run_pipeline(items, *args, **kwargs)
+        pipeline_failures.append(failures)
+        return failures
+
+    monkeypatch.setattr(lifecycle, "run_pipeline", capture_pipeline_failures)
+
+    asyncio.run(runner.main(force_full_download=True))
+
+    expected_failed_names = {download_failed, extract_failed, upload_failed}
+    assert len(pipeline_failures) == 1
+    assert {
+        (url, bundle["bundleName"], bundle["hash"]) for url, bundle in pipeline_failures[0]
+    } == {(f"https://example.test/{name}", name, f"hash-{name}") for name in expected_failed_names}
+    assert set(injected_failures) == {
+        ("download", download_failed),
+        ("extract", extract_failed),
+        ("upload", upload_failed),
+    }
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert {
+        bundle["bundleName"] for _, bundle in state.load_pending_queue(paths.queue)
+    } == expected_failed_names
+    partial_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert partial_metadata["bundles"][succeeded]["_sekai_assets_updater"] == {
+        "processed_checksum": {"field": "hash", "value": f"hash-{succeeded}"}
+    }
+    for name in expected_failed_names | {shared}:
+        assert "_sekai_assets_updater" not in partial_metadata["bundles"][name]
+
+    first_run_downloads = set(download_calls)
+    assert first_run_downloads == {download_failed, extract_failed, upload_failed, succeeded}
+    assert len(download_calls) == len(first_run_downloads)
+    assert shared not in first_run_downloads
+    first_run_download_count = len(download_calls)
+
+    asyncio.run(runner.main())
+
+    assert len(pipeline_failures) == 2
+    assert pipeline_failures[1] == []
+    retried_downloads = download_calls[first_run_download_count:]
+    assert set(retried_downloads) == expected_failed_names
+    assert len(retried_downloads) == len(expected_failed_names)
+    assert shared not in download_calls
+    assert not paths.queue.exists()
+    assert not paths.journal.exists()
+    committed_metadata = state.load_asset_metadata(paths.asset_metadata)
+    for name in {download_failed, extract_failed, upload_failed, succeeded}:
+        assert committed_metadata["bundles"][name]["_sekai_assets_updater"] == {
+            "processed_checksum": {"field": "hash", "value": f"hash-{name}"}
+        }
+    assert "_sekai_assets_updater" not in committed_metadata["bundles"][shared]
+    assert state.load_game_version(paths.game_version) == _version()
+
+
+@pytest.mark.parametrize(
+    ("prior_markers", "force_full_download", "seed_pending"),
+    [(False, False, True), (True, True, False)],
+    ids=["fresh-candidates-with-pending", "same-checksum-old-markers"],
+)
+def test_partial_chart_failure_reselects_temporary_score_sources_on_retry(
+    tmp_path: Path,
+    monkeypatch,
+    prior_markers: bool,
+    force_full_download: bool,
+    seed_pending: bool,
+) -> None:
+    score_a = "music/music_score/101_a"
+    score_b = "music/music_score/102_b"
+    bundles = {score_a: _bundle(score_a, "checksum-a"), score_b: _bundle(score_b, "checksum-b")}
+    config = _config(tmp_path, selection=_selection({101, 102}), region="CN")
+    config.ENABLE_CHARTS_POSTPROCESS = True
+    mirror_root = tmp_path / "mirror"
+    mirror_score_root = mirror_root / "music" / "music_score"
+    for directory, source in (("101_a", "A"), ("102_b", "B")):
+        score_file = mirror_score_root / directory / "expert.txt"
+        score_file.parent.mkdir(parents=True, exist_ok=True)
+        score_file.write_text(source)
+    config.ASSET_REMOTE_STORAGE = [
+        {"type": "normal", "base": str(mirror_root), "program": "fake", "args": []},
+        {"type": "charts", "base": "charts:", "program": "fake", "args": []},
+    ]
+
+    cached_bundles = {
+        name: _mark_processed(bundle) if prior_markers else dict(bundle)
+        for name, bundle in bundles.items()
+    }
+    cached_metadata = _metadata(cached_bundles)
+    state.atomic_write_json(
+        config.ASSET_BUNDLE_INFO_CACHE_PATH, cached_metadata, state.validate_asset_metadata
+    )
+    state.atomic_write_json(
+        config.GAME_VERSION_JSON_CACHE_PATH, _version(), state.validate_game_version
+    )
+    if seed_pending:
+        state.atomic_write_json(
+            config.DL_LIST_CACHE_PATH,
+            [[f"https://example.test/{name}", bundle] for name, bundle in bundles.items()],
+            state.validate_pending_queue,
+        )
+
+    fail_bundle_b_once = True
+    download_calls: list[str] = []
+    extracted_names: list[str] = []
+    extracted_roots: list[Path] = []
+    rendered_sources: list[str] = []
+    chart_uploads: list[str] = []
+    mirror_fetches: list[Path] = []
+
+    async def fake_download(url, root, relative, **_kwargs):
+        nonlocal fail_bundle_b_once
+        name = url.removeprefix("https://example.test/")
+        download_calls.append(name)
+        if name == score_b and fail_bundle_b_once:
+            fail_bundle_b_once = False
+            raise RuntimeError("synthetic bundle B download failure")
+        await root.joinpath(relative).write_bytes(name.encode())
+
+    async def fake_extract(_bundle_path, bundle, output_root, **_kwargs):
+        name = bundle["bundleName"]
+        extracted_names.append(name)
+        extracted_roots.append(Path(str(output_root)))
+        directory = name.rsplit("/", 1)[1]
+        source = "A" if name == score_a else "B"
+        score_file = output_root / "music" / "music_score" / directory / "expert.txt"
+        await score_file.parent.mkdir(parents=True, exist_ok=True)
+        await score_file.write_text(source)
+        return [score_file]
+
+    async def fake_upload(*_args, **_kwargs):
+        return None
+
+    async def fake_chart_source_fetch(_config, extracted_root, *_args):
+        target_root = Path(extracted_root) / "music" / "music_score"
+        mirror_fetches.append(target_root)
+        for source in mirror_score_root.rglob("*.txt"):
+            target = target_root / source.relative_to(mirror_score_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source.read_bytes())
+
+    async def fake_get_list(_url):
+        return [{"id": 101, "title": "A"}, {"id": 102, "title": "B"}]
+
+    async def fake_render_chart(score_path, chart_path, *_args, **_kwargs):
+        source = Path(score_path).read_text()
+        rendered_sources.append(source)
+        output = Path(chart_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(f"rendered:{source}")
+        output.with_suffix(".png").write_bytes(b"png")
+
+    async def capture_chart_upload(mode, source_dir, _config):
+        assert mode == "charts"
+        chart_uploads.extend(
+            path.read_text() for path in Path(source_dir).rglob("*.svg") if path.is_file()
+        )
+
+    monkeypatch.setattr(pipeline, "download_deobfuscate_bundle", fake_download)
+    monkeypatch.setattr(pipeline, "extract_asset_bundle", fake_extract)
+    monkeypatch.setattr(pipeline, "upload_to_storage", fake_upload)
+    monkeypatch.setattr(dispatch, "fetch_chart_sources_from_storage", fake_chart_source_fetch)
+    monkeypatch.setattr(dispatch, "_upload_specialized_directory", capture_chart_upload)
+    monkeypatch.setattr(charts, "get_list", fake_get_list)
+    monkeypatch.setattr(charts, "render_chart", fake_render_chart)
+    original_temporary_directory = tempfile.TemporaryDirectory
+
+    def temporary_directory_in_test_root(*args, **kwargs):
+        kwargs.setdefault("dir", tmp_path)
+        return original_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile, "TemporaryDirectory", temporary_directory_in_test_root)
+    _install_runner_fakes(monkeypatch, config, bundles)
+
+    asyncio.run(runner.main(force_full_download=force_full_download))
+
+    paths = state.derive_state_paths(
+        config.DL_LIST_CACHE_PATH,
+        config.ASSET_BUNDLE_INFO_CACHE_PATH,
+        config.GAME_VERSION_JSON_CACHE_PATH,
+    )
+    assert [bundle["bundleName"] for _, bundle in state.load_pending_queue(paths.queue)] == [
+        score_b
+    ]
+    partial_metadata = state.load_asset_metadata(paths.asset_metadata)
+    assert all(
+        "_sekai_assets_updater" not in partial_metadata["bundles"][name]
+        for name in (score_a, score_b)
+    )
+    assert set(download_calls) == {score_a, score_b}
+    assert extracted_names == [score_a]
+    assert rendered_sources == []
+    assert mirror_fetches == []
+    assert extracted_roots
+    assert all(not root.exists() for root in extracted_roots)
+
+    first_run_download_count = len(download_calls)
+    asyncio.run(runner.main())
+
+    retry_downloads = download_calls[first_run_download_count:]
+    assert set(retry_downloads) == {score_a, score_b}
+    assert len(retry_downloads) == 2
+    assert set(extracted_names[1:]) == {score_a, score_b}
+    assert set(rendered_sources) == {"A", "B"}
+    assert set(chart_uploads) == {"rendered:A", "rendered:B"}
+    assert mirror_fetches == []
+    assert not paths.queue.exists()
+    assert not paths.journal.exists()
+    committed_metadata = state.load_asset_metadata(paths.asset_metadata)
+    for name in (score_a, score_b):
+        assert committed_metadata["bundles"][name]["_sekai_assets_updater"] == {
+            "processed_checksum": {
+                "field": "hash",
+                "value": bundles[name]["hash"],
+            }
+        }
+    chart_state = load_chart_state(tmp_path / "chart_state.json")
+    assert chart_state is not None
+    assert set(chart_state["scores"]) == {"101_a/expert.txt", "102_b/expert.txt"}
 
 
 def test_old_pending_queue_is_rescreened_without_dropping_non_music_or_regional_vocals(
