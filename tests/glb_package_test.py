@@ -11,6 +11,7 @@ from updater.extract.glb.package import (
     TIMELINE_PLAYABLE_URL,
     PackageArtifact,
     PublicationRefused,
+    _package_payload_problems,
     animation_artifact_url,
     build_composite_manifest,
     build_release_manifest,
@@ -278,6 +279,27 @@ def test_release_manifest_builds_and_validates_with_timeline_summary() -> None:
     assert urls == sorted(urls)  # deterministic order
     # manifest.json itself is never an artifact — it cannot hash itself.
     assert PACKAGE_MANIFEST_URL not in urls
+
+
+def test_payload_validation_preserves_diagnostic_order() -> None:
+    manifest = _manifest()
+    glb = next(artifact for artifact in _artifacts() if artifact.kind == "glb")
+    duplicate = PackageArtifact(url=glb.url, kind="unexpected", payload=glb.payload)
+
+    assert _package_payload_problems(manifest, [*_artifacts(), duplicate]) == [
+        f"duplicate payload artifact URL: {glb.url}",
+        f"{glb.url}: payload kind does not match manifest",
+        f"GLB artifact {glb.url}: unexpected artifact kind",
+    ]
+
+
+def test_manifest_validation_preserves_schema_error_precedence() -> None:
+    manifest = _manifest()
+    manifest["package_id"] = ""
+    manifest["source_bundles"] = {}
+
+    with pytest.raises(ValueError, match="package manifest.package_id must be a non-empty string"):
+        validate_package_manifest(manifest)
 
 
 def test_build_derives_unpublishable_state_from_export_manifest_errors() -> None:

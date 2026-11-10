@@ -215,16 +215,10 @@ def _is_export_manifest_artifact(artifact: PackageArtifact) -> bool:
     )
 
 
-def _package_payload_problems(
-    manifest: Mapping[str, Any],
-    artifacts: Sequence[PackageArtifact],
-    *,
-    expected_timeline_document: Mapping[str, Any] | None = None,
-) -> list[str]:
-    """Verify the payload-backed references required before a package is ready."""
-
-    from updater.extract.glb.animation import validate_animation_artifact
-    from updater.extract.glb.export import _validate_export_manifest
+def _package_payload_indexes(
+    manifest: Mapping[str, Any], artifacts: Sequence[PackageArtifact]
+) -> tuple[list[str], dict[str, PackageArtifact], set[str], dict[str, Any]]:
+    """Collect package diagnostics and indexes used by payload validators."""
 
     problems = _diagnostic_problems(manifest.get("diagnostics", ()), "package")
     artifact_by_url: dict[str, PackageArtifact] = {}
@@ -233,6 +227,7 @@ def _package_payload_problems(
             problems.append(f"duplicate payload artifact URL: {artifact.url}")
         else:
             artifact_by_url[artifact.url] = artifact
+
     source_records = manifest.get("source_bundles", ())
     if not isinstance(source_records, (list, tuple)):
         problems.append("source_bundles must be a list")
@@ -244,6 +239,7 @@ def _package_payload_problems(
         and isinstance(record.get("bundle_name"), str)
         and record.get("bundle_name")
     }
+
     manifest_artifacts = manifest.get("artifacts", ())
     if not isinstance(manifest_artifacts, (list, tuple)):
         problems.append("package manifest artifact records must be a list")
@@ -253,6 +249,15 @@ def _package_payload_problems(
         for record in manifest_artifacts
         if isinstance(record, Mapping) and isinstance(record.get("url"), str)
     }
+    return problems, artifact_by_url, source_bundle_names, records_by_url
+
+
+def _declared_payload_problems(
+    artifacts: Sequence[PackageArtifact], records_by_url: Mapping[str, Any]
+) -> list[str]:
+    """Compare each payload with the manifest record that declares it."""
+
+    problems: list[str] = []
     for artifact in artifacts:
         record = records_by_url.get(artifact.url)
         if record is None:
@@ -267,8 +272,16 @@ def _package_payload_problems(
             )
         if record.get("sha256") != artifact.sha256:
             problems.append(f"{artifact.url}: payload sha256 does not match manifest")
+    return problems
+
+
+def _validate_animation_payloads(
+    artifacts: Sequence[PackageArtifact], validate_animation_artifact: Callable[[Any], Any]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Parse animation payloads and validate their embedded identities."""
 
     animation_documents: dict[str, dict[str, Any]] = {}
+    problems: list[str] = []
     for artifact in artifacts:
         if artifact.kind != ANIMATION_ARTIFACT_KIND and not artifact.url.startswith("animation/"):
             continue
@@ -290,7 +303,94 @@ def _package_payload_problems(
                 legacy_warning_codes=frozenset({DIAG_ANIMATION_UNSUPPORTED_BINDING}),
             )
         )
+    return animation_documents, problems
 
+
+def _append_timeline_source_bundle_problems(
+    timeline_document: Mapping[str, Any], source_bundle_names: set[str], problems: list[str]
+) -> None:
+    for track in timeline_document.get("tracks", ()):
+        if not isinstance(track, Mapping):
+            continue
+        for clip in track.get("clips", ()):
+            if not isinstance(clip, Mapping):
+                continue
+            asset = clip.get("asset")
+            if (
+                isinstance(asset, Mapping)
+                and asset.get("resolved") is True
+                and (
+                    not isinstance(asset.get("bundle_name"), str)
+                    or asset.get("bundle_name") not in source_bundle_names
+                )
+            ):
+                problems.append(
+                    f"clip asset bundle {asset.get('bundle_name')!r} is absent from source_bundles"
+                )
+            for reference in clip.get("resolved_references", ()):
+                if (
+                    isinstance(reference, Mapping)
+                    and reference.get("resolved") is True
+                    and (
+                        not isinstance(reference.get("bundle_name"), str)
+                        or reference.get("bundle_name") not in source_bundle_names
+                    )
+                ):
+                    problems.append(
+                        f"resolved reference bundle {reference.get('bundle_name')!r} "
+                        "is absent from source_bundles"
+                    )
+    for reference in timeline_document.get("animation_references", ()):
+        if isinstance(reference, Mapping) and (
+            not isinstance(reference.get("bundle_name"), str)
+            or reference.get("bundle_name") not in source_bundle_names
+        ):
+            problems.append(
+                f"animation reference bundle {reference.get('bundle_name')!r} "
+                "is absent from source_bundles"
+            )
+
+
+def _append_animation_identity_problems(
+    timeline_document: Mapping[str, Any],
+    artifact_by_url: Mapping[str, PackageArtifact],
+    animation_documents: Mapping[str, Mapping[str, Any]],
+    problems: list[str],
+) -> None:
+    for reference in timeline_document.get("animation_references", ()):
+        if not isinstance(reference, Mapping):
+            continue  # timeline_reference_problems records the malformed entry.
+        url = animation_artifact_url(reference)
+        animation_artifact = artifact_by_url.get(url)
+        if animation_artifact is None:
+            continue  # validate_package_references already reports the missing URL.
+        animation_document = animation_documents.get(url)
+        if animation_document is None:
+            continue
+        identity = (
+            animation_document.get("bundle_name"),
+            animation_document.get("file_index"),
+            animation_document.get("path_id"),
+        )
+        expected_identity = (
+            reference.get("bundle_name"),
+            reference.get("file_index"),
+            reference.get("path_id"),
+        )
+        if identity != expected_identity:
+            problems.append(f"animation reference {url}: artifact identity mismatch")
+
+
+def _validate_timeline_payload(
+    manifest: Mapping[str, Any],
+    artifact_by_url: Mapping[str, PackageArtifact],
+    animation_documents: Mapping[str, Mapping[str, Any]],
+    source_bundle_names: set[str],
+    expected_timeline_document: Mapping[str, Any] | None,
+) -> list[str]:
+    """Validate the playable timeline and its package-level references."""
+
+    problems: list[str] = []
     timeline_artifact = artifact_by_url.get(TIMELINE_PLAYABLE_URL)
     timeline_document: dict[str, Any] | None = None
     if timeline_artifact is None:
@@ -328,72 +428,239 @@ def _package_payload_problems(
                     timeline_document.get("diagnostics", ()), TIMELINE_PLAYABLE_URL
                 )
             )
+            _append_timeline_source_bundle_problems(
+                timeline_document, source_bundle_names, problems
+            )
+            _append_animation_identity_problems(
+                timeline_document, artifact_by_url, animation_documents, problems
+            )
+    return problems
 
-            for track in timeline_document.get("tracks", ()):
-                if not isinstance(track, Mapping):
-                    continue
-                for clip in track.get("clips", ()):
-                    if not isinstance(clip, Mapping):
-                        continue
-                    asset = clip.get("asset")
-                    if (
-                        isinstance(asset, Mapping)
-                        and asset.get("resolved") is True
-                        and (
-                            not isinstance(asset.get("bundle_name"), str)
-                            or asset.get("bundle_name") not in source_bundle_names
-                        )
-                    ):
-                        problems.append(
-                            f"clip asset bundle {asset.get('bundle_name')!r} "
-                            "is absent from source_bundles"
-                        )
-                    for reference in clip.get("resolved_references", ()):
-                        if (
-                            isinstance(reference, Mapping)
-                            and reference.get("resolved") is True
-                            and (
-                                not isinstance(reference.get("bundle_name"), str)
-                                or reference.get("bundle_name") not in source_bundle_names
-                            )
-                        ):
-                            problems.append(
-                                f"resolved reference bundle {reference.get('bundle_name')!r} "
-                                "is absent from source_bundles"
-                            )
-            for reference in timeline_document.get("animation_references", ()):
-                if isinstance(reference, Mapping) and (
-                    not isinstance(reference.get("bundle_name"), str)
-                    or reference.get("bundle_name") not in source_bundle_names
-                ):
-                    problems.append(
-                        f"animation reference bundle {reference.get('bundle_name')!r} "
-                        "is absent from source_bundles"
-                    )
 
-            for reference in timeline_document.get("animation_references", ()):
-                if not isinstance(reference, Mapping):
-                    continue  # timeline_reference_problems records the malformed entry.
-                url = animation_artifact_url(reference)
-                animation_artifact = artifact_by_url.get(url)
-                if animation_artifact is None:
-                    continue  # validate_package_references already reports the missing URL.
-                animation_document = animation_documents.get(url)
-                if animation_document is None:
-                    continue
-                identity = (
-                    animation_document.get("bundle_name"),
-                    animation_document.get("file_index"),
-                    animation_document.get("path_id"),
-                )
-                expected_identity = (
-                    reference.get("bundle_name"),
-                    reference.get("file_index"),
-                    reference.get("path_id"),
-                )
-                if identity != expected_identity:
-                    problems.append(f"animation reference {url}: artifact identity mismatch")
+def _validate_export_finding_counts(
+    root_id: str,
+    findings: Mapping[str, Any],
+    findings_by_severity: Mapping[str, Any],
+    problems: list[str],
+) -> None:
+    for code, count in findings.items():
+        severity_counts = findings_by_severity.get(code)
+        if (
+            not isinstance(code, str)
+            or type(count) is not int
+            or count < 0
+            or not isinstance(severity_counts, Mapping)
+        ):
+            problems.append(f"GLB root {root_id}: invalid finding count for {code}")
+            continue
+        total = 0
+        for severity, severity_count in severity_counts.items():
+            if severity not in SEVERITIES or type(severity_count) is not int or severity_count < 0:
+                problems.append(f"GLB root {root_id}: invalid finding severity count for {code}")
+                continue
+            total += severity_count
+            if severity == "error" and severity_count:
+                problems.append(f"GLB root {root_id}: error finding {code} present")
+        if total != count:
+            problems.append(f"GLB root {root_id}: finding severity totals disagree for {code}")
+    for code in set(findings_by_severity) - set(findings):
+        problems.append(f"GLB root {root_id}: severity summary has undeclared finding {code}")
 
+
+def _validate_export_report_summary(root_id: str, report_summary: Any, problems: list[str]) -> None:
+    if not isinstance(report_summary, Mapping) or report_summary.get("publishable") is not True:
+        problems.append(f"GLB root {root_id}: export report is not publishable")
+    report_roots = report_summary.get("roots") if isinstance(report_summary, Mapping) else None
+    if (
+        not isinstance(report_roots, list)
+        or any(not isinstance(item, str) or not item for item in report_roots)
+        or root_id not in report_roots
+    ):
+        problems.append(f"GLB root {root_id}: export report does not identify this root")
+    findings = (
+        report_summary.get("findings_by_code") if isinstance(report_summary, Mapping) else None
+    )
+    findings_by_severity = (
+        report_summary.get("findings_by_severity") if isinstance(report_summary, Mapping) else None
+    )
+    if not isinstance(findings, Mapping) or not isinstance(findings_by_severity, Mapping):
+        problems.append(f"GLB root {root_id}: export report findings are invalid")
+    else:
+        _validate_export_finding_counts(root_id, findings, findings_by_severity, problems)
+
+
+def _validate_export_manifest_root_identity(
+    root_id: str,
+    export_roots: Any,
+    bundle_name: Any,
+    file_index: Any,
+    path_id: Any,
+    problems: list[str],
+) -> None:
+    if not isinstance(export_roots, list) or len(export_roots) != 1:
+        problems.append(f"GLB root {root_id}: export manifest must identify exactly one root")
+        return
+    export_root = export_roots[0]
+    if (
+        not isinstance(export_root, Mapping)
+        or not isinstance(export_root.get("bundle_name"), str)
+        or not export_root.get("bundle_name")
+        or type(export_root.get("file_index")) is not int
+        or type(export_root.get("path_id")) is not int
+    ):
+        problems.append(f"GLB root {root_id}: export manifest root identity is incomplete")
+    elif (
+        export_root["bundle_name"],
+        export_root["file_index"],
+        export_root["path_id"],
+    ) != (bundle_name, file_index, path_id):
+        problems.append(f"GLB root {root_id}: export manifest root identity mismatch")
+
+
+def _validate_export_manifest_payload(
+    root_id: str,
+    export_artifact: PackageArtifact,
+    glb_artifact: PackageArtifact,
+    manifest: Mapping[str, Any],
+    bundle_name: Any,
+    file_index: Any,
+    path_id: Any,
+    validate_export_manifest: Callable[[Any], Any],
+    problems: list[str],
+) -> None:
+    try:
+        export_manifest = validate_export_manifest(json.loads(export_artifact.payload))
+    except Exception as exc:  # NOSONAR - invalid export metadata must fail closed
+        problems.append(f"GLB root {root_id}: invalid export manifest: {exc}")
+        return
+
+    if export_manifest["package_id"] != manifest["package_id"]:
+        problems.append(f"GLB root {root_id}: export package_id mismatch")
+    _validate_export_manifest_root_identity(
+        root_id, export_manifest.get("roots"), bundle_name, file_index, path_id, problems
+    )
+    if export_manifest["content_hash"] != content_hash(glb_artifact.payload):
+        problems.append(f"GLB root {root_id}: export manifest GLB hash mismatch")
+    if export_manifest["glb_byte_length"] != len(glb_artifact.payload):
+        problems.append(f"GLB root {root_id}: export manifest GLB length mismatch")
+    _validate_export_report_summary(root_id, export_manifest.get("report_summary"), problems)
+    problems.extend(
+        _diagnostic_problems(
+            export_manifest.get("diagnostics", ()), f"GLB root {root_id} export manifest"
+        )
+    )
+
+
+def _validate_glb_root_payloads(
+    root_id: str,
+    glb_url: Any,
+    export_manifest_url: Any,
+    manifest: Mapping[str, Any],
+    artifact_by_url: Mapping[str, PackageArtifact],
+    bundle_name: Any,
+    file_index: Any,
+    path_id: Any,
+    validate_export_manifest: Callable[[Any], Any],
+    problems: list[str],
+) -> None:
+    glb_artifact = artifact_by_url.get(glb_url) if isinstance(glb_url, str) else None
+    export_artifact = (
+        artifact_by_url.get(export_manifest_url) if isinstance(export_manifest_url, str) else None
+    )
+    if glb_artifact is None:
+        problems.append(f"GLB root {root_id}: missing GLB artifact {glb_url}")
+        return
+    if glb_artifact.kind != GLB_ARTIFACT_KIND:
+        problems.append(f"GLB root {root_id}: unexpected GLB artifact kind")
+    try:
+        validate_glb_bytes(glb_artifact.payload)
+    except Exception as exc:  # NOSONAR - invalid GLB bytes must fail package readiness
+        problems.append(f"GLB root {root_id}: invalid GLB payload: {exc}")
+    if export_artifact is None:
+        problems.append(f"GLB root {root_id}: missing export manifest {export_manifest_url}")
+        return
+    if export_artifact.kind != GLB_EXPORT_MANIFEST_KIND:
+        problems.append(f"GLB root {root_id}: unexpected export manifest artifact kind")
+    _validate_export_manifest_payload(
+        root_id,
+        export_artifact,
+        glb_artifact,
+        manifest,
+        bundle_name,
+        file_index,
+        path_id,
+        validate_export_manifest,
+        problems,
+    )
+
+
+def _validate_glb_root_record(
+    root: Any,
+    manifest: Mapping[str, Any],
+    artifact_by_url: Mapping[str, PackageArtifact],
+    source_bundle_names: set[str],
+    glb_reference_counts: Counter[str],
+    export_reference_counts: Counter[str],
+    root_ids: set[str],
+    validate_export_manifest: Callable[[Any], Any],
+    problems: list[str],
+) -> None:
+    if not isinstance(root, Mapping):
+        problems.append(f"invalid GLB root record: {root!r}")
+        return
+    root_id = root.get("root_id")
+    if not isinstance(root_id, str) or not root_id:
+        problems.append(f"GLB root has invalid root_id: {root!r}")
+        root_id = "<unknown>"
+    elif root_id in root_ids:
+        problems.append(f"duplicate GLB root_id: {root_id}")
+    root_ids.add(root_id)
+
+    glb_url = root.get("glb_url")
+    export_manifest_url = root.get("export_manifest_url")
+    if isinstance(glb_url, str):
+        glb_reference_counts[glb_url] += 1
+    else:
+        problems.append(f"GLB root {root_id}: invalid glb_url")
+    if isinstance(export_manifest_url, str):
+        export_reference_counts[export_manifest_url] += 1
+    else:
+        problems.append(f"GLB root {root_id}: invalid export_manifest_url")
+
+    bundle_name = root.get("bundle_name")
+    file_index = root.get("file_index")
+    path_id = root.get("path_id")
+    if (
+        not isinstance(bundle_name, str)
+        or not bundle_name
+        or type(file_index) is not int
+        or type(path_id) is not int
+    ):
+        problems.append(f"GLB root {root_id}: incomplete root identity")
+    if isinstance(bundle_name, str) and bundle_name not in source_bundle_names:
+        problems.append(f"GLB root {root_id}: root bundle is absent from source_bundles")
+
+    _validate_glb_root_payloads(
+        root_id,
+        glb_url,
+        export_manifest_url,
+        manifest,
+        artifact_by_url,
+        bundle_name,
+        file_index,
+        path_id,
+        validate_export_manifest,
+        problems,
+    )
+
+
+def _validate_glb_roots(
+    manifest: Mapping[str, Any],
+    artifact_by_url: Mapping[str, PackageArtifact],
+    source_bundle_names: set[str],
+    validate_export_manifest: Callable[[Any], Any],
+) -> tuple[list[str], Counter[str], Counter[str]]:
+    problems: list[str] = []
     roots = manifest.get("glb_roots", ())
     if not isinstance(roots, (list, tuple)):
         problems.append("GLB root records must be a list")
@@ -402,152 +669,26 @@ def _package_payload_problems(
     export_reference_counts: Counter[str] = Counter()
     root_ids: set[str] = set()
     for root in roots:
-        if not isinstance(root, Mapping):
-            problems.append(f"invalid GLB root record: {root!r}")
-            continue
-        root_id = root.get("root_id")
-        if not isinstance(root_id, str) or not root_id:
-            problems.append(f"GLB root has invalid root_id: {root!r}")
-            root_id = "<unknown>"
-        elif root_id in root_ids:
-            problems.append(f"duplicate GLB root_id: {root_id}")
-        root_ids.add(root_id)
-
-        glb_url = root.get("glb_url")
-        export_manifest_url = root.get("export_manifest_url")
-        if isinstance(glb_url, str):
-            glb_reference_counts[glb_url] += 1
-        else:
-            problems.append(f"GLB root {root_id}: invalid glb_url")
-        if isinstance(export_manifest_url, str):
-            export_reference_counts[export_manifest_url] += 1
-        else:
-            problems.append(f"GLB root {root_id}: invalid export_manifest_url")
-
-        bundle_name = root.get("bundle_name")
-        file_index = root.get("file_index")
-        path_id = root.get("path_id")
-        if (
-            not isinstance(bundle_name, str)
-            or not bundle_name
-            or type(file_index) is not int
-            or type(path_id) is not int
-        ):
-            problems.append(f"GLB root {root_id}: incomplete root identity")
-        if isinstance(bundle_name, str) and bundle_name not in source_bundle_names:
-            problems.append(f"GLB root {root_id}: root bundle is absent from source_bundles")
-
-        glb_artifact = artifact_by_url.get(glb_url) if isinstance(glb_url, str) else None
-        export_artifact = (
-            artifact_by_url.get(export_manifest_url)
-            if isinstance(export_manifest_url, str)
-            else None
+        _validate_glb_root_record(
+            root,
+            manifest,
+            artifact_by_url,
+            source_bundle_names,
+            glb_reference_counts,
+            export_reference_counts,
+            root_ids,
+            validate_export_manifest,
+            problems,
         )
-        if glb_artifact is None:
-            problems.append(f"GLB root {root_id}: missing GLB artifact {glb_url}")
-            continue
-        if glb_artifact.kind != GLB_ARTIFACT_KIND:
-            problems.append(f"GLB root {root_id}: unexpected GLB artifact kind")
-        try:
-            validate_glb_bytes(glb_artifact.payload)
-        except Exception as exc:  # NOSONAR - invalid GLB bytes must fail package readiness
-            problems.append(f"GLB root {root_id}: invalid GLB payload: {exc}")
-        if export_artifact is None:
-            problems.append(f"GLB root {root_id}: missing export manifest {export_manifest_url}")
-            continue
-        if export_artifact.kind != GLB_EXPORT_MANIFEST_KIND:
-            problems.append(f"GLB root {root_id}: unexpected export manifest artifact kind")
-        try:
-            export_manifest = _validate_export_manifest(json.loads(export_artifact.payload))
-        except Exception as exc:  # NOSONAR - invalid export metadata must fail closed
-            problems.append(f"GLB root {root_id}: invalid export manifest: {exc}")
-            continue
+    return problems, glb_reference_counts, export_reference_counts
 
-        if export_manifest["package_id"] != manifest["package_id"]:
-            problems.append(f"GLB root {root_id}: export package_id mismatch")
-        export_roots = export_manifest.get("roots")
-        if not isinstance(export_roots, list) or len(export_roots) != 1:
-            problems.append(f"GLB root {root_id}: export manifest must identify exactly one root")
-        else:
-            export_root = export_roots[0]
-            if (
-                not isinstance(export_root, Mapping)
-                or not isinstance(export_root.get("bundle_name"), str)
-                or not export_root.get("bundle_name")
-                or type(export_root.get("file_index")) is not int
-                or type(export_root.get("path_id")) is not int
-            ):
-                problems.append(f"GLB root {root_id}: export manifest root identity is incomplete")
-            elif (
-                export_root["bundle_name"],
-                export_root["file_index"],
-                export_root["path_id"],
-            ) != (bundle_name, file_index, path_id):
-                problems.append(f"GLB root {root_id}: export manifest root identity mismatch")
-        if export_manifest["content_hash"] != content_hash(glb_artifact.payload):
-            problems.append(f"GLB root {root_id}: export manifest GLB hash mismatch")
-        if export_manifest["glb_byte_length"] != len(glb_artifact.payload):
-            problems.append(f"GLB root {root_id}: export manifest GLB length mismatch")
 
-        report_summary = export_manifest.get("report_summary")
-        if not isinstance(report_summary, Mapping) or report_summary.get("publishable") is not True:
-            problems.append(f"GLB root {root_id}: export report is not publishable")
-        report_roots = report_summary.get("roots") if isinstance(report_summary, Mapping) else None
-        if (
-            not isinstance(report_roots, list)
-            or any(not isinstance(item, str) or not item for item in report_roots)
-            or root_id not in report_roots
-        ):
-            problems.append(f"GLB root {root_id}: export report does not identify this root")
-        findings = (
-            report_summary.get("findings_by_code") if isinstance(report_summary, Mapping) else None
-        )
-        findings_by_severity = (
-            report_summary.get("findings_by_severity")
-            if isinstance(report_summary, Mapping)
-            else None
-        )
-        if not isinstance(findings, Mapping) or not isinstance(findings_by_severity, Mapping):
-            problems.append(f"GLB root {root_id}: export report findings are invalid")
-        else:
-            for code, count in findings.items():
-                severity_counts = findings_by_severity.get(code)
-                if (
-                    not isinstance(code, str)
-                    or type(count) is not int
-                    or count < 0
-                    or not isinstance(severity_counts, Mapping)
-                ):
-                    problems.append(f"GLB root {root_id}: invalid finding count for {code}")
-                    continue
-                total = 0
-                for severity, severity_count in severity_counts.items():
-                    if (
-                        severity not in SEVERITIES
-                        or type(severity_count) is not int
-                        or severity_count < 0
-                    ):
-                        problems.append(
-                            f"GLB root {root_id}: invalid finding severity count for {code}"
-                        )
-                        continue
-                    total += severity_count
-                    if severity == "error" and severity_count:
-                        problems.append(f"GLB root {root_id}: error finding {code} present")
-                if total != count:
-                    problems.append(
-                        f"GLB root {root_id}: finding severity totals disagree for {code}"
-                    )
-            for code in set(findings_by_severity) - set(findings):
-                problems.append(
-                    f"GLB root {root_id}: severity summary has undeclared finding {code}"
-                )
-        problems.extend(
-            _diagnostic_problems(
-                export_manifest.get("diagnostics", ()), f"GLB root {root_id} export manifest"
-            )
-        )
-
+def _validate_payload_artifact_references(
+    artifacts: Sequence[PackageArtifact],
+    glb_reference_counts: Counter[str],
+    export_reference_counts: Counter[str],
+) -> list[str]:
+    problems: list[str] = []
     for artifact in artifacts:
         if _is_glb_artifact(artifact):
             if artifact.kind != GLB_ARTIFACT_KIND:
@@ -565,7 +706,48 @@ def _package_payload_problems(
     for url, count in export_reference_counts.items():
         if count != 1:
             problems.append(f"export manifest URL {url} is referenced {count} times")
+    return problems
 
+
+def _package_payload_problems(
+    manifest: Mapping[str, Any],
+    artifacts: Sequence[PackageArtifact],
+    *,
+    expected_timeline_document: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Verify payload references in declaration, timeline, animation, and GLB domains."""
+
+    from updater.extract.glb.animation import validate_animation_artifact
+    from updater.extract.glb.export import _validate_export_manifest
+
+    problems, artifact_by_url, source_bundle_names, records_by_url = _package_payload_indexes(
+        manifest, artifacts
+    )
+    problems.extend(_declared_payload_problems(artifacts, records_by_url))
+
+    animation_documents, animation_problems = _validate_animation_payloads(
+        artifacts, validate_animation_artifact
+    )
+    problems.extend(animation_problems)
+    problems.extend(
+        _validate_timeline_payload(
+            manifest,
+            artifact_by_url,
+            animation_documents,
+            source_bundle_names,
+            expected_timeline_document,
+        )
+    )
+
+    root_problems, glb_reference_counts, export_reference_counts = _validate_glb_roots(
+        manifest, artifact_by_url, source_bundle_names, _validate_export_manifest
+    )
+    problems.extend(root_problems)
+    problems.extend(
+        _validate_payload_artifact_references(
+            artifacts, glb_reference_counts, export_reference_counts
+        )
+    )
     return list(dict.fromkeys(problems))
 
 
@@ -648,9 +830,7 @@ def build_release_manifest(
     return validate_package_manifest(manifest)
 
 
-def validate_package_manifest(value: Any) -> dict[str, Any]:
-    """Structurally validate one package manifest document."""
-
+def _validate_package_manifest_header(value: Any) -> set[str]:
     if not isinstance(value, dict):
         raise ValueError("package manifest must be an object")
     if set(value) != PACKAGE_MANIFEST_FIELDS:
@@ -674,15 +854,22 @@ def validate_package_manifest(value: Any) -> dict[str, Any]:
         ):
             raise ValueError(f"invalid package source bundle record: {source!r}")
         source_bundle_names.add(source["bundle_name"])
+    return source_bundle_names
+
+
+def _validate_package_publishability(value: Mapping[str, Any]) -> None:
     if not isinstance(value["publishable"], bool):
         raise ValueError("package manifest.publishable must be a boolean")
     reasons = value["incomplete_reasons"]
-    if not isinstance(reasons, list) or not all(isinstance(r, str) for r in reasons):
+    if not isinstance(reasons, list) or not all(isinstance(reason, str) for reason in reasons):
         raise ValueError("package manifest.incomplete_reasons must be string list")
     if not value["publishable"] and not reasons:
         raise ValueError("unpublishable packages must record incomplete_reasons")
     if value["publishable"] and reasons:
         raise ValueError("publishable packages must not record incomplete_reasons")
+
+
+def _validate_publishable_diagnostics(value: Mapping[str, Any]) -> None:
     diagnostics = value["diagnostics"]
     if not isinstance(diagnostics, list):
         raise ValueError("package manifest.diagnostics must be a list")
@@ -696,14 +883,20 @@ def validate_package_manifest(value: Any) -> dict[str, Any]:
                 )
             if diagnostic["severity"] == "error":
                 raise ValueError("publishable package must not contain error diagnostics")
-    _validate_artifact_records(value["artifacts"])
-    artifacts_by_url = {record["url"]: record for record in value["artifacts"]}
+
+
+def _validate_publishable_timeline_artifact(
+    value: Mapping[str, Any], artifacts_by_url: Mapping[str, Mapping[str, Any]]
+) -> None:
     if value["publishable"]:
         timeline_artifact = artifacts_by_url.get(TIMELINE_PLAYABLE_URL)
         if timeline_artifact is None:
             raise ValueError(f"publishable package is missing {TIMELINE_PLAYABLE_URL}")
         if timeline_artifact["kind"] != TIMELINE_ARTIFACT_KIND:
             raise ValueError(f"{TIMELINE_PLAYABLE_URL} has an unexpected artifact kind")
+
+
+def _validate_package_timeline_section(value: Mapping[str, Any]) -> None:
     timeline = value["timeline"]
     if not isinstance(timeline, dict) or set(timeline) != TIMELINE_SECTION_FIELDS:
         raise ValueError(
@@ -711,6 +904,13 @@ def validate_package_manifest(value: Any) -> dict[str, Any]:
         )
     if timeline["url"] != TIMELINE_PLAYABLE_URL:
         raise ValueError(f"timeline section must point at {TIMELINE_PLAYABLE_URL}")
+
+
+def _validate_package_glb_roots(
+    value: Mapping[str, Any],
+    artifacts_by_url: Mapping[str, Mapping[str, Any]],
+    source_bundle_names: set[str],
+) -> tuple[Counter[str], Counter[str]]:
     if not isinstance(value["glb_roots"], list):
         raise ValueError("package manifest.glb_roots must be a list")
     glb_references: Counter[str] = Counter()
@@ -752,30 +952,51 @@ def validate_package_manifest(value: Any) -> dict[str, Any]:
                 raise ValueError(
                     f"GLB root {record['root_id']} bundle is absent from source_bundles"
                 )
-    if value["publishable"]:
-        for artifact in value["artifacts"]:
-            is_glb = artifact["kind"] == GLB_ARTIFACT_KIND or artifact["url"].lower().endswith(
-                ".glb"
+    return glb_references, export_references
+
+
+def _validate_publishable_glb_artifact_references(
+    value: Mapping[str, Any],
+    glb_references: Counter[str],
+    export_references: Counter[str],
+) -> None:
+    if not value["publishable"]:
+        return
+    for artifact in value["artifacts"]:
+        is_glb = artifact["kind"] == GLB_ARTIFACT_KIND or artifact["url"].lower().endswith(".glb")
+        is_export_manifest = artifact["kind"] == GLB_EXPORT_MANIFEST_KIND or (
+            artifact["url"].startswith("export_manifests/")
+            and artifact["url"].lower().endswith(".json")
+        )
+        if is_glb and (
+            artifact["kind"] != GLB_ARTIFACT_KIND or glb_references[artifact["url"]] != 1
+        ):
+            raise ValueError(
+                f"publishable package has unreferenced or mis-typed GLB artifact {artifact['url']}"
             )
-            is_export_manifest = artifact["kind"] == GLB_EXPORT_MANIFEST_KIND or (
-                artifact["url"].startswith("export_manifests/")
-                and artifact["url"].lower().endswith(".json")
+        if is_export_manifest and (
+            artifact["kind"] != GLB_EXPORT_MANIFEST_KIND or export_references[artifact["url"]] != 1
+        ):
+            raise ValueError(
+                f"publishable package has unreferenced or mis-typed export manifest "
+                f"{artifact['url']}"
             )
-            if is_glb and (
-                artifact["kind"] != GLB_ARTIFACT_KIND or glb_references[artifact["url"]] != 1
-            ):
-                raise ValueError(
-                    f"publishable package has unreferenced or mis-typed GLB artifact "
-                    f"{artifact['url']}"
-                )
-            if is_export_manifest and (
-                artifact["kind"] != GLB_EXPORT_MANIFEST_KIND
-                or export_references[artifact["url"]] != 1
-            ):
-                raise ValueError(
-                    f"publishable package has unreferenced or mis-typed export manifest "
-                    f"{artifact['url']}"
-                )
+
+
+def validate_package_manifest(value: Any) -> dict[str, Any]:
+    """Structurally validate one package manifest document."""
+
+    source_bundle_names = _validate_package_manifest_header(value)
+    _validate_package_publishability(value)
+    _validate_publishable_diagnostics(value)
+    _validate_artifact_records(value["artifacts"])
+    artifacts_by_url = {record["url"]: record for record in value["artifacts"]}
+    _validate_publishable_timeline_artifact(value, artifacts_by_url)
+    _validate_package_timeline_section(value)
+    glb_references, export_references = _validate_package_glb_roots(
+        value, artifacts_by_url, source_bundle_names
+    )
+    _validate_publishable_glb_artifact_references(value, glb_references, export_references)
     return value
 
 

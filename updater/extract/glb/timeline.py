@@ -296,7 +296,6 @@ def _clip_record(
     table: CollectionFileTable,
     clip_timing: Mapping[str, Any],
     track: UnityRsObject,
-    track_class: str,
     script_classes: Mapping[tuple[int, int], str],
 ) -> dict[str, Any]:
     source_file_index = track.file_index
@@ -370,7 +369,7 @@ def _track_record(
 ) -> dict[str, Any]:
     supported = track_class in SUPPORTED_TRACK_CLASSES
     clips = [
-        _clip_record(environment, table, clip, track_object, track_class, script_classes)
+        _clip_record(environment, table, clip, track_object, script_classes)
         for clip in track_data.get("m_Clips") or ()
         if isinstance(clip, Mapping)
     ]
@@ -384,20 +383,13 @@ def _track_record(
     }
 
 
-def build_timeline_document(
+def _resolve_timeline_tracks(
     environment: UnityRsEnvironment,
     table: CollectionFileTable,
-    package_id: str,
-    container_path: str,
-) -> dict[str, Any]:
-    """Resolve one ``.playable`` root into a playable document."""
-
-    root = environment.container.get(container_path)
-    if root is None:
-        raise ValueError(f"{DIAG_PLAYABLE_MISSING}: no container entry {container_path!r}")
-    timeline_data = root.read_typetree()
-    script_classes = _script_classes(environment)
-
+    root: UnityRsObject,
+    timeline_data: Mapping[str, Any],
+    script_classes: Mapping[tuple[int, int], str],
+) -> tuple[list[dict[str, Any]], list[TimelineDiagnostic]]:
     diagnostics: list[TimelineDiagnostic] = []
     tracks: list[dict[str, Any]] = []
     visited_tracks: set[tuple[int, int]] = set()
@@ -417,6 +409,12 @@ def build_timeline_document(
         )
     tracks.sort(key=lambda record: (record["file_index"], record["path_id"]))
 
+    diagnostics.extend(_clip_asset_diagnostics(tracks))
+    return tracks, diagnostics
+
+
+def _clip_asset_diagnostics(tracks: list[dict[str, Any]]) -> list[TimelineDiagnostic]:
+    diagnostics: list[TimelineDiagnostic] = []
     for track in tracks:
         for clip in track["clips"]:
             asset = clip.get("asset")
@@ -438,7 +436,13 @@ def build_timeline_document(
                         severity="error",
                     )
                 )
+    return diagnostics
 
+
+def _animation_references(
+    environment: UnityRsEnvironment,
+    tracks: list[dict[str, Any]],
+) -> dict[tuple[str, int, int], dict[str, Any]]:
     animation_references: dict[tuple[str, int, int], dict[str, Any]] = {}
     for track in tracks:
         for clip in track["clips"]:
@@ -471,7 +475,10 @@ def build_timeline_document(
     for reference in animation_references.values():
         reference["source_track_path_ids"].sort()
         reference["source_tracks"].sort(key=lambda item: (item["file_index"], item["path_id"]))
+    return animation_references
 
+
+def _timeline_characters(tracks: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     characters: dict[int, dict[str, Any]] = {}
     for track in tracks:
         for clip in track["clips"]:
@@ -489,12 +496,37 @@ def build_timeline_document(
                 source_list = characters[character_id]["source_track_path_ids"]
                 if track["path_id"] not in source_list:
                     source_list.append(track["path_id"])
+    return characters
 
+
+def _timeline_duration(tracks: list[dict[str, Any]]) -> float:
     duration = 0.0
     for track in tracks:
         for clip in track["clips"]:
             if clip["end"] > duration:
                 duration = clip["end"]
+    return duration
+
+
+def build_timeline_document(
+    environment: UnityRsEnvironment,
+    table: CollectionFileTable,
+    package_id: str,
+    container_path: str,
+) -> dict[str, Any]:
+    """Resolve one ``.playable`` root into a playable document."""
+
+    root = environment.container.get(container_path)
+    if root is None:
+        raise ValueError(f"{DIAG_PLAYABLE_MISSING}: no container entry {container_path!r}")
+    timeline_data = root.read_typetree()
+    script_classes = _script_classes(environment)
+    tracks, diagnostics = _resolve_timeline_tracks(
+        environment, table, root, timeline_data, script_classes
+    )
+    animation_references = _animation_references(environment, tracks)
+    characters = _timeline_characters(tracks)
+    duration = _timeline_duration(tracks)
     fixed_duration = timeline_data.get("m_FixedDuration")
     if not isinstance(fixed_duration, (int, float)):
         fixed_duration = None
@@ -695,16 +727,7 @@ def load_timeline_document(path) -> dict[str, Any] | None:
         return None
 
 
-def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
-    """Referential problems among the document's own records.
-
-    Every animation reference must be a complete stable identity
-    (bundle name, file index, path ID) with at least one source track, and
-    track identities must be unique — structural checks the offline package
-    validator can call without knowing the filesystem.
-    """
-
-    problems: list[str] = []
+def _timeline_diagnostic_problems(document: Mapping[str, Any], problems: list[str]) -> None:
     diagnostics = document.get("diagnostics", ())
     if not isinstance(diagnostics, (list, tuple)):
         problems.append("invalid timeline diagnostics list")
@@ -729,6 +752,10 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
             elif severity not in ("info", "warning"):
                 problems.append(f"timeline diagnostic has invalid severity: {diagnostic!r}")
 
+
+def _timeline_tracks(
+    document: Mapping[str, Any], problems: list[str]
+) -> tuple[list[Any] | tuple[Any, ...], set[tuple[int, int]]]:
     tracks = document.get("tracks", ())
     if not isinstance(tracks, (list, tuple)):
         problems.append("invalid timeline tracks list")
@@ -750,7 +777,159 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
     duplicated = {identity for identity in track_ids if track_ids.count(identity) > 1}
     if duplicated:
         problems.append(f"duplicate track identities: {sorted(duplicated)}")
+    return tracks, valid_tracks
 
+
+def _clip_asset_identity_problems(
+    track_identity: tuple[int, int],
+    display_name: Any,
+    asset: Any,
+    problems: list[str],
+) -> None:
+    if not isinstance(asset, Mapping) or asset.get("resolved") is not True:
+        problems.append(
+            f"track {track_identity} clip {display_name!r} has an unresolved required clip asset"
+        )
+    elif (
+        type(asset.get("file_id")) is not int
+        or type(asset.get("path_id")) is not int
+        or not isinstance(asset.get("bundle_name"), str)
+        or not asset.get("bundle_name")
+        or type(asset.get("target_file_index")) is not int
+        or type(asset.get("target_path_id")) is not int
+        or not isinstance(asset.get("target_class"), str)
+        or not asset.get("target_class")
+    ):
+        problems.append(
+            f"track {track_identity} clip {display_name!r} "
+            "has an incomplete required clip asset identity"
+        )
+    elif asset["path_id"] != asset["target_path_id"]:
+        problems.append(
+            f"track {track_identity} clip {display_name!r} "
+            "has a clip asset path_id/target_path_id mismatch"
+        )
+    elif asset["file_id"] == 0 and asset["target_file_index"] != track_identity[0]:
+        problems.append(
+            f"track {track_identity} clip {display_name!r} "
+            "has a same-file clip asset target in a different file"
+        )
+
+
+def _clip_asset_data_pptrs(
+    track_identity: tuple[int, int],
+    display_name: Any,
+    asset_data: Any,
+    problems: list[str],
+) -> Counter[tuple[str, int, int]]:
+    if not isinstance(asset_data, Mapping):
+        problems.append(f"track {track_identity} clip has invalid asset_data")
+        expected_references: Counter[tuple[str, int, int]] = Counter()
+    else:
+        for field_path in _invalid_raw_pptr_paths(asset_data):
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                f"has an invalid raw PPtr at {field_path}"
+            )
+        expected_references = Counter()
+        for location in iter_pptr_locations(asset_data):
+            if type(location.file_id) is not int or type(location.path_id) is not int:
+                problems.append(
+                    f"track {track_identity} clip {display_name!r} "
+                    f"has an invalid raw PPtr at {location.field_path}"
+                )
+                continue
+            if (location.file_id, location.path_id) != (0, 0):
+                expected_references[(location.field_path, location.file_id, location.path_id)] += 1
+    if isinstance(asset_data, Mapping) and "_error" in asset_data:
+        problems.append(
+            f"track {track_identity} clip {display_name!r} has an unreadable required clip asset"
+        )
+    return expected_references
+
+
+def _clip_resolved_references(
+    track_identity: tuple[int, int],
+    display_name: Any,
+    asset: Any,
+    clip_references: Any,
+    expected_animation_sources: dict[tuple[str, int, int], set[tuple[int, int]]],
+    problems: list[str],
+) -> Counter[tuple[str, int, int]] | None:
+    if not isinstance(clip_references, (list, tuple)):
+        problems.append(f"track {track_identity} clip has invalid resolved_references")
+        return None
+
+    actual_references: Counter[tuple[str, int, int]] = Counter()
+    for reference in clip_references:
+        if not isinstance(reference, Mapping):
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                f"has an unresolved reference: {reference!r}"
+            )
+            continue
+        if reference.get("resolved") is not True:
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                f"has an unresolved reference: {reference!r}"
+            )
+            continue
+        field_path = reference.get("field_path")
+        file_id = reference.get("file_id")
+        reference_path_id = reference.get("path_id")
+        if (
+            not isinstance(field_path, str)
+            or not field_path
+            or type(file_id) is not int
+            or type(reference_path_id) is not int
+        ):
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                "has an incomplete resolved reference identity"
+            )
+            continue
+        actual_references[(field_path, file_id, reference_path_id)] += 1
+        target_bundle = reference.get("bundle_name")
+        target_file_index = reference.get("target_file_index")
+        target_path_id = reference.get("target_path_id")
+        target_class = reference.get("target_class")
+        if (
+            not isinstance(target_bundle, str)
+            or not target_bundle
+            or type(target_file_index) is not int
+            or type(target_path_id) is not int
+            or not isinstance(target_class, str)
+            or not target_class
+        ):
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                "has an incomplete resolved reference identity"
+            )
+            continue
+        if reference_path_id != target_path_id:
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                "has a resolved reference path_id/target_path_id mismatch"
+            )
+        if (
+            file_id == 0
+            and isinstance(asset, Mapping)
+            and type(asset.get("target_file_index")) is int
+            and target_file_index != asset["target_file_index"]
+        ):
+            problems.append(
+                f"track {track_identity} clip {display_name!r} "
+                "has a same-file resolved reference target in a different file"
+            )
+        if target_class == "AnimationClip":
+            animation_key = (target_bundle, target_file_index, target_path_id)
+            expected_animation_sources.setdefault(animation_key, set()).add(track_identity)
+    return actual_references
+
+
+def _timeline_clip_reference_problems(
+    tracks: list[Any] | tuple[Any, ...], problems: list[str]
+) -> dict[tuple[str, int, int], set[tuple[int, int]]]:
     expected_animation_sources: dict[tuple[str, int, int], set[tuple[int, int]]] = {}
     for track in tracks:
         if not isinstance(track, Mapping):
@@ -770,131 +949,21 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
                 continue
             display_name = clip.get("display_name", "")
             asset = clip.get("asset")
-            if not isinstance(asset, Mapping) or asset.get("resolved") is not True:
-                problems.append(
-                    f"track {track_identity} clip {display_name!r} "
-                    "has an unresolved required clip asset"
-                )
-            elif (
-                type(asset.get("file_id")) is not int
-                or type(asset.get("path_id")) is not int
-                or not isinstance(asset.get("bundle_name"), str)
-                or not asset.get("bundle_name")
-                or type(asset.get("target_file_index")) is not int
-                or type(asset.get("target_path_id")) is not int
-                or not isinstance(asset.get("target_class"), str)
-                or not asset.get("target_class")
-            ):
-                problems.append(
-                    f"track {track_identity} clip {display_name!r} "
-                    "has an incomplete required clip asset identity"
-                )
-            elif asset["path_id"] != asset["target_path_id"]:
-                problems.append(
-                    f"track {track_identity} clip {display_name!r} "
-                    "has a clip asset path_id/target_path_id mismatch"
-                )
-            elif asset["file_id"] == 0 and asset["target_file_index"] != track_identity[0]:
-                problems.append(
-                    f"track {track_identity} clip {display_name!r} "
-                    "has a same-file clip asset target in a different file"
-                )
+            _clip_asset_identity_problems(track_identity, display_name, asset, problems)
             asset_data = clip.get("asset_data", {})
-            if not isinstance(asset_data, Mapping):
-                problems.append(f"track {track_identity} clip has invalid asset_data")
-                expected_references: Counter[tuple[str, int, int]] = Counter()
-            else:
-                for field_path in _invalid_raw_pptr_paths(asset_data):
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        f"has an invalid raw PPtr at {field_path}"
-                    )
-                expected_references = Counter()
-                for location in iter_pptr_locations(asset_data):
-                    if type(location.file_id) is not int or type(location.path_id) is not int:
-                        problems.append(
-                            f"track {track_identity} clip {display_name!r} "
-                            f"has an invalid raw PPtr at {location.field_path}"
-                        )
-                        continue
-                    if (location.file_id, location.path_id) != (0, 0):
-                        expected_references[
-                            (location.field_path, location.file_id, location.path_id)
-                        ] += 1
-            if isinstance(asset_data, Mapping) and "_error" in asset_data:
-                problems.append(
-                    f"track {track_identity} clip {display_name!r} "
-                    "has an unreadable required clip asset"
-                )
-
-            clip_references = clip.get("resolved_references", ())
-            if not isinstance(clip_references, (list, tuple)):
-                problems.append(f"track {track_identity} clip has invalid resolved_references")
+            expected_references = _clip_asset_data_pptrs(
+                track_identity, display_name, asset_data, problems
+            )
+            actual_references = _clip_resolved_references(
+                track_identity,
+                display_name,
+                asset,
+                clip.get("resolved_references", ()),
+                expected_animation_sources,
+                problems,
+            )
+            if actual_references is None:
                 continue
-            actual_references: Counter[tuple[str, int, int]] = Counter()
-            for reference in clip_references:
-                if not isinstance(reference, Mapping):
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        f"has an unresolved reference: {reference!r}"
-                    )
-                    continue
-                if reference.get("resolved") is not True:
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        f"has an unresolved reference: {reference!r}"
-                    )
-                    continue
-                field_path = reference.get("field_path")
-                file_id = reference.get("file_id")
-                reference_path_id = reference.get("path_id")
-                if (
-                    not isinstance(field_path, str)
-                    or not field_path
-                    or type(file_id) is not int
-                    or type(reference_path_id) is not int
-                ):
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        "has an incomplete resolved reference identity"
-                    )
-                    continue
-                actual_references[(field_path, file_id, reference_path_id)] += 1
-                target_bundle = reference.get("bundle_name")
-                target_file_index = reference.get("target_file_index")
-                target_path_id = reference.get("target_path_id")
-                target_class = reference.get("target_class")
-                if (
-                    not isinstance(target_bundle, str)
-                    or not target_bundle
-                    or type(target_file_index) is not int
-                    or type(target_path_id) is not int
-                    or not isinstance(target_class, str)
-                    or not target_class
-                ):
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        "has an incomplete resolved reference identity"
-                    )
-                    continue
-                if reference_path_id != target_path_id:
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        "has a resolved reference path_id/target_path_id mismatch"
-                    )
-                if (
-                    file_id == 0
-                    and isinstance(asset, Mapping)
-                    and type(asset.get("target_file_index")) is int
-                    and target_file_index != asset["target_file_index"]
-                ):
-                    problems.append(
-                        f"track {track_identity} clip {display_name!r} "
-                        "has a same-file resolved reference target in a different file"
-                    )
-                if target_class == "AnimationClip":
-                    animation_key = (target_bundle, target_file_index, target_path_id)
-                    expected_animation_sources.setdefault(animation_key, set()).add(track_identity)
             if actual_references != expected_references:
                 missing = list((expected_references - actual_references).elements())
                 extra = list((actual_references - expected_references).elements())
@@ -902,11 +971,16 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
                     f"track {track_identity} clip {display_name!r} resolved_references "
                     f"do not exactly cover asset_data PPtrs (missing={missing}, extra={extra})"
                 )
+    return expected_animation_sources
 
+
+def _timeline_animation_sources(
+    document: Mapping[str, Any], valid_tracks: set[tuple[int, int]], problems: list[str]
+) -> dict[tuple[str, int, int], set[tuple[int, int]]] | None:
     references = document.get("animation_references", ())
     if not isinstance(references, (list, tuple)):
         problems.append("invalid animation_references list")
-        return problems
+        return None
     animation_sources: dict[tuple[str, int, int], set[tuple[int, int]]] = {}
     for reference in references:
         if not isinstance(reference, Mapping):
@@ -961,7 +1035,14 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
         ):
             problems.append(f"animation reference {path_id} source track path IDs disagree")
         animation_sources[identity] = sources
+    return animation_sources
 
+
+def _animation_reference_consistency_problems(
+    expected_animation_sources: dict[tuple[str, int, int], set[tuple[int, int]]],
+    animation_sources: dict[tuple[str, int, int], set[tuple[int, int]]],
+    problems: list[str],
+) -> None:
     for identity, source_tracks in expected_animation_sources.items():
         if identity not in animation_sources:
             problems.append(
@@ -975,4 +1056,25 @@ def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
         problems.append(
             f"animation reference {identity} is not backed by a resolved clip reference"
         )
+
+
+def timeline_reference_problems(document: Mapping[str, Any]) -> list[str]:
+    """Referential problems among the document's own records.
+
+    Every animation reference must be a complete stable identity
+    (bundle name, file index, path ID) with at least one source track, and
+    track identities must be unique — structural checks the offline package
+    validator can call without knowing the filesystem.
+    """
+
+    problems: list[str] = []
+    _timeline_diagnostic_problems(document, problems)
+    tracks, valid_tracks = _timeline_tracks(document, problems)
+    expected_animation_sources = _timeline_clip_reference_problems(tracks, problems)
+    animation_sources = _timeline_animation_sources(document, valid_tracks, problems)
+    if animation_sources is None:
+        return problems
+    _animation_reference_consistency_problems(
+        expected_animation_sources, animation_sources, problems
+    )
     return problems

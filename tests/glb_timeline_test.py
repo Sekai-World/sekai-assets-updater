@@ -539,6 +539,33 @@ def test_unresolved_track_reference_is_diagnosed() -> None:
     )
 
 
+def test_timeline_diagnostics_and_reference_problems_keep_order() -> None:
+    studio = _TimelineStudio()
+    studio._typetrees[(0, 100)]["m_Tracks"] = [
+        {"m_FileID": 0, "m_PathID": 202},
+        {"m_FileID": 0, "m_PathID": 999},
+    ]
+    studio._typetrees[(0, 202)]["m_Clips"][0]["m_Asset"] = {
+        "m_FileID": 0,
+        "m_PathID": 999,
+    }
+    environment = unity_rs_adapter.UnityRsEnvironment(studio)
+    table = _small_table(environment)
+
+    document = build_timeline_document(environment, table, "pkg/mc_x", PLAYABLE_PATH)
+
+    assert [(item["code"], item["track_path_id"]) for item in document["diagnostics"]] == [
+        (DIAG_TRACK_UNSUPPORTED, 202),
+        (DIAG_TRACK_REFERENCE_UNRESOLVED, 999),
+        (DIAG_CLIP_ASSET_UNRESOLVED, 202),
+    ]
+    problems = timeline_reference_problems(document)
+    assert len(problems) == 3
+    assert problems[0].startswith("unresolved required track:")
+    assert problems[1].startswith(f"timeline error {DIAG_CLIP_ASSET_UNRESOLVED}:")
+    assert problems[2] == "track (0, 202) clip 'Mystery' has an unresolved required clip asset"
+
+
 @pytest.mark.parametrize(
     "track_ref",
     [
