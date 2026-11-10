@@ -8,11 +8,11 @@ second UnityPy implementation.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence, cast
 
 import orjson
 import unity_rs
@@ -119,15 +119,48 @@ SAME_FILE_REFERENCE = "same_file"
 RESOLVED_EXTERNAL_REFERENCE = "resolved_external"
 UNKNOWN_EXTERNAL_REFERENCE = "unknown_external"
 
+_NATIVE_EXTERNAL_PAGE_SIZE = 4096
+_MAX_NATIVE_EXTERNALS_PER_FILE = 65_536
+_MAX_NATIVE_EXTERNALS_TOTAL = 262_144
+_MAX_NATIVE_EXTERNAL_PATH_BYTES_PER_FILE = 16 * 1024 * 1024
+_MAX_NATIVE_EXTERNAL_PATH_BYTES_TOTAL = 64 * 1024 * 1024
+
+
+class _NativeExternalSnapshotDiscarded(Exception):
+    """The complete native external snapshot must be dropped fail-closed."""
+
+
+def _utf8_byte_length_within_limit(value: str, byte_limit: int) -> int | None:
+    """Return exact UTF-8 bytes up to a limit, without allocating an encoded copy."""
+
+    byte_count = 0
+    for character in value:
+        code_point = ord(character)
+        if 0xD800 <= code_point <= 0xDFFF:
+            return None
+        if code_point < 0x80:
+            byte_count += 1
+        elif code_point < 0x800:
+            byte_count += 2
+        elif code_point < 0x10000:
+            byte_count += 3
+        else:
+            byte_count += 4
+        if byte_count > byte_limit:
+            return None
+    return byte_count
+
 
 class CollectionFileTable:
-    """File identities plus explicitly verified serialized external lists.
+    """File identities and serialized external slots with explicit resolution rules.
 
-    PPtr ``m_FileID`` values index the *source file's* external list.  The
-    public unity-rs 0.6.1 ``FileInfo`` API exposes index, path, version, and
-    object count, but not serialized ``m_Externals``.  AssetBundle
-    ``dependencies`` are not that table.  Callers may inject verified
-    serialized externals; without them, non-zero file IDs remain unknown.
+    PPtr ``m_FileID`` values index the *source file's* external list. The
+    currently pinned unity-rs API does not expose serialized
+    ``m_Externals``. A future ``file_external_page`` API is read for diagnostic
+    paths and slots only; paths alone never establish target identity.
+    AssetBundle ``dependencies`` are not that table. Callers may also inject
+    verified serialized externals; without an injected mapping, native paths
+    remain unresolved.
     """
 
     def __init__(
@@ -139,7 +172,8 @@ class CollectionFileTable:
         file_meta = self._native_file_metadata(environment)
         known_file_indices = set(file_meta)
         known_file_indices.update(obj.file_index for obj in environment.objects)
-        external_snapshot: dict[int, tuple[str, ...]] = {}
+        external_snapshot: dict[int, tuple[tuple[int, str], ...]] = {}
+        native_external_indices: set[int] = set()
         if serialized_externals is not None:
             if not isinstance(serialized_externals, Mapping):
                 raise TypeError("serialized_externals must be a mapping of file indices to names")
@@ -160,12 +194,15 @@ class CollectionFileTable:
                         raise TypeError("serialized external entries must be strings")
                     if not name.strip():
                         raise ValueError("serialized external entries must be non-empty names")
-                external_snapshot[file_index] = names
+                external_snapshot[file_index] = tuple(enumerate(names, start=1))
+        else:
+            external_snapshot = self._native_serialized_externals(environment, known_file_indices)
+            native_external_indices.update(external_snapshot)
 
         identities: list[CollectionFileIdentity] = []
         by_bundle_name: dict[str, set[int]] = {}
         by_cab: dict[str, set[int]] = {}
-        externals: dict[int, tuple[str, ...]] = {}
+        externals: dict[int, tuple[tuple[int, str], ...]] = {}
         for obj in environment.objects:
             if obj.file_index in externals:
                 continue
@@ -186,6 +223,8 @@ class CollectionFileTable:
             by_bundle_name.setdefault(bundle_name, set()).add(identity.file_index)
             by_cab.setdefault(cab, set()).add(identity.file_index)
             externals[obj.file_index] = external_snapshot.get(obj.file_index, ())
+        for file_index, rows in external_snapshot.items():
+            externals.setdefault(file_index, rows)
         self.identities: tuple[CollectionFileIdentity, ...] = tuple(
             sorted(identities, key=lambda value: value.file_index)
         )
@@ -194,6 +233,7 @@ class CollectionFileTable:
         }
         self._by_cab = {name: frozenset(indices) for name, indices in by_cab.items()}
         self._externals = externals
+        self._native_external_indices = frozenset(native_external_indices)
 
     @staticmethod
     def _native_file_metadata(environment: UnityRsEnvironment) -> dict[int, Any]:
@@ -201,9 +241,111 @@ class CollectionFileTable:
         if not callable(files):
             return {}
         try:
-            return {int(info.index): info for info in files()}
+            metadata: dict[int, Any] = {}
+            for info in cast(Iterable[Any], files()):
+                file_index = getattr(info, "index", None)
+                if type(file_index) is not int or file_index < 0 or file_index in metadata:
+                    return {}
+                metadata[file_index] = info
+            return metadata
         except Exception:  # NOSONAR - metadata is an enhancement, never required
             return {}
+
+    @staticmethod
+    def _native_serialized_externals(
+        environment: UnityRsEnvironment, file_indices: set[int]
+    ) -> dict[int, tuple[tuple[int, str], ...]]:
+        """Read bounded native external diagnostics, omitting incomplete files.
+
+        Budgets bound the retained snapshot. The native binding materializes each
+        requested page before Python can enforce them, so they do not impose a
+        strict peak-memory limit on FFI page creation.
+        """
+
+        try:
+            read_page = getattr(environment.studio, "file_external_page", None)
+        except Exception:  # NOSONAR - optional native metadata is fail-closed
+            return {}
+        if not callable(read_page):
+            return {}
+
+        externals: dict[int, tuple[tuple[int, str], ...]] = {}
+        total_count = 0
+        total_path_bytes = 0
+        for file_index in sorted(file_indices):
+            try:
+                rows: list[tuple[int, str]] = []
+                offset = 0
+                file_count = 0
+                file_path_bytes = 0
+                while True:
+                    remaining_file_count = _MAX_NATIVE_EXTERNALS_PER_FILE - file_count
+                    remaining_total_count = _MAX_NATIVE_EXTERNALS_TOTAL - total_count
+                    page_limit = min(
+                        _NATIVE_EXTERNAL_PAGE_SIZE,
+                        max(1, remaining_file_count),
+                        max(1, remaining_total_count),
+                    )
+                    page = read_page(
+                        file_index,
+                        offset=offset,
+                        limit=page_limit,
+                    )
+                    if not isinstance(page, (list, tuple)):
+                        raise TypeError("native external page must be a list or tuple")
+                    if len(page) > page_limit:
+                        raise ValueError("native external page exceeds its requested limit")
+                    if total_count + len(page) > _MAX_NATIVE_EXTERNALS_TOTAL:
+                        raise _NativeExternalSnapshotDiscarded
+                    total_count += len(page)
+                    next_file_count = file_count + len(page)
+                    if next_file_count > _MAX_NATIVE_EXTERNALS_PER_FILE:
+                        raise ValueError("native external per-file count limit exceeded")
+                    file_count = next_file_count
+
+                    for page_index, row in enumerate(page):
+                        expected_file_id = offset + page_index + 1
+                        file_id = getattr(row, "file_id", None)
+                        path = getattr(row, "path", None)
+                        if type(file_id) is not int or file_id != expected_file_id:
+                            raise ValueError("native external IDs are duplicate or incomplete")
+                        if not isinstance(path, str):
+                            raise TypeError("native external path must be a string")
+
+                        file_bytes_remaining = (
+                            _MAX_NATIVE_EXTERNAL_PATH_BYTES_PER_FILE - file_path_bytes
+                        )
+                        total_bytes_remaining = (
+                            _MAX_NATIVE_EXTERNAL_PATH_BYTES_TOTAL - total_path_bytes
+                        )
+                        path_bytes = _utf8_byte_length_within_limit(
+                            path, min(file_bytes_remaining, total_bytes_remaining)
+                        )
+                        if path_bytes is None:
+                            raise _NativeExternalSnapshotDiscarded
+                        total_path_bytes += path_bytes
+                        file_path_bytes += path_bytes
+
+                        rows.append((file_id, path))
+
+                    offset += len(page)
+                    if len(page) < page_limit:
+                        if not page:
+                            break
+                        trailing_page = read_page(
+                            file_index,
+                            offset=offset,
+                            limit=1,
+                        )
+                        if not isinstance(trailing_page, (list, tuple)) or trailing_page:
+                            raise ValueError("native external table ended before its final page")
+                        break
+                externals[file_index] = tuple(rows)
+            except _NativeExternalSnapshotDiscarded:
+                return {}
+            except Exception:  # NOSONAR - partial tables must never be resolved
+                continue
+        return externals
 
     def identity_for(self, file_index: int) -> CollectionFileIdentity | None:
         for identity in self.identities:
@@ -212,16 +354,22 @@ class CollectionFileTable:
         return None
 
     def externals_of(self, file_index: int) -> tuple[str, ...]:
-        """Return verified serialized externals, or empty when none were supplied."""
-        return self._externals.get(file_index, ())
+        """Return serialized external paths in their original slot order."""
+        return tuple(path for _file_id, path in self._externals.get(file_index, ()))
 
     def resolve_file_id(self, source_file_index: int, file_id: int) -> CollectionExternalReference:
-        """Map one non-zero PPtr file ID through the source file's externals."""
+        """Resolve an injected external mapping; native paths remain diagnostic only."""
         externals = self._externals.get(source_file_index, ())
-        position = file_id - 1
-        if position < 0 or position >= len(externals):
+        if type(file_id) is not int or file_id <= 0:
             return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
-        dependency_name = externals[position]
+        position = file_id - 1
+        if position >= len(externals):
+            return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
+        external_id, dependency_name = externals[position]
+        if external_id != file_id:
+            return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
+        if source_file_index in self._native_external_indices:
+            return CollectionExternalReference(UNKNOWN_EXTERNAL_REFERENCE)
         targets = self._by_bundle_name.get(dependency_name, frozenset()) | self._by_cab.get(
             dependency_name, frozenset()
         )

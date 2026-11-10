@@ -61,6 +61,53 @@ def _external_reference_environment():
     return unity_rs_adapter.UnityRsEnvironment(_ExternalStudio(objects))
 
 
+def _native_external_environment(
+    external_rows,
+    *,
+    include_file_metadata=True,
+    fail_at=None,
+    file_metadata_paths=None,
+):
+    objects = [
+        _Info(file_index=0, object_index=0, path_id=1, class_id=142, source_path="source::CAB-a"),
+        _Info(file_index=0, object_index=1, path_id=42, class_id=114, source_path="source::CAB-a"),
+        _Info(file_index=1, object_index=0, path_id=1, class_id=142, source_path="target::CAB-b"),
+        _Info(file_index=1, object_index=1, path_id=42, class_id=48, source_path="target::CAB-b"),
+    ]
+
+    class _NativeExternalStudio(_Studio):
+        def __init__(self):
+            super().__init__(objects)
+            self.page_calls = []
+
+        def files(self):
+            if not include_file_metadata:
+                return []
+            paths = (
+                file_metadata_paths
+                if file_metadata_paths is not None
+                else ("source::CAB-a", "target::CAB-b")
+            )
+            return [
+                SimpleNamespace(index=index, path=path, unity_version="2022.3")
+                for index, path in enumerate(paths)
+            ]
+
+        def file_external_page(self, file_index, *, offset=0, limit=4096):
+            self.page_calls.append((file_index, offset, limit))
+            if fail_at == (file_index, offset):
+                raise RuntimeError("native page failure")
+            rows = external_rows.get(file_index, ())
+            return rows[offset : offset + limit]
+
+    studio = _NativeExternalStudio()
+    return unity_rs_adapter.UnityRsEnvironment(studio), studio
+
+
+def _native_external_row(file_id: int, path: str, *, guid=None):
+    return SimpleNamespace(file_id=file_id, path=path, guid=guid, kind=None, prefix=None)
+
+
 class _FontStudio(_Studio):
     def __init__(self, objects: list[_Info], font):
         super().__init__(objects)
@@ -260,6 +307,295 @@ def test_external_resolution_without_serialized_table_never_uses_dependencies() 
     assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
     assert resolution.target_file_index is None
     assert resolution.dependency_name is None
+
+
+def test_native_external_pages_preserve_ids_order_empty_and_duplicate_paths_without_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_NATIVE_EXTERNAL_PAGE_SIZE", 2)
+    environment, studio = _native_external_environment(
+        {
+            0: [
+                _native_external_row(1, "CAB-b"),
+                _native_external_row(2, ""),
+                _native_external_row(3, "CAB-b"),
+                _native_external_row(4, "Resources/unity_builtin_extra"),
+            ]
+        }
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == (
+        "CAB-b",
+        "",
+        "CAB-b",
+        "Resources/unity_builtin_extra",
+    )
+    first_reference = table.resolve_file_id(0, 1)
+    assert first_reference.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert first_reference.target_file_index is None
+    assert first_reference.dependency_name is None
+    empty_reference = table.resolve_file_id(0, 2)
+    assert empty_reference.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert empty_reference.dependency_name is None
+    duplicate_reference = table.resolve_file_id(0, 3)
+    assert duplicate_reference.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert duplicate_reference.target_file_index is None
+    assert duplicate_reference.dependency_name is None
+    builtin_reference = table.resolve_file_id(0, 4)
+    assert builtin_reference.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert builtin_reference.dependency_name is None
+    assert [call for call in studio.page_calls if call[0] == 0] == [
+        (0, 0, 2),
+        (0, 2, 2),
+        (0, 4, 2),
+    ]
+
+
+def test_native_external_pages_fail_closed_after_late_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_NATIVE_EXTERNAL_PAGE_SIZE", 1)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "CAB-b"), _native_external_row(2, "CAB-b")]},
+        fail_at=(0, 1),
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    resolution = table.resolve_file_id(0, 1)
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name is None
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [_native_external_row(1, "CAB-b"), _native_external_row(1, "CAB-b")],
+        [_native_external_row(1, "CAB-b"), _native_external_row(3, "CAB-b")],
+        [SimpleNamespace(file_id=1, path=None)],
+    ],
+)
+def test_native_external_pages_fail_closed_on_duplicate_or_incomplete_rows(
+    monkeypatch: pytest.MonkeyPatch, rows
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_NATIVE_EXTERNAL_PAGE_SIZE", 1)
+    environment, _studio = _native_external_environment({0: rows})
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.resolve_file_id(0, 1).kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+
+
+def test_native_external_path_does_not_match_bundle_name_or_basename() -> None:
+    for path in ("target", "folder/CAB-b"):
+        environment, _studio = _native_external_environment({0: [_native_external_row(1, path)]})
+
+        resolution = unity_rs_adapter.build_collection_file_table(environment).resolve_file_id(0, 1)
+
+        assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+        assert resolution.target_file_index is None
+
+
+def test_native_external_path_without_verified_file_metadata_is_not_mapped() -> None:
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "CAB-b")]}, include_file_metadata=False
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ("CAB-b",)
+    resolution = table.resolve_file_id(0, 1)
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.dependency_name is None
+
+
+def test_native_external_exact_cab_match_is_unknown_when_identity_is_ambiguous() -> None:
+    objects = [
+        _Info(file_index=0, object_index=0, path_id=1, class_id=114),
+        _Info(file_index=1, object_index=0, path_id=1, class_id=114),
+        _Info(file_index=2, object_index=0, path_id=1, class_id=114),
+    ]
+
+    class _AmbiguousCabStudio(_Studio):
+        def files(self):
+            return [
+                SimpleNamespace(index=0, path="source::CAB-a"),
+                SimpleNamespace(index=1, path="target-one::CAB-b"),
+                SimpleNamespace(index=2, path="target-two::CAB-b"),
+            ]
+
+        def file_external_page(self, file_index, *, offset=0, limit=4096):
+            rows = [_native_external_row(1, "CAB-b")] if file_index == 0 else []
+            return rows[offset : offset + limit]
+
+    environment = unity_rs_adapter.UnityRsEnvironment(_AmbiguousCabStudio(objects))
+    resolution = unity_rs_adapter.build_collection_file_table(environment).resolve_file_id(0, 1)
+
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name is None
+
+
+def test_native_external_nonzero_guid_does_not_map_by_path() -> None:
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "CAB-b", guid=b"\x01" * 16)]}
+    )
+
+    resolution = unity_rs_adapter.build_collection_file_table(environment).resolve_file_id(0, 1)
+
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name is None
+
+
+@pytest.mark.parametrize(
+    ("path", "file_metadata_paths"),
+    [
+        (
+            "Resources/unity_builtin_extra",
+            ("source::CAB-a", "target::Resources/unity_builtin_extra"),
+        ),
+        ("arbitrary-name", ("source::CAB-a", "target::arbitrary-name")),
+        ("nested/CAB-b", ("source::CAB-a", "target::nested/CAB-b")),
+        ("CAB-b", ("source::CAB-a", "different-label::CAB-b")),
+        ("CAB-b", ("different-source::CAB-a", "target::CAB-b")),
+    ],
+)
+def test_native_external_paths_never_map_from_names_or_file_metadata(
+    path, file_metadata_paths
+) -> None:
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, path)]}, file_metadata_paths=file_metadata_paths
+    )
+
+    resolution = unity_rs_adapter.build_collection_file_table(environment).resolve_file_id(0, 1)
+
+    assert resolution.kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+    assert resolution.target_file_index is None
+    assert resolution.dependency_name is None
+
+
+def test_explicit_serialized_externals_keep_existing_mapping_and_skip_native_reader() -> None:
+    environment, studio = _native_external_environment(
+        {0: [_native_external_row(1, "ignored-native-path")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: ("CAB-b",)}
+    )
+
+    assert studio.page_calls == []
+    resolution = table.resolve_file_id(0, 1)
+    assert resolution.kind == unity_rs_adapter.RESOLVED_EXTERNAL_REFERENCE
+    assert resolution.target_file_index == 1
+    assert resolution.dependency_name == "CAB-b"
+
+
+def test_native_external_per_file_count_budget_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNALS_PER_FILE", 1)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "one"), _native_external_row(2, "two")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.resolve_file_id(0, 1).kind == unity_rs_adapter.UNKNOWN_EXTERNAL_REFERENCE
+
+
+def test_native_external_total_count_budget_discards_all_native_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNALS_TOTAL", 1)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "one")], 1: [_native_external_row(1, "two")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
+
+
+def test_native_external_total_count_budget_includes_failed_file_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNALS_PER_FILE", 1)
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNALS_TOTAL", 2)
+    environment, _studio = _native_external_environment(
+        {
+            0: [_native_external_row(1, "one"), _native_external_row(2, "two")],
+            1: [_native_external_row(1, "three")],
+        }
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
+
+
+def test_native_external_per_file_path_byte_budget_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_PER_FILE", 1)
+    environment, _studio = _native_external_environment({0: [_native_external_row(1, "é")]})
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
+
+
+def test_native_external_per_file_failure_cannot_undercharge_total_path_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_PER_FILE", 1)
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_TOTAL", 4)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "abcd")], 1: [_native_external_row(1, "x")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
+
+
+def test_native_external_total_path_byte_budget_includes_failed_file_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_PER_FILE", 1)
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_TOTAL", 3)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "ab")], 1: [_native_external_row(1, "xy")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
+
+
+def test_native_external_total_path_byte_budget_discards_all_native_tables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(unity_rs_adapter, "_MAX_NATIVE_EXTERNAL_PATH_BYTES_TOTAL", 5)
+    environment, _studio = _native_external_environment(
+        {0: [_native_external_row(1, "one")], 1: [_native_external_row(1, "two")]}
+    )
+
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    assert table.externals_of(0) == ()
+    assert table.externals_of(1) == ()
 
 
 def test_authoritative_serialized_external_order_beats_dependency_order_and_path_collisions() -> (

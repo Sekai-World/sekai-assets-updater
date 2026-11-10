@@ -369,6 +369,67 @@ def test_optional_unresolved_external_is_structured_warning() -> None:
     assert report.publishable
 
 
+def _native_external_reachability_environment(*, fail_read: bool = False):
+    studio = _studio(include_shader_pack=False)
+
+    def file_external_page(file_index: int, *, offset: int = 0, limit: int = 4096):
+        if fail_read and file_index == 0:
+            raise RuntimeError("native external metadata unavailable")
+        rows = (
+            [
+                SimpleNamespace(
+                    file_id=1,
+                    path=SHADER_BUNDLE,
+                    guid=None,
+                    kind=None,
+                    prefix=None,
+                )
+            ]
+            if file_index == 0
+            else []
+        )
+        return rows[offset : offset + limit]
+
+    studio.file_external_page = file_external_page
+    return unity_rs_adapter.UnityRsEnvironment(studio)
+
+
+def test_native_optional_named_path_remains_error_and_unpublishable() -> None:
+    environment = _native_external_reachability_environment()
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    report = validate_collection_reachability(
+        environment,
+        table,
+        _plan().roots,
+        optional_dependencies=frozenset({SHADER_BUNDLE}),
+    )
+
+    assert table.externals_of(0) == (SHADER_BUNDLE,)
+    external = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert external.dependency_name is None
+    assert external.severity == "error"
+    assert not report.publishable
+
+
+def test_failed_native_external_read_does_not_weaken_optional_reachability() -> None:
+    environment = _native_external_reachability_environment(fail_read=True)
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    report = validate_collection_reachability(
+        environment,
+        table,
+        _plan().roots,
+        optional_dependencies=frozenset({SHADER_BUNDLE}),
+    )
+
+    assert table.externals_of(0) == ()
+    external = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert external.dependency_name is None
+    assert external.severity == "error"
+    assert not report.publishable
+
+
 def test_expected_class_map_reports_type_mismatch() -> None:
     environment = _environment()
     table = _table(environment)
