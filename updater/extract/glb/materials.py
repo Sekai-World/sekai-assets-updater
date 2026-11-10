@@ -52,6 +52,7 @@ class MaterialDiagnostic:
 
     code: str
     message: str
+    severity: str = "warning"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +148,7 @@ def convert_material(
             MaterialDiagnostic(
                 code=DIAG_MISSING_TARGET,
                 message=(f"shader pointer {native.shader} did not resolve in the collection"),
+                severity="error",
             )
         )
 
@@ -205,6 +207,7 @@ def convert_material(
                             f"{unity_slot} texture lives in unloaded dependency"
                             f" {resolution.dependency_name}"
                         ),
+                        severity="error",
                     )
                 )
                 continue
@@ -214,6 +217,7 @@ def convert_material(
                     MaterialDiagnostic(
                         code=DIAG_MISSING_TARGET,
                         message=f"{unity_slot} texture {ptr} not found in its file",
+                        severity="error",
                     )
                 )
                 continue
@@ -225,6 +229,7 @@ def convert_material(
                             f"{unity_slot} resolved to {texture_object.type.name},"
                             " expected a texture object"
                         ),
+                        severity="error",
                     )
                 )
                 continue

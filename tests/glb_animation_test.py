@@ -12,6 +12,8 @@ from updater import unity_rs_adapter
 from updater.extract.glb import DIAG_ANIMATION_UNSUPPORTED_BINDING
 from updater.extract.glb.animation import (
     ANIMATION_ARTIFACT_FIELDS,
+    ANIMATION_ARTIFACT_VERSION,
+    _artifact_hash,
     animation_artifact_path,
     collect_animation_artifacts,
     decode_animation_clip,
@@ -112,6 +114,10 @@ def _clip_environment(clips: dict[int, dict]):
     return unity_rs_adapter.UnityRsEnvironment(_AnimationStudio(clips))
 
 
+def _table(environment):
+    return unity_rs_adapter.build_collection_file_table(environment, serialized_externals={0: ()})
+
+
 def _clip_object(environment: object, path_id: int):
     return environment.object_by_identity(0, path_id)
 
@@ -168,7 +174,7 @@ GENERIC_CLIP = {
 
 def test_generic_curves_decode_into_addressable_artifact() -> None:
     environment = _clip_environment({200: GENERIC_CLIP})
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     artifact = decode_animation_clip(environment, table, _clip_object(environment, 200))
 
@@ -264,7 +270,7 @@ MUSCLE_CLIP = {
 
 def test_muscle_clip_decodes_streams_and_raises_structured_diagnostic() -> None:
     environment = _clip_environment({201: MUSCLE_CLIP})
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     artifact = decode_animation_clip(environment, table, _clip_object(environment, 201))
 
@@ -281,7 +287,7 @@ def test_muscle_clip_decodes_streams_and_raises_structured_diagnostic() -> None:
 
 def test_artifact_round_trips_through_persist_and_load(tmp_path) -> None:
     environment = _clip_environment({200: GENERIC_CLIP, 201: MUSCLE_CLIP})
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
     artifact = decode_animation_clip(environment, table, _clip_object(environment, 200))
 
     path = animation_artifact_path(tmp_path, artifact)
@@ -301,9 +307,26 @@ def test_artifact_round_trips_through_persist_and_load(tmp_path) -> None:
     assert set(artifact) == ANIMATION_ARTIFACT_FIELDS
 
 
+def test_v1_cache_without_diagnostic_severity_remains_loadable(tmp_path) -> None:
+    import json
+
+    environment = _clip_environment({201: MUSCLE_CLIP})
+    table = _table(environment)
+    legacy = decode_animation_clip(environment, table, _clip_object(environment, 201))
+    legacy["diagnostics"] = [
+        {"code": DIAG_ANIMATION_UNSUPPORTED_BINDING, "message": "legacy v1 warning"}
+    ]
+    legacy["content_hash"] = _artifact_hash(legacy)
+    path = animation_artifact_path(tmp_path, legacy)
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert legacy["artifact_version"] == ANIMATION_ARTIFACT_VERSION == 1
+    assert load_animation_artifact(path) == legacy
+
+
 def test_collect_animation_artifacts_walks_animation_objects_sorted(tmp_path) -> None:
     environment = _clip_environment({201: MUSCLE_CLIP, 200: GENERIC_CLIP})
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     artifacts = collect_animation_artifacts(environment, table)
 
@@ -332,7 +355,7 @@ def test_real_animation_clips_round_trip_when_env_set(tmp_path) -> None:
         pytest.skip("SEKAI_GLB_ANIMATION sample bundle missing")
 
     environment = unity_rs_adapter.load_collection([(name, bundle.read_bytes())], "2022.3.21f1")
-    table = unity_rs_adapter.build_collection_file_table(environment)
+    table = _table(environment)
 
     artifacts = collect_animation_artifacts(environment, table)
     assert artifacts, "expected at least one AnimationClip"
