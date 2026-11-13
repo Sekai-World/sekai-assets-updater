@@ -404,7 +404,7 @@ requires-dist = [
     { name = "pillow", specifier = "==13.0.0" },
     { name = "pjsekai-scores-rs", specifier = "==0.6.0" },
     { name = "pycryptodome", specifier = "==4.0.1" },
-    { name = "u-msgpack-python", specifier = "==2.8.0" },
+    { name = "u-msgpack-python", specifier = "==2.9.0" },
     { name = "unity-rs", specifier = "==0.6.2" },
 ]
 
@@ -426,11 +426,11 @@ wheels = [
 
 [[package]]
 name = "u-msgpack-python"
-version = "2.8.0"
+version = "2.9.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/36/9d/a40411a475e7d4838994b7f6bcc6bfca9acc5b119ce3a7503608c4428b49/u-msgpack-python-2.8.0.tar.gz", hash = "sha256:b801a83d6ed75e6df41e44518b4f2a9c221dc2da4bcd5380e3a0feda520bc61a", size = 18167, upload-time = "2023-05-18T09:28:12.187Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/cc/c2/8a6d3a0427d5d46aca3b617fa2ca1672d4b490555bd4bfd1375b5f84fe0d/u_msgpack_python-2.9.0.tar.gz", hash = "sha256:3f632940c2db108d71210795463e249b47e89a08eec0d54a5cdc1a202505ede9", size = 19659, upload-time = "2026-11-13T20:34:02.099Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/5e/512aeb40fd819f4660d00f96f5c7371ee36fc8c6b605128c5ee59e0b28c6/u_msgpack_python-2.8.0-py2.py3-none-any.whl", hash = "sha256:1d853d33e78b72c4228a2025b4db28cda81214076e5b0422ed0ae1b1b2bb586a", size = 10590, upload-time = "2023-05-18T09:28:10.323Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/41/c4e873946d95bbf0f52026c02872f6b50e09181889343b21d57801d83352/u_msgpack_python-2.9.0-py2.py3-none-any.whl", hash = "sha256:5e2d8b0dc37d03d1820d18326438dadd3b974954b03a03f7524f5ba1ed9213ff", size = 11896, upload-time = "2026-11-13T20:34:01.227Z" },
 ]
 
 [[package]]
