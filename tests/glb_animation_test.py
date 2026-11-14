@@ -268,6 +268,11 @@ MUSCLE_CLIP = {
 }
 
 
+def _generic_artifact() -> dict:
+    environment = _clip_environment({200: GENERIC_CLIP})
+    return decode_animation_clip(environment, _table(environment), _clip_object(environment, 200))
+
+
 def test_muscle_clip_decodes_streams_and_raises_structured_diagnostic() -> None:
     environment = _clip_environment({201: MUSCLE_CLIP})
     table = _table(environment)
@@ -305,6 +310,119 @@ def test_artifact_round_trips_through_persist_and_load(tmp_path) -> None:
     with pytest.raises(ValueError, match="fields must be exactly"):
         validate_animation_artifact(document)
     assert set(artifact) == ANIMATION_ARTIFACT_FIELDS
+
+
+def test_curve_validation_preserves_field_and_key_error_order() -> None:
+    artifact = _generic_artifact()
+    curve = artifact["curves"][0]
+    curve.update(kind="invalid", path=None, keys=None)
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact curves[0].kind is invalid"
+
+
+@pytest.mark.parametrize(
+    ("kind", "operation", "field", "invalid_value", "message"),
+    [
+        (
+            "rotation",
+            "set",
+            "value",
+            [0.0, 0.0, 0.0],
+            "animation artifact curves[0].keys[0].value has invalid dimensions",
+        ),
+        (
+            "float",
+            "remove",
+            "inSlope",
+            None,
+            "animation artifact curves[3].keys[0].inSlope is required",
+        ),
+        (
+            "pptr",
+            "set",
+            "target",
+            {"file_id": True, "path_id": 100},
+            "animation artifact curves[4].keys[0].target has invalid identity",
+        ),
+    ],
+)
+def test_curve_key_validation_keeps_family_specific_errors(
+    kind: str, operation: str, field: str, invalid_value: object, message: str
+) -> None:
+    artifact = _generic_artifact()
+    curve = next(curve for curve in artifact["curves"] if curve["kind"] == kind)
+    key = curve["keys"][0]
+    if operation == "remove":
+        key.pop(field)
+    else:
+        key[field] = invalid_value
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == message
+
+
+def test_stream_validation_keeps_streamed_before_dense_order() -> None:
+    artifact = _generic_artifact()
+    artifact["streams"]["streamed"] = [None]
+    artifact["streams"]["dense"] = None
+    artifact["streams"]["constant"] = None
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact streams.streamed[0] has invalid structure"
+
+
+def test_diagnostic_validation_precedes_content_hash_comparison() -> None:
+    artifact = _generic_artifact()
+    artifact["diagnostics"] = [None]
+    artifact["content_hash"] = ""
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact.content_hash must be a non-empty string"
+
+    artifact["content_hash"] = "stale"
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact diagnostic requires a code and message"
+
+    artifact = _generic_artifact()
+    artifact["content_hash"] = "stale"
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact.content_hash does not match its document"
+
+
+def test_diagnostic_validation_keeps_legacy_and_severity_rules() -> None:
+    artifact = _generic_artifact()
+    artifact["diagnostics"] = [{"code": "other", "message": "legacy"}]
+    artifact["content_hash"] = _artifact_hash(artifact)
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == (
+        "legacy animation diagnostics without severity are only supported for "
+        f"{DIAG_ANIMATION_UNSUPPORTED_BINDING}"
+    )
+
+    artifact["diagnostics"] = [
+        {"code": DIAG_ANIMATION_UNSUPPORTED_BINDING, "message": "bad severity", "severity": "debug"}
+    ]
+    artifact["content_hash"] = _artifact_hash(artifact)
+    with pytest.raises(ValueError) as exc_info:
+        validate_animation_artifact(artifact)
+
+    assert str(exc_info.value) == "animation artifact diagnostic has invalid severity"
 
 
 def test_v1_cache_without_diagnostic_severity_remains_loadable(tmp_path) -> None:
