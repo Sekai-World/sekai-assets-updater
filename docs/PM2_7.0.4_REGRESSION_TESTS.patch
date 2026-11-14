@@ -1,0 +1,2835 @@
+diff --git a/package.json b/package.json
+index f2a9a83..355553e 100644
+--- a/package.json
++++ b/package.json
+@@ -48,6 +48,8 @@
+   "types": "types/index.d.ts",
+   "scripts": {
+     "test:unit": "bash test/unit.sh",
++    "test:fork-async-spawn": "mocha --exit test/programmatic/fork_async_spawn.mocha.js test/programmatic/fork_async_spawn_rpc.mocha.js",
++    "test:pm2-update-recovery": "mocha --exit test/programmatic/pm2_update_recovery.mocha.js",
+     "test:e2e": "bash test/e2e.sh",
+     "test": "bash test/unit.sh && bash test/e2e.sh",
+     "test:parallel": "bash test/docker-parallel.sh",
+--- /dev/null
++++ b/test/programmatic/fork_async_spawn.mocha.js
+@@ -0,0 +1,1150 @@
++/**
++ * Regression coverage for asynchronous child_process.spawn() failures in
++ * fork mode. This suite uses an isolated PM2_HOME and never starts a daemon.
++ */
++
++var assert = require('assert');
++var childProcess = require('child_process');
++var EventEmitter = require('events');
++var fs = require('fs');
++var os = require('os');
++var path = require('path');
++
++var testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pm2-async-spawn-'));
++process.env.PM2_HOME = testHome;
++process.env.OVER_HOME = testHome;
++process.env.PM2_MODULE_CONF_FILE = path.join(testHome, 'module_conf.json');
++process.env.NODE_ENV = 'test';
++fs.mkdirSync(path.join(testHome, 'logs'));
++fs.mkdirSync(path.join(testHome, 'pids'));
++fs.writeFileSync(path.join(testHome, 'module_conf.json'), '{}');
++
++// God.init() schedules its daemon worker after 500ms. This test exercises the
++// in-process God state machine only, so suppress that one startup timer while
++// loading God and leave every other timer untouched.
++var originalSetTimeout = global.setTimeout;
++global.setTimeout = function(callback) {
++  if (callback && callback.toString().indexOf('God.Worker.start') !== -1)
++    return { unref: function() {} };
++  return originalSetTimeout.apply(this, arguments);
++};
++
++var God = require('../../lib/God');
++var Utility = require('../../lib/Utility');
++var cst = require('../../constants');
++global.setTimeout = originalSetTimeout;
++
++// Worker.start() is deliberately not run in this isolated test process.
++God.registerCron = function() {};
++
++var activeRuns = [];
++var fixturePath = path.join(testHome, 'fork-app.js');
++var nameCounter = 0;
++
++function writeFixture(contents) {
++  fs.writeFileSync(fixturePath, contents);
++  return fixturePath;
++}
++
++function makeEnv(overrides) {
++  var name = 'async-spawn-' + (++nameCounter);
++  return Object.assign({
++    name: name,
++    cwd: testHome,
++    pm_cwd: testHome,
++    pm_exec_path: fixturePath,
++    exec_interpreter: process.execPath,
++    exec_mode: 'fork_mode',
++    node_args: [],
++    args: [],
++    env: {},
++    pm_pid_path: path.join(testHome, 'pids', name + '.pid'),
++    pm_out_log_path: path.join(testHome, 'logs', name + '-out.log'),
++    pm_err_log_path: path.join(testHome, 'logs', name + '-err.log'),
++    autostart: true,
++    autorestart: false,
++    wait_ready: false,
++    listen_timeout: 1000,
++    min_uptime: 1000,
++    max_restarts: 16,
++    unstable_restarts: 0
++  }, overrides || {});
++}
++
++function startApp(env, withCallback) {
++  var state = {
++    child: null,
++    callbackCount: 0,
++    spawnErrorCount: 0,
++    exitCount: 0,
++    closeCount: 0,
++    killCount: 0,
++    logStreams: [],
++    events: [],
++    closePromise: null
++  };
++  state.closePromise = new Promise(function(resolve) { state.resolveClose = resolve; });
++
++  var originalSpawn = childProcess.spawn;
++  var originalStartLogging = Utility.startLogging;
++  var eventListener = function(event) {
++    if (event.process && event.process.name === env.name)
++      state.events.push(event.event);
++  };
++
++  childProcess.spawn = function() {
++    var child = originalSpawn.apply(this, arguments);
++    state.child = child;
++    var originalKill = child.kill;
++    child.kill = function() {
++      state.killCount++;
++      return originalKill.apply(this, arguments);
++    };
++    child.on('error', function() { state.spawnErrorCount++; });
++    child.on('exit', function() { state.exitCount++; });
++    child.once('close', function(code, signal) {
++      state.closeCount++;
++      state.resolveClose({ code: code, signal: signal });
++    });
++    return child;
++  };
++
++  Utility.startLogging = function(stds, callback) {
++    return originalStartLogging.call(this, stds, function(err) {
++      state.logStreams = Object.keys(stds).map(function(key) {
++        return stds[key];
++      }).filter(function(stream) {
++        return stream && typeof stream.destroy === 'function';
++      });
++      return callback(err);
++    });
++  };
++
++  God.bus.on('process:event', eventListener);
++
++  var callbackTimer;
++  var result = new Promise(function(resolve, reject) {
++    if (withCallback !== false) {
++      callbackTimer = originalSetTimeout(function() {
++        reject(new Error('executeApp callback did not complete'));
++      }, 2000);
++    }
++
++    try {
++      if (withCallback === false) {
++        God.executeApp(env);
++        resolve(null);
++      }
++      else {
++        God.executeApp(env, function(err, proc) {
++          state.callbackCount++;
++          if (state.callbackCount === 1) {
++            clearTimeout(callbackTimer);
++            resolve({ err: err, proc: proc });
++          }
++        });
++      }
++    } catch (err) {
++      clearTimeout(callbackTimer);
++      reject(err);
++    }
++  });
++
++  var run = {
++    state: state,
++    result: result,
++    restore: function() {
++      childProcess.spawn = originalSpawn;
++      Utility.startLogging = originalStartLogging;
++      God.bus.removeListener('process:event', eventListener);
++      clearTimeout(callbackTimer);
++    }
++  };
++  activeRuns.push(run);
++  return run;
++}
++
++function nextTurn() {
++  return new Promise(function(resolve) { setImmediate(resolve); });
++}
++
++function assertLogsClosed(state) {
++  state.logStreams.forEach(function(stream) {
++    assert.strictEqual(stream.destroyed, true, 'fork log stream should be destroyed');
++  });
++}
++
++function waitForClose(state) {
++  return new Promise(function(resolve) {
++    var timer = originalSetTimeout(resolve, 1000);
++    state.closePromise.then(function(result) {
++      clearTimeout(timer);
++      resolve(result);
++    });
++  });
++}
++
++function spawnControlledChild(pm2Env) {
++  return new Promise(function(resolve, reject) {
++    var child = childProcess.spawn(process.execPath, [
++      '-e', 'setInterval(function() {}, 1000);'
++    ], { stdio: 'ignore' });
++    child.pm2_env = pm2Env;
++    child.process = { pid: child.pid };
++    child.killCount = 0;
++    child.testClose = new Promise(function(resolve) {
++      child.once('close', function(result) {
++        child.testClosed = true;
++        resolve(result);
++      });
++    });
++    var originalKill = child.kill.bind(child);
++    child.kill = function(signal) {
++      child.killCount++;
++      return originalKill(signal);
++    };
++    child.once('error', reject);
++    child.once('spawn', function() {
++      resolve(child);
++    });
++  });
++}
++
++function trackChildClose(child) {
++  if (!child) return Promise.resolve();
++  if (child.testClose) return child.testClose;
++  if (child.testClosed) return Promise.resolve();
++
++  child.testClose = new Promise(function(resolve) {
++    child.once('close', function(result) {
++      child.testClosed = true;
++      resolve(result);
++    });
++  });
++  return child.testClose;
++}
++
++function waitForChildClose(child) {
++  return trackChildClose(child);
++}
++
++function killTestChild(child) {
++  if (!child) return Promise.resolve();
++  if (child.exitCode !== null || child.signalCode !== null)
++    return waitForChildClose(child);
++  try { child.kill('SIGKILL'); } catch (e) {}
++  return waitForChildClose(child);
++}
++
++describe('fork mode asynchronous spawn failures', function() {
++  this.timeout(5000);
++
++  afterEach(async function() {
++    for (var i = activeRuns.length - 1; i >= 0; i--) {
++      var run = activeRuns[i];
++      var state = run.state;
++      run.restore();
++      if (state.child && state.child.exitCode === null && state.child.signalCode === null) {
++        try { state.child.kill('SIGKILL'); } catch (e) {}
++      }
++      if (state.closePromise) {
++        await waitForClose(state);
++      }
++      if (state.child && state.child.pm2_env)
++        delete God.clusters_db[state.child.pm2_env.pm_id];
++      activeRuns.splice(i, 1);
++    }
++  });
++
++  after(function() {
++    fs.rmSync(testHome, { recursive: true, force: true });
++  });
++
++  [false, true].forEach(function(waitReady) {
++    it('reports invalid interpreter spawn failure once (wait_ready=' + waitReady + ')', async function() {
++      writeFixture('setInterval(function() {}, 1000);');
++      var env = makeEnv({
++        exec_interpreter: path.join(testHome, 'missing-interpreter'),
++        wait_ready: waitReady
++      });
++      var run = startApp(env);
++      var response = await run.result;
++      var closed = await run.state.closePromise;
++      await nextTurn();
++
++      assert(response.err instanceof Error);
++      assert.strictEqual(response.err.code, 'ENOENT');
++      assert.strictEqual(response.proc, undefined);
++      assert.strictEqual(run.state.callbackCount, 1);
++      assert.strictEqual(run.state.spawnErrorCount, 1);
++      assert.strictEqual(run.state.exitCount, 0, 'spawn failure has no exit event');
++      assert.strictEqual(run.state.closeCount, 1);
++      assert.strictEqual(closed.code, -2);
++      assert.strictEqual(run.state.killCount, 0, 'do not kill a child that never spawned');
++      assert.deepStrictEqual(run.state.events.filter(function(event) { return event === 'online'; }), []);
++      assert.strictEqual(run.state.child.pid, undefined);
++      assert.strictEqual(fs.existsSync(run.state.child.pm2_env.pm_pid_path), false);
++      assert.strictEqual(God.clusters_db[run.state.child.pm2_env.pm_id], undefined);
++      assertLogsClosed(run.state);
++    });
++
++    it('reports nonexistent cwd spawn failure once (wait_ready=' + waitReady + ')', async function() {
++      writeFixture('setInterval(function() {}, 1000);');
++      var env = makeEnv({
++        pm_cwd: path.join(testHome, 'missing-working-directory'),
++        wait_ready: waitReady
++      });
++      var run = startApp(env);
++      var response = await run.result;
++      await run.state.closePromise;
++      await nextTurn();
++
++      assert(response.err instanceof Error);
++      assert.strictEqual(response.err.code, 'ENOENT');
++      assert.strictEqual(response.proc, undefined);
++      assert.strictEqual(run.state.callbackCount, 1);
++      assert.strictEqual(run.state.spawnErrorCount, 1);
++      assert.strictEqual(run.state.exitCount, 0);
++      assert.strictEqual(run.state.closeCount, 1);
++      assert.strictEqual(run.state.killCount, 0);
++      assert.deepStrictEqual(run.state.events.filter(function(event) { return event === 'online'; }), []);
++      assert.strictEqual(run.state.child.pid, undefined);
++      assert.strictEqual(fs.existsSync(run.state.child.pm2_env.pm_pid_path), false);
++      assert.strictEqual(God.clusters_db[run.state.child.pm2_env.pm_id], undefined);
++      assertLogsClosed(run.state);
++    });
++  });
++
++  it('reports a successful long-running fork online only after spawn and preserves its live PID', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var run = startApp(makeEnv());
++    var response = await run.result;
++
++    assert.ifError(response.err);
++    assert(response.proc);
++    assert.strictEqual(run.state.callbackCount, 1);
++    assert.strictEqual(run.state.child.pid > 0, true);
++    assert.strictEqual(response.proc.process.pid, run.state.child.pid);
++    assert.strictEqual(response.proc.pm2_env.status, cst.ONLINE_STATUS);
++    assert.deepStrictEqual(run.state.events.filter(function(event) { return event === 'online'; }), ['online']);
++    assert.strictEqual(fs.readFileSync(response.proc.pm2_env.pm_pid_path, 'utf8'), String(run.state.child.pid));
++    assert.strictEqual(process.kill(run.state.child.pid, 0), true);
++
++    run.state.child.kill('SIGTERM');
++    await run.state.closePromise;
++    await nextTurn();
++    assert.strictEqual(run.state.callbackCount, 1);
++    assert.strictEqual(run.state.closeCount, 1);
++    assertLogsClosed(run.state);
++  });
++
++  it('closes an already-open log stream when a later log path fails to open', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var env = makeEnv({
++      pm_out_log_path: path.join(testHome, 'logs', 'opened-before-error.log'),
++      pm_err_log_path: path.join(testHome, 'missing-log-directory', 'error.log')
++    });
++    var run = startApp(env);
++    var response = await run.result;
++    await nextTurn();
++
++    try {
++      assert(response.err instanceof Error);
++      assert.strictEqual(response.err.code, 'ENOENT');
++      assert.strictEqual(run.state.callbackCount, 1);
++      assert.strictEqual(run.state.child, null, 'spawn must not be attempted after log setup fails');
++      assert.strictEqual(run.state.logStreams.length, 2,
++        'the successfully opened and failing write streams should both be observed');
++      assertLogsClosed(run.state);
++      assert.strictEqual(fs.existsSync(env.pm_pid_path), false);
++    } finally {
++      run.restore();
++    }
++  });
++
++  [false, true].forEach(function(waitReady) {
++    it('concludes a quick exit once (wait_ready=' + waitReady + ')', async function() {
++      writeFixture('process.exit(0);');
++      var run = startApp(makeEnv({ wait_ready: waitReady, listen_timeout: 1500 }));
++      var response = await run.result;
++      await run.state.closePromise;
++      await nextTurn();
++
++      assert.ifError(response.err);
++      assert.strictEqual(run.state.callbackCount, 1);
++      assert.strictEqual(run.state.closeCount, 1);
++      assert.strictEqual(run.state.events.filter(function(event) { return event === 'online'; }).length, 1);
++      assert.strictEqual(response.proc.pm2_env.status, cst.STOPPED_STATUS);
++      assertLogsClosed(run.state);
++    });
++  });
++
++  it('concludes repeated wait_ready messages only once', async function() {
++    writeFixture([
++      "process.send('ready', function() {",
++      "  process.send('ready', function() { process.exit(0); });",
++      '});'
++    ].join('\n'));
++    var run = startApp(makeEnv({ wait_ready: true, listen_timeout: 1500 }));
++    var response = await run.result;
++    await run.state.closePromise;
++    await nextTurn();
++
++    assert.ifError(response.err);
++    assert.strictEqual(run.state.callbackCount, 1);
++    assert.strictEqual(run.state.closeCount, 1);
++    assert.strictEqual(run.state.events.filter(function(event) { return event === 'online'; }).length, 1);
++    assert.strictEqual(response.proc.pm2_env.status, cst.STOPPED_STATUS);
++    assertLogsClosed(run.state);
++  });
++
++  it('keeps cluster-mode successful starts on their existing online/exit path', async function() {
++    var env = makeEnv({ exec_mode: 'cluster_mode' });
++    var originalNodeApp = God.nodeApp;
++    var clusterProcess;
++    var callbackCount = 0;
++    var events = [];
++    var eventListener = function(event) {
++      if (event.process && event.process.name === env.name)
++        events.push(event.event);
++    };
++    God.bus.on('process:event', eventListener);
++
++    God.nodeApp = function(pm2Env, callback) {
++      clusterProcess = new EventEmitter();
++      clusterProcess.pm2_env = pm2Env;
++      clusterProcess.process = { pid: process.pid };
++      callback(null, clusterProcess);
++      setImmediate(function() {
++        clusterProcess.emit('online');
++        clusterProcess.emit('online');
++        clusterProcess.emit('exit', 0, null);
++      });
++    };
++
++    try {
++      var response = await new Promise(function(resolve, reject) {
++        var timer = originalSetTimeout(function() {
++          reject(new Error('cluster executeApp callback did not complete'));
++        }, 1000);
++        God.executeApp(env, function(err, proc) {
++          callbackCount++;
++          clearTimeout(timer);
++          resolve({ err: err, proc: proc });
++        });
++      });
++      await nextTurn();
++
++      assert.ifError(response.err);
++      assert.strictEqual(callbackCount, 1);
++      assert.deepStrictEqual(events.filter(function(event) { return event === 'online'; }), ['online']);
++      assert.strictEqual(response.proc.pm2_env.status, cst.STOPPED_STATUS);
++    } finally {
++      God.nodeApp = originalNodeApp;
++      God.bus.removeListener('process:event', eventListener);
++      if (clusterProcess)
++        delete God.clusters_db[clusterProcess.pm2_env.pm_id];
++    }
++  });
++
++  it('finalizes a failed automatic restart without retaining a stale PID', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var env = makeEnv({
++      exec_interpreter: path.join(testHome, 'missing-interpreter'),
++      autorestart: false
++    });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.STOPPED_STATUS,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 7654321 }
++    };
++    God.clusters_db[id] = proc;
++
++    var run = startApp(env, false);
++    await run.result;
++    await run.state.closePromise;
++
++    assert.strictEqual(run.state.callbackCount, 0);
++    assert.strictEqual(proc.pm2_env.status, cst.STOPPED_STATUS);
++    assert.strictEqual(proc.process.pid, 0);
++    assert.strictEqual(proc.pm2_env.exit_code, cst.ERROR_EXIT);
++    assert.strictEqual(run.state.events.filter(function(event) { return event === 'online'; }).length, 0);
++    assert.strictEqual(run.state.events.filter(function(event) { return event === 'exit'; }).length, 1);
++  });
++
++  it('does not let a late failed attempt disturb an online replacement', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var env = makeEnv({
++      exec_interpreter: path.join(testHome, 'missing-interpreter'),
++      autorestart: false
++    });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.ONLINE_STATUS,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: process.pid }
++    };
++    God.clusters_db[id] = proc;
++
++    var run = startApp(env, false);
++    await run.result;
++    await run.state.closePromise;
++
++    assert.strictEqual(proc.pm2_env.status, cst.ONLINE_STATUS);
++    assert.strictEqual(proc.process.pid, process.pid);
++    assert.strictEqual(process.kill(process.pid, 0), true);
++    assert.strictEqual(run.state.killCount, 0);
++    assert.strictEqual(run.state.events.filter(function(event) { return event === 'exit'; }).length, 0);
++  });
++
++  it('keeps one child when two starts race on the same stopped entry', async function() {
++    var env = makeEnv({ autorestart: false, status: cst.STOPPED_STATUS });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.STOPPED_STATUS,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 0 }
++    };
++    var originalForkMode = God.forkMode;
++    var pending = [];
++    var events = [];
++    var callbackCounts = [0, 0];
++    var eventListener = function(event) {
++      if (event.process && event.process.name === env.name)
++        events.push(event.event);
++    };
++    God.clusters_db[id] = proc;
++    God.bus.on('process:event', eventListener);
++    God.forkMode = function(forkEnv, callback) {
++      pending.push({ callback: callback, child: spawnControlledChild(forkEnv) });
++    };
++
++    var results = [];
++    var oldChild;
++    var newChild;
++    try {
++      var firstStart = new Promise(function(resolve) {
++        God.startProcessId(id, function(err, result) {
++          callbackCounts[0]++;
++          resolve({ err: err, result: result });
++        });
++      });
++      oldChild = await pending[0].child;
++
++      var secondStart = new Promise(function(resolve) {
++        God.startProcessId(id, function(err, result) {
++          callbackCounts[1]++;
++          resolve({ err: err, result: result });
++        });
++      });
++      newChild = await pending[1].child;
++
++      pending[1].callback(null, newChild);
++      results[1] = await secondStart;
++      pending[0].callback(null, oldChild);
++      results[0] = await firstStart;
++      await waitForChildClose(oldChild);
++
++      assert.ifError(results[1].err);
++      assert(results[0].err);
++      assert.strictEqual(results[0].err.code, 'ECANCELED');
++      assert.deepStrictEqual(callbackCounts, [1, 1], 'each start callback must complete exactly once');
++      assert.strictEqual(God.clusters_db[id], newChild, 'only the winning child may occupy the process slot');
++      assert.strictEqual(newChild.pm2_env.status, cst.ONLINE_STATUS);
++      assert.strictEqual(oldChild.killCount, 1);
++      assert.strictEqual(oldChild.exitCode !== null || oldChild.signalCode !== null, true,
++        'the losing child must exit');
++      assert.strictEqual(newChild.killCount, 0);
++      assert.deepStrictEqual(events.filter(function(event) { return event === 'online'; }), ['online']);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(newChild.pid),
++        'late loser cleanup must preserve the winner pid file');
++    } finally {
++      await killTestChild(oldChild);
++      await killTestChild(newChild);
++      God.forkMode = originalForkMode;
++      God.bus.removeListener('process:event', eventListener);
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++
++  it('writes the pid file only for the accepted generation when new child spawns first', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var env = makeEnv({ autorestart: false, status: cst.STOPPED_STATUS });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.STOPPED_STATUS,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 0 }
++    };
++    var originalForkMode = God.forkMode;
++    var attempts = [];
++    var onlineEvents = [];
++    var eventListener = function(event) {
++      if (event.process && event.process.name === env.name && event.event === 'online')
++        onlineEvents.push(event);
++    };
++    God.clusters_db[id] = proc;
++    God.bus.on('process:event', eventListener);
++    God.forkMode = function(pm2Env, callback) {
++      attempts.push({ pm2Env: pm2Env, callback: callback });
++    };
++
++    function spawnFor(attempt) {
++      return new Promise(function(resolve, reject) {
++        originalForkMode.call(God, attempt.pm2Env, function(err, child) {
++          if (err) return reject(err);
++          trackChildClose(child);
++          resolve(child);
++        });
++      });
++    }
++
++    var oldChild;
++    var newChild;
++    try {
++      // Hold the older attempt before it calls child_process.spawn(). A manual
++      // start creates the newer generation, whose real child is spawned and
++      // accepted first; only then let the older real spawn complete.
++      God.executeApp(proc.pm2_env);
++      var manualStart = new Promise(function(resolve) {
++        God.startProcessId(id, function(err, result) {
++          resolve({ err: err, result: result });
++        });
++      });
++      assert.strictEqual(attempts.length, 2);
++
++      newChild = await spawnFor(attempts[1]);
++      assert.strictEqual(fs.existsSync(env.pm_pid_path), false,
++        'ForkMode must not publish a PID before executeApp validates the attempt');
++      attempts[1].callback(null, newChild);
++      var started = await manualStart;
++      assert.ifError(started.err);
++      assert.strictEqual(God.clusters_db[id], newChild);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(newChild.pid));
++
++      oldChild = await spawnFor(attempts[0]);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(newChild.pid),
++        'a later OS spawn event from an old attempt must not overwrite the accepted PID');
++      var oldClose = new Promise(function(resolve) { oldChild.once('close', resolve); });
++      attempts[0].callback(null, oldChild);
++      await oldClose;
++
++      assert.strictEqual(oldChild.exitCode !== null || oldChild.signalCode !== null, true);
++      assert.strictEqual(newChild.exitCode, null);
++      assert.strictEqual(newChild.killCount || 0, 0);
++      assert.strictEqual(God.clusters_db[id], newChild);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(newChild.pid),
++        'stale cleanup must preserve the replacement PID file');
++      assert.strictEqual(onlineEvents.length, 1, 'only the accepted generation may report online');
++    } finally {
++      await killTestChild(oldChild);
++      await killTestChild(newChild);
++      God.forkMode = originalForkMode;
++      God.bus.removeListener('process:event', eventListener);
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++
++  it('rejects a concurrent restart while stop is still waiting for the old child', async function() {
++    var env = makeEnv({ autorestart: false, status: cst.ONLINE_STATUS });
++    var id = God.getNewId();
++    env.pm_id = id;
++    env.status = cst.ONLINE_STATUS;
++    var oldChild = await spawnControlledChild(env);
++    var originalKillProcess = God.killProcess;
++    var originalForkMode = God.forkMode;
++    var finishKill;
++    var pendingFork;
++    var forkCount = 0;
++    var firstRestartCount = 0;
++    var concurrentStartCount = 0;
++    var proc = oldChild;
++    proc.pm2_env.status = cst.ONLINE_STATUS;
++    proc.pm2_env.pm_id = id;
++    God.clusters_db[id] = proc;
++    God.killProcess = function(pid, _pm2Env, callback) {
++      assert.strictEqual(pid, oldChild.pid);
++      finishKill = callback;
++    };
++    God.forkMode = function(forkEnv, callback) {
++      forkCount++;
++      pendingFork = { callback: callback, child: spawnControlledChild(forkEnv) };
++    };
++
++    var firstRestart;
++    var concurrentStart;
++    var newChild;
++    try {
++      firstRestart = new Promise(function(resolve) {
++        God.restartProcessId({ id: id }, function(err, result) {
++          firstRestartCount++;
++          resolve({ err: err, result: result });
++        });
++      });
++      assert.strictEqual(proc.pm2_env.status, cst.STOPPING_STATUS);
++      assert.strictEqual(typeof finishKill, 'function', 'first restart must still be waiting for stop');
++
++      concurrentStart = new Promise(function(resolve) {
++        God.restartProcessId({ id: id }, function(err, result) {
++          concurrentStartCount++;
++          resolve({ err: err, result: result });
++        });
++      });
++      var rejectedStart = await concurrentStart;
++      assert(rejectedStart.err, 'a second start must be rejected while the existing PID is stopping');
++      assert.strictEqual(concurrentStartCount, 1);
++      assert.strictEqual(forkCount, 0, 'the rejected start must not launch another child');
++
++      await killTestChild(oldChild);
++      finishKill(null);
++      newChild = await pendingFork.child;
++      pendingFork.callback(null, newChild);
++      var restarted = await firstRestart;
++      assert.ifError(restarted.err);
++      assert.strictEqual(firstRestartCount, 1);
++      assert.strictEqual(forkCount, 1);
++      assert.strictEqual(God.clusters_db[id], newChild);
++      assert.strictEqual(newChild.pm2_env.status, cst.ONLINE_STATUS);
++    } finally {
++      await killTestChild(oldChild);
++      await killTestChild(newChild);
++      God.killProcess = originalKillProcess;
++      God.forkMode = originalForkMode;
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++
++  it('kills and reaps a fork child whose spawn succeeds after an explicit stop', async function() {
++    var env = makeEnv({ autorestart: true, restart_delay: 100 });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.WAITING_RESTART,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 0 }
++    };
++    var originalForkMode = God.forkMode;
++    var pending;
++    var events = [];
++    var eventListener = function(event) {
++      if (event.process && event.process.name === env.name)
++        events.push(event.event);
++    };
++    God.clusters_db[id] = proc;
++    God.bus.on('process:event', eventListener);
++    God.forkMode = function(forkEnv, callback) {
++      pending = { callback: callback, child: spawnControlledChild(forkEnv) };
++    };
++
++    function stop() {
++      return new Promise(function(resolve, reject) {
++        God.stopProcessId(id, function(err) {
++          if (err) return reject(err);
++          resolve();
++        });
++      });
++    }
++
++    var child;
++    try {
++      God.executeApp(env);
++      child = await pending.child;
++      await stop();
++      pending.callback(null, child);
++      await waitForChildClose(child);
++
++      assert.strictEqual(child.killCount, 1, 'the orphan child must be terminated through its own handle');
++      assert.strictEqual(child.exitCode !== null || child.signalCode !== null, true,
++        'the orphan child must be reaped');
++      assert.strictEqual(God.clusters_db[id], proc, 'stale success must not replace the stopped entry');
++      assert.strictEqual(proc.pm2_env.status, cst.STOPPED_STATUS);
++      assert.strictEqual(proc.process.pid, 0);
++      assert.deepStrictEqual(events.filter(function(event) { return event === 'online'; }), [],
++        'stale success must not emit an online event');
++      assert.strictEqual(fs.existsSync(env.pm_pid_path), false,
++        'the orphan child pid file should be removed');
++    } finally {
++      await killTestChild(child);
++      clearTimeout(proc.pm2_env.restart_task);
++      God.forkMode = originalForkMode;
++      God.bus.removeListener('process:event', eventListener);
++      delete God.clusters_db[id];
++    }
++  });
++
++  it('escalates a failed stale-child signal and cleans its pid file after exit', async function() {
++    var env = makeEnv({ autorestart: true, kill_timeout: 25 });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.WAITING_RESTART,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 0 }
++    };
++    var originalForkMode = God.forkMode;
++    var pending;
++    var child;
++    God.clusters_db[id] = proc;
++    God.forkMode = function(forkEnv, callback) {
++      pending = { callback: callback, child: spawnControlledChild(forkEnv) };
++    };
++
++    try {
++      God.executeApp(env);
++      child = await pending.child;
++      var realChildKill = child.kill;
++      var signals = [];
++      child.kill = function(signal) {
++        signals.push(signal);
++        if (signals.length === 1)
++          return false; // simulate a failed initial signal while the process remains alive
++        return realChildKill(signal);
++      };
++
++      await new Promise(function(resolve, reject) {
++        God.stopProcessId(id, function(err) {
++          if (err) return reject(err);
++          resolve();
++        });
++      });
++      pending.callback(null, child);
++      await waitForChildClose(child);
++      await new Promise(function(resolve) { originalSetTimeout(resolve, 40); });
++
++      assert.deepStrictEqual(signals, [cst.KILL_SIGNAL, 'SIGKILL'],
++        'a false initial kill result must leave the escalation timer armed');
++      assert.strictEqual(child.exitCode !== null || child.signalCode !== null, true);
++      assert.strictEqual(child.killCount, 1, 'timeout escalation should signal the owned child once');
++      assert.strictEqual(fs.existsSync(env.pm_pid_path), false, 'stale child pid file must be removed');
++      assert.strictEqual(God.clusters_db[id], proc, 'discarded child must never be registered');
++    } finally {
++      await killTestChild(child);
++      God.forkMode = originalForkMode;
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++
++  it('discards a stale fork success after a manual restart without killing the new process', async function() {
++    var env = makeEnv({ autorestart: false });
++    var id = God.getNewId();
++    env.pm_id = id;
++    var proc = {
++      pm2_env: Object.assign({}, env, {
++        pm_id: id,
++        status: cst.WAITING_RESTART,
++        created_at: Date.now(),
++        pm_uptime: Date.now(),
++        restart_time: 0,
++        unstable_restarts: 0
++      }),
++      process: { pid: 0 }
++    };
++    var originalForkMode = God.forkMode;
++    var pending = [];
++    var events = [];
++    var eventListener = function(event) {
++      if (event.process && event.process.name === env.name)
++        events.push(event.event);
++    };
++    God.clusters_db[id] = proc;
++    God.bus.on('process:event', eventListener);
++    God.forkMode = function(forkEnv, callback) {
++      pending.push({ callback: callback, child: spawnControlledChild(forkEnv) });
++    };
++
++    function stop() {
++      return new Promise(function(resolve, reject) {
++        God.stopProcessId(id, function(err) {
++          if (err) return reject(err);
++          resolve();
++        });
++      });
++    }
++
++    var oldChild;
++    var newChild;
++    try {
++      God.executeApp(env);
++      oldChild = await pending[0].child;
++      await stop();
++
++      var manualStart = new Promise(function(resolve) {
++        God.restartProcessId({ id: id }, function(err, result) {
++          resolve({ err: err, result: result });
++        });
++      });
++      newChild = await pending[1].child;
++      pending[1].callback(null, newChild);
++      var manualResult = await manualStart;
++      assert.ifError(manualResult.err);
++
++      var replacement = God.clusters_db[id];
++      assert.strictEqual(replacement, newChild, 'manual restart should register its own child');
++      assert.strictEqual(replacement.pm2_env.status, cst.ONLINE_STATUS);
++      assert.strictEqual(replacement.process.pid, newChild.pid);
++
++      // Deliver the earlier automatic attempt's success only after the manual
++      // generation is online. It must be killed without replacing or signaling
++      // the newly registered child.
++      pending[0].callback(null, oldChild);
++      await waitForChildClose(oldChild);
++
++      assert.strictEqual(oldChild.killCount, 1);
++      assert.strictEqual(newChild.killCount, 0);
++      assert.strictEqual(newChild.exitCode, null);
++      assert.strictEqual(process.kill(newChild.pid, 0), true);
++      assert.strictEqual(God.clusters_db[id], replacement);
++      assert.deepStrictEqual(events.filter(function(event) { return event === 'online'; }), ['online'],
++        'only the manual generation may emit online');
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(newChild.pid),
++        'stale cleanup must preserve the replacement pid file');
++    } finally {
++      await killTestChild(oldChild);
++      await killTestChild(newChild);
++      God.forkMode = originalForkMode;
++      God.bus.removeListener('process:event', eventListener);
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++
++  [
++    { name: 'explicit stop completes before the spawn error', errorFirst: false },
++    { name: 'spawn error completes before the explicit stop', errorFirst: true }
++  ].forEach(function(scenario) {
++    it('keeps automatic restart stopped when ' + scenario.name, async function() {
++      var delayMs = 60;
++      var env = makeEnv({
++        autorestart: true,
++        restart_delay: delayMs,
++        status: cst.WAITING_RESTART,
++        restart_time: 0,
++        unstable_restarts: 0
++      });
++      var id = God.getNewId();
++      env.pm_id = id;
++      var proc = {
++        pm2_env: Object.assign({}, env, {
++          pm_id: id,
++          status: cst.WAITING_RESTART,
++          created_at: Date.now(),
++          pm_uptime: Date.now(),
++          restart_time: 0,
++          unstable_restarts: 0
++        }),
++        process: { pid: 0 }
++      };
++      var originalForkMode = God.forkMode;
++      var forkCount = 0;
++      var finishSpawn;
++      God.clusters_db[id] = proc;
++      God.forkMode = function(_env, callback) {
++        forkCount++;
++        finishSpawn = callback;
++      };
++
++      function stop() {
++        return new Promise(function(resolve, reject) {
++          God.stopProcessId(id, function(err) {
++            if (err) return reject(err);
++            resolve();
++          });
++        });
++      }
++
++      try {
++        God.executeApp(env);
++        assert.strictEqual(forkCount, 1, 'one automatic restart attempt should be pending');
++
++        if (scenario.errorFirst) {
++          finishSpawn(Object.assign(new Error('simulated ENOENT'), { code: 'ENOENT' }));
++          assert.strictEqual(proc.pm2_env.status, cst.WAITING_RESTART,
++            'a non-intentionally stopped failure should enter delayed retry');
++          assert(proc.pm2_env.restart_task, 'failed automatic retry should schedule its configured delay');
++          await stop();
++        } else {
++          await stop();
++          assert.strictEqual(proc.pm2_env.status, cst.STOPPED_STATUS,
++            'stop callback should complete before the spawn error arrives');
++          finishSpawn(Object.assign(new Error('simulated ENOENT'), { code: 'ENOENT' }));
++        }
++
++        await new Promise(function(resolve) { originalSetTimeout(resolve, delayMs + 80); });
++        assert.strictEqual(proc.pm2_env.status, cst.STOPPED_STATUS);
++        assert.strictEqual(proc.process.pid, 0);
++        assert.strictEqual(forkCount, 1, 'explicit stop must cancel/suppress the delayed retry');
++      } finally {
++        clearTimeout(proc.pm2_env.restart_task);
++        God.forkMode = originalForkMode;
++        delete God.clusters_db[id];
++      }
++    });
++  });
++
++  it('leaves fixed-delay and exponential-backoff overlimits errored without a retry task', function() {
++    [
++      { restart_delay: 100 },
++      { exp_backoff_restart_delay: 100 }
++    ].forEach(function(restartOptions) {
++      var env = makeEnv(Object.assign({
++        autorestart: true,
++        min_uptime: 1000,
++        max_restarts: 1,
++        unstable_restarts: 0,
++        status: cst.LAUNCHING_STATUS
++      }, restartOptions));
++      var id = God.getNewId();
++      env.pm_id = id;
++      env.created_at = Date.now();
++      env.pm_uptime = Date.now();
++      var proc = {
++        pm2_env: env,
++        process: { pid: 987654 }
++      };
++      God.clusters_db[id] = proc;
++
++      try {
++        God.handleExit(proc, cst.ERROR_EXIT, 'SIGINT');
++        assert.strictEqual(env.status, cst.ERRORED_STATUS);
++        assert.strictEqual(proc.process.pid, 0);
++        assert.strictEqual(env.exit_code, cst.ERROR_EXIT);
++        assert.strictEqual(env.restart_task, undefined, 'overlimit must not schedule a retry');
++      } finally {
++        clearTimeout(env.restart_task);
++        delete God.clusters_db[id];
++      }
++    });
++  });
++
++  it('cancels a queued automatic retry when an explicit start wins the generation', async function() {
++    writeFixture('setInterval(function() {}, 1000);');
++    var env = makeEnv({
++      autorestart: true,
++      restart_delay: 10000,
++      status: cst.LAUNCHING_STATUS,
++      max_restarts: 10
++    });
++    var id = God.getNewId();
++    env.pm_id = id;
++    env.created_at = Date.now();
++    env.pm_uptime = Date.now();
++    env.restart_time = 0;
++    env.unstable_restarts = 0;
++    var proc = { pm2_env: env, process: { pid: 0 } };
++    var originalForkMode = God.forkMode;
++    var originalSetTimeout = global.setTimeout;
++    var originalClearTimeout = global.clearTimeout;
++    var scheduled = [];
++    var pendingFork;
++    var forkCount = 0;
++    var child;
++    var callbackCount = 0;
++    God.clusters_db[id] = proc;
++
++    global.setTimeout = function(callback, delay) {
++      var task = { callback: callback, delay: delay, clearCalled: false };
++      scheduled.push(task);
++      return task;
++    };
++    global.clearTimeout = function(task) {
++      if (scheduled.indexOf(task) !== -1) {
++        task.clearCalled = true;
++        return;
++      }
++      return originalClearTimeout(task);
++    };
++
++    try {
++      God.handleExit(proc, cst.ERROR_EXIT, 'SIGINT');
++      var oldRetry = env.restart_task;
++      assert.strictEqual(oldRetry.delay, env.restart_delay);
++      assert.strictEqual(env.status, cst.WAITING_RESTART);
++
++      // Keep clearTimeout instrumented to prove the manual start cancels the
++      // pending task; restore setTimeout so real child machinery is untouched.
++      global.setTimeout = originalSetTimeout;
++      God.forkMode = function(forkEnv, callback) {
++        forkCount++;
++        pendingFork = { callback: callback, child: spawnControlledChild(forkEnv) };
++      };
++      var startResult = new Promise(function(resolve) {
++        God.startProcessId(id, function(err, result) {
++          callbackCount++;
++          resolve({ err: err, result: result });
++        });
++      });
++      child = await pendingFork.child;
++      pendingFork.callback(null, child);
++      var started = await startResult;
++
++      assert.ifError(started.err);
++      assert.strictEqual(callbackCount, 1);
++      assert.strictEqual(oldRetry.clearCalled, true, 'explicit start must clear the queued automatic retry');
++      assert.strictEqual(forkCount, 1);
++      assert.strictEqual(God.clusters_db[id], child);
++      assert.strictEqual(child.pm2_env.status, cst.ONLINE_STATUS);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(child.pid));
++
++      // Simulate a timeout callback that was already queued as the explicit
++      // start completed. Captured identity/generation checks must make it inert.
++      oldRetry.callback();
++      await nextTurn();
++      assert.strictEqual(forkCount, 1, 'a stale retry callback must not create a second child');
++      assert.strictEqual(God.clusters_db[id], child);
++      assert.strictEqual(fs.readFileSync(env.pm_pid_path, 'utf8'), String(child.pid));
++      assert.strictEqual(callbackCount, 1);
++    } finally {
++      global.setTimeout = originalSetTimeout;
++      global.clearTimeout = originalClearTimeout;
++      await killTestChild(child);
++      God.forkMode = originalForkMode;
++      delete God.clusters_db[id];
++      try { fs.unlinkSync(env.pm_pid_path); } catch (e) {}
++    }
++  });
++});
+--- /dev/null
++++ b/test/programmatic/fork_async_spawn_rpc.mocha.js
+@@ -0,0 +1,154 @@
++/**
++ * End-to-end RPC regression for asynchronous fork spawn errors. The helper is
++ * a separate Node process so PM2's daemon and constants are isolated from the
++ * in-process unit suite.
++ */
++
++var assert = require('assert');
++var childProcess = require('child_process');
++var fs = require('fs');
++var os = require('os');
++var path = require('path');
++
++var projectRoot = path.resolve(__dirname, '../..');
++var helperPath = path.join(__dirname, 'fork_async_spawn_rpc_helper.js');
++var PATH_OVERRIDE_ENV = [
++  'PM2_CONF_FILE',
++  'PM2_MODULE_CONF_FILE',
++  'PM2_LOG_FILE_PATH',
++  'PM2_PID_FILE_PATH',
++  'PM2_RELOAD_LOCKFILE',
++  'PM2_DEFAULT_PID_PATH',
++  'PM2_DEFAULT_LOG_PATH',
++  'PM2_DEFAULT_MODULE_PATH',
++  'PM2_IO_ACCESS_TOKEN',
++  'PM2_DUMP_FILE_PATH',
++  'PM2_DUMP_BACKUP_FILE_PATH',
++  'PM2_DAEMON_RPC_PORT',
++  'PM2_DAEMON_PUB_PORT',
++  'PM2_INTERACTOR_RPC_PORT',
++  'PM2_INTERACTOR_LOG_FILE_PATH',
++  'PM2_INTERACTOR_PID_PATH',
++  'PM2_INTERACTION_CONF'
++];
++
++function isProcessAlive(pid) {
++  try {
++    process.kill(pid, 0);
++    // In minimal Linux containers PID 1 may not reap an exited detached daemon.
++    // kill(pid, 0) still succeeds for that zombie, so inspect /proc before
++    // deciding cleanup failed.
++    if (process.platform === 'linux') {
++      try {
++        var stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
++        var state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3);
++        if (state === 'Z' || state === 'X') return false;
++      } catch (statError) {
++        if (statError.code === 'ENOENT') return false;
++      }
++    }
++    return true;
++  } catch (err) {
++    return err.code === 'EPERM';
++  }
++}
++
++function delay(ms) {
++  return new Promise(function(resolve) { setTimeout(resolve, ms); });
++}
++
++async function stopIsolatedDaemonAndRemoveHome(baseDir, home, env) {
++  var expectedHome = path.resolve(home);
++  var killInvoked = false;
++
++  // This guard is intentionally adjacent to the pm2 kill invocation. Never
++  // issue that command unless every PM2 home override points into this test's
++  // fresh temporary directory.
++  assert(env.PM2_HOME, 'PM2_HOME must be explicitly set before cleanup');
++  assert(env.OVER_HOME, 'OVER_HOME must be explicitly set before cleanup');
++  assert(env.PM2_RPC_TEST_HOME, 'RPC test home must be explicitly set before cleanup');
++  assert.strictEqual(path.resolve(env.PM2_HOME || ''), expectedHome);
++  assert.strictEqual(path.resolve(env.OVER_HOME || ''), expectedHome);
++  assert.strictEqual(path.resolve(env.PM2_RPC_TEST_HOME || ''), expectedHome);
++  assert.strictEqual(path.resolve(env.PM2_MODULE_CONF_FILE || ''), path.join(expectedHome, 'module_conf.json'));
++  PATH_OVERRIDE_ENV.filter(function(key) { return key !== 'PM2_MODULE_CONF_FILE'; }).forEach(function(key) {
++    assert.strictEqual(env[key], undefined, key + ' must not override the isolated endpoint');
++  });
++  assert(expectedHome.startsWith(path.resolve(baseDir) + path.sep));
++  assert.notStrictEqual(expectedHome, path.resolve(os.homedir(), '.pm2'));
++
++  var pidFile = path.join(expectedHome, 'pm2.pid');
++  var daemonPid = 0;
++  if (fs.existsSync(pidFile))
++    daemonPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10) || 0;
++
++  if (daemonPid && isProcessAlive(daemonPid)) {
++    killInvoked = true;
++    var killed = childProcess.spawnSync(process.execPath, [path.join(projectRoot, 'bin/pm2'), 'kill'], {
++      cwd: projectRoot,
++      env: env,
++      encoding: 'utf8',
++      timeout: 15000
++    });
++    assert.ifError(killed.error);
++    assert.strictEqual(killed.status, 0,
++      'pm2 kill failed for isolated PM2_HOME:\n' + (killed.stdout || '') + (killed.stderr || ''));
++
++    var deadline = Date.now() + 5000;
++    while (isProcessAlive(daemonPid) && Date.now() < deadline)
++      await delay(50);
++    assert.strictEqual(isProcessAlive(daemonPid), false, 'isolated daemon should stop after pm2 kill');
++  }
++
++  fs.rmSync(baseDir, { recursive: true, force: true });
++  return killInvoked;
++}
++
++describe('fork async spawn failures over isolated PM2 RPC', function() {
++  this.timeout(90000);
++
++  it('returns launch errors, settles existing restart state, recovers fork start/stop, and limits failed retries', async function() {
++    if (process.platform === 'win32')
++      this.skip('PM2 hard-codes process-global Windows named pipes, so daemon RPC cannot be isolated');
++
++    var baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm2-async-spawn-rpc-'));
++    var home = path.join(baseDir, 'pm2-home');
++    fs.mkdirSync(home);
++
++    var env = Object.assign({}, process.env);
++    PATH_OVERRIDE_ENV.forEach(function(key) { delete env[key]; });
++    Object.assign(env, {
++      PM2_HOME: home,
++      OVER_HOME: home,
++      PM2_MODULE_CONF_FILE: path.join(home, 'module_conf.json'),
++      PM2_RPC_TEST_HOME: home,
++      PM2_NO_INTERACTION: 'true'
++    });
++
++    var helperSucceeded = false;
++    try {
++      var result = childProcess.spawnSync(process.execPath, [helperPath], {
++        cwd: projectRoot,
++        env: env,
++        encoding: 'utf8',
++        timeout: 45000,
++        maxBuffer: 4 * 1024 * 1024
++      });
++
++      assert.ifError(result.error);
++      assert.strictEqual(result.status, 0,
++        'isolated RPC helper failed:\n' + (result.stdout || '') + (result.stderr || ''));
++      var evidence = (result.stdout || '').split('\n').filter(function(line) {
++        return line.indexOf('RPC_REGRESSION_OK ') === 0;
++      })[0];
++      assert(evidence,
++        'helper should report the final isolated-daemon evidence');
++      console.log(evidence);
++      helperSucceeded = true;
++    } finally {
++      var killInvoked = await stopIsolatedDaemonAndRemoveHome(baseDir, home, env);
++      if (helperSucceeded)
++        assert.strictEqual(killInvoked, true, 'successful RPC regression must clean up its daemon with pm2 kill');
++    }
++  });
++});
+--- /dev/null
++++ b/test/programmatic/fork_async_spawn_rpc_helper.js
+@@ -0,0 +1,689 @@
++'use strict';
++
++var assert = require('assert');
++var fs = require('fs');
++var path = require('path');
++
++var rawHome = process.env.PM2_HOME;
++var rawOverHome = process.env.OVER_HOME;
++var rawRpcTestHome = process.env.PM2_RPC_TEST_HOME;
++var rawModuleConf = process.env.PM2_MODULE_CONF_FILE;
++if (!rawHome || !rawOverHome || !rawRpcTestHome || !rawModuleConf) {
++  throw new Error('Refusing RPC test without explicit non-empty PM2 home overrides');
++}
++
++var home = path.resolve(rawHome);
++if (home !== path.resolve(rawRpcTestHome) || home !== path.resolve(rawOverHome) ||
++    path.resolve(rawModuleConf) !== path.join(home, 'module_conf.json')) {
++  throw new Error('Refusing RPC test outside its explicitly isolated PM2_HOME');
++}
++
++process.env.PATH = home + path.delimiter + (process.env.PATH || '');
++fs.mkdirSync(path.join(home, 'pids'), { recursive: true });
++fs.mkdirSync(path.join(home, 'logs'), { recursive: true });
++fs.writeFileSync(process.env.PM2_MODULE_CONF_FILE, '{}');
++
++var cst = require('../../constants');
++var PM2 = require('../..');
++var pm2 = new PM2.custom({ pm2_home: home });
++var fixture = path.join(home, 'rpc-app.js');
++var counter = 0;
++
++assert.strictEqual(path.resolve(pm2.pm2_home), home, 'PM2 API must use the temporary home');
++
++function assertPathUnderHome(value, label) {
++  assert(value, label + ' must be configured');
++  var resolved = path.resolve(value);
++  assert(resolved === home || resolved.indexOf(home + path.sep) === 0,
++    label + ' must resolve inside the temporary home: ' + resolved);
++}
++
++[
++  [cst.DAEMON_RPC_PORT, 'daemon RPC endpoint'],
++  [cst.DAEMON_PUB_PORT, 'daemon PUB endpoint'],
++  [cst.PM2_PID_FILE_PATH, 'daemon PID file'],
++  [cst.DEFAULT_PID_PATH, 'application PID directory'],
++  [cst.DEFAULT_LOG_PATH, 'application log directory'],
++  [cst.DUMP_FILE_PATH, 'dump file'],
++  [cst.DUMP_BACKUP_FILE_PATH, 'dump backup file'],
++  [pm2.Client.rpc_socket_file, 'active client RPC endpoint'],
++  [pm2.Client.pub_socket_file, 'active client PUB endpoint']
++].forEach(function(pair) {
++  assertPathUnderHome(pair[0], pair[1]);
++});
++assert.strictEqual(pm2.Client.rpc_socket_file, cst.DAEMON_RPC_PORT);
++assert.strictEqual(pm2.Client.pub_socket_file, cst.DAEMON_PUB_PORT);
++
++function assertEntryPidPath(entry) {
++  var pm2Env = entry.pm2_env || entry;
++  assertPathUnderHome(pm2Env.pm_pid_path, 'application PID file');
++}
++
++function call(method) {
++  var args = Array.prototype.slice.call(arguments, 1);
++  var state = { callbackCount: 0 };
++  state.result = new Promise(function(resolve, reject) {
++    args.push(function(err, data) {
++      state.callbackCount++;
++      if (state.callbackCount === 1)
++        resolve({ err: err, data: data });
++    });
++    try {
++      pm2[method].apply(pm2, args);
++    } catch (err) {
++      reject(err);
++    }
++  });
++  return state;
++}
++
++function delay(ms) {
++  return new Promise(function(resolve) { setTimeout(resolve, ms); });
++}
++
++function list() {
++  var request = call('list');
++  return request.result.then(function(result) {
++    assert.ifError(result.err);
++    return result.data;
++  });
++}
++
++function nameOf(entry) {
++  return entry.name || (entry.pm2_env && entry.pm2_env.name);
++}
++
++function statusOf(entry) {
++  return entry.pm2_env && entry.pm2_env.status || entry.status;
++}
++
++function pidOf(entry) {
++  return entry.pid || (entry.pm2_env && entry.pm2_env.pid) || 0;
++}
++
++function entriesFor(name) {
++  return list().then(function(entries) {
++    return entries.filter(function(entry) { return nameOf(entry) === name; });
++  });
++}
++
++function appPidFiles() {
++  var directory = path.join(home, 'pids');
++  if (!fs.existsSync(directory)) return [];
++  return fs.readdirSync(directory).filter(function(file) { return file.endsWith('.pid'); });
++}
++
++function assertNoOnlinePid(name, entries) {
++  entries.forEach(function(entry) {
++    assert.notStrictEqual(statusOf(entry), 'online', name + ' must not be online after failed spawn');
++    assert(!(Number(pidOf(entry)) > 0), name + ' must not retain a PID after failed spawn');
++  });
++}
++
++function assertSpawnError(err, label) {
++  assert(err, label + ' API callback must report a launch error');
++  var message = err.message || String(err);
++  assert(err.code === 'ENOENT' || /\bENOENT\b/.test(message),
++    label + ' should expose the OS ENOENT spawn error');
++  assert(err.syscall === 'spawn' || /\bspawn\b[^\n]*\bENOENT\b/i.test(message),
++    label + ' should identify an asynchronous child_process.spawn ENOENT');
++}
++
++function waitForEntry(name, predicate, timeout, description) {
++  var deadline = Date.now() + timeout;
++  function poll() {
++    return entriesFor(name).then(function(entries) {
++      var entry = entries[0];
++      if (entry && predicate(entry)) return entry;
++      if (Date.now() >= deadline) {
++        throw new Error('Timed out waiting for ' + description + ' for ' + name + ': ' + JSON.stringify(entry));
++      }
++      return delay(25).then(poll);
++    });
++  }
++  return poll();
++}
++
++function waitForEntryCount(name, count, predicate, timeout, description) {
++  var deadline = Date.now() + timeout;
++  function poll() {
++    return entriesFor(name).then(function(entries) {
++      if (entries.length === count && entries.every(predicate)) return entries;
++      if (Date.now() >= deadline) {
++        throw new Error('Timed out waiting for ' + description + ' for ' + name + ': ' + JSON.stringify(entries));
++      }
++      return delay(25).then(poll);
++    });
++  }
++  return poll();
++}
++
++function waitForCounter(file, count, timeout, description) {
++  var deadline = Date.now() + timeout;
++  function poll() {
++    var current = fs.existsSync(file) ? parseInt(fs.readFileSync(file, 'utf8'), 10) || 0 : 0;
++    if (current >= count) return Promise.resolve(current);
++    if (Date.now() >= deadline)
++      return Promise.reject(new Error('Timed out waiting for ' + description + ': count=' + current));
++    return delay(25).then(poll);
++  }
++  return poll();
++}
++
++function makeConfig(name, overrides) {
++  return Object.assign({
++    script: fixture,
++    name: name,
++    cwd: home,
++    exec_mode: 'fork_mode',
++    interpreter: process.execPath,
++    autorestart: false
++  }, overrides || {});
++}
++
++function writeRestartCounterFixture(counterFile, exitsBeforeStable) {
++  writeFixture([
++    "var fs = require('fs');",
++    'var counterFile = ' + JSON.stringify(counterFile) + ';',
++    "var previous = fs.existsSync(counterFile) ? parseInt(fs.readFileSync(counterFile, 'utf8'), 10) || 0 : 0;",
++    'fs.writeFileSync(counterFile, String(previous + 1));',
++    'if (previous < ' + exitsBeforeStable + ') process.exit(0);',
++    'setInterval(function() {}, 1000);'
++  ].join('\n'));
++}
++
++async function automaticRestartScenario(name, mode, restartOptions, expectedRuns) {
++  var counterFile = path.join(home, name + '.count');
++  writeRestartCounterFixture(counterFile, expectedRuns - 1);
++  var config = makeConfig(name, Object.assign({
++    exec_mode: mode,
++    autorestart: true,
++    minUptime: 3000,
++    maxRestarts: 10
++  }, restartOptions || {}));
++
++  try {
++    // Object config validation preserves an explicit numeric zero (the
++    // script/options path aliases through restart_delay and drops falsy zero).
++    var start = call('start', config);
++    var result = await start.result;
++    assert(!result.err || result.err === true, name + ' initial start should be accepted');
++    assert.strictEqual(start.callbackCount, 1);
++
++    var observedRuns = await waitForCounter(counterFile, expectedRuns, 10000, name + ' restart count');
++    assert.strictEqual(observedRuns, expectedRuns, name + ' should launch the expected number of times only');
++    var online = await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++    }, 5000, name + ' final generation online');
++    assert.strictEqual((await entriesFor(name)).length, 1, name + ' should retain one process record');
++    assert.strictEqual(process.kill(Number(pidOf(online)), 0), true,
++      name + ' final generation should have a live PID');
++    assertEntryPidPath(online);
++
++    if (!restartOptions || Object.keys(restartOptions).length === 0) {
++      assert.strictEqual(online.pm2_env.restart_delay, undefined,
++        name + ' must exercise the default delay path');
++      assert.strictEqual(online.pm2_env.exp_backoff_restart_delay, undefined,
++        name + ' must not configure exponential backoff');
++    }
++    if (restartOptions && Object.prototype.hasOwnProperty.call(restartOptions, 'restartDelay'))
++      assert.strictEqual(online.pm2_env.restart_delay, restartOptions.restartDelay,
++        name + ' must retain its explicit fixed delay');
++    if (restartOptions && Object.prototype.hasOwnProperty.call(restartOptions, 'restart_delay'))
++      assert.strictEqual(online.pm2_env.restart_delay, restartOptions.restart_delay,
++        name + ' must retain its explicit fixed delay');
++    if (restartOptions && Object.prototype.hasOwnProperty.call(restartOptions, 'expBackoffRestartDelay'))
++      assert.strictEqual(online.pm2_env.exp_backoff_restart_delay, restartOptions.expBackoffRestartDelay,
++        name + ' must retain its exponential backoff setting');
++    if (restartOptions && Object.prototype.hasOwnProperty.call(restartOptions, 'exp_backoff_restart_delay'))
++      assert.strictEqual(online.pm2_env.exp_backoff_restart_delay, restartOptions.exp_backoff_restart_delay,
++        name + ' must retain its exponential backoff setting');
++
++    var stop = call('stop', name);
++    var stopped = await stop.result;
++    assert.ifError(stopped.err);
++    await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'stopped' && !(Number(pidOf(entry)) > 0);
++    }, 5000, name + ' cleanup stop');
++    return { mode: mode, launches: observedRuns, restartOptions: restartOptions || {} };
++  } finally {
++    try {
++      if ((await entriesFor(name)).length) {
++        var cleanup = call('stop', name);
++        await cleanup.result;
++      }
++    } catch (e) {}
++    try { fs.unlinkSync(counterFile); } catch (e) {}
++  }
++}
++
++async function stopPendingAutomaticRetry(name) {
++  var retryDelay = 1500;
++  var counterFile = path.join(home, name + '.count');
++  writeRestartCounterFixture(counterFile, 1);
++  try {
++    var start = call('start', fixture, makeConfig(name, {
++      autorestart: true,
++      minUptime: 3000,
++      maxRestarts: 10,
++      restartDelay: retryDelay
++    }));
++    var started = await start.result;
++    assert(!started.err || started.err === true);
++
++    var waiting = await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'waiting restart';
++    }, 5000, 'process awaiting explicitly stopped retry');
++    assert.strictEqual(await waitForCounter(counterFile, 1, 1000, 'initial stop scenario launch'), 1);
++
++    var stop = call('stop', name);
++    var stopped = await stop.result;
++    assert.ifError(stopped.err);
++    assert.strictEqual(stop.callbackCount, 1);
++
++    await delay(retryDelay + 350);
++    var afterDeadline = await entriesFor(name);
++    assert.strictEqual(afterDeadline.length, 1);
++    assert.strictEqual(statusOf(afterDeadline[0]), 'stopped');
++    assert.strictEqual(Number(pidOf(afterDeadline[0])), 0);
++    assert.strictEqual(parseInt(fs.readFileSync(counterFile, 'utf8'), 10), 1,
++      'explicit stop must prevent the queued retry from launching again');
++    return { status: statusOf(afterDeadline[0]), launches: 1 };
++  } finally {
++    try {
++      if ((await entriesFor(name)).length) {
++        var cleanup = call('stop', name);
++        await cleanup.result;
++      }
++    } catch (e) {}
++    try { fs.unlinkSync(counterFile); } catch (e) {}
++  }
++}
++
++async function failedInitialLaunch(name, config, interpreterToRemove) {
++  var originalExecuteRemote = pm2.Client.executeRemote;
++  var removedInterpreter = false;
++  var seenPrepare = [];
++  var seenActions = [];
++  if (interpreterToRemove) {
++    var expectedScript = path.resolve(config.cwd || home, config.script);
++    assert(fs.existsSync(interpreterToRemove), 'interpreter fixture must exist before start');
++    fs.accessSync(interpreterToRemove, fs.constants.X_OK);
++    // The API validates the executable before sending prepare. Remove it at
++    // that RPC boundary: validation has succeeded, but the daemon has not yet
++    // attempted child_process.spawn(). Use the absolute interpreter path so
++    // validation does not depend on PATH lookup in the client or daemon.
++    pm2.Client.executeRemote = function(action, options) {
++      seenActions.push(String(action));
++      if (action === 'prepare') {
++        seenPrepare.push({
++          scriptMatches: !!(options && options.pm_exec_path &&
++            path.resolve(options.pm_exec_path) === expectedScript),
++          interpreterMatches: !!(options && options.exec_interpreter &&
++            path.resolve(options.exec_interpreter) === path.resolve(interpreterToRemove)),
++          interpreterExistsAtBoundary: fs.existsSync(interpreterToRemove)
++        });
++      }
++
++      if (action === 'prepare' && options && options.pm_exec_path &&
++          path.resolve(options.pm_exec_path) === expectedScript &&
++          options.exec_interpreter &&
++          path.resolve(options.exec_interpreter) === path.resolve(interpreterToRemove)) {
++        assert(fs.existsSync(interpreterToRemove),
++          'the validated interpreter must still exist at the prepare RPC boundary');
++        fs.unlinkSync(interpreterToRemove);
++        removedInterpreter = true;
++        pm2.Client.executeRemote = originalExecuteRemote;
++      }
++      return originalExecuteRemote.apply(this, arguments);
++    };
++  }
++
++  var request;
++  var result;
++  try {
++    request = call('start', config.script, config);
++    result = await request.result;
++  } finally {
++    if (pm2.Client.executeRemote !== originalExecuteRemote)
++      pm2.Client.executeRemote = originalExecuteRemote;
++  }
++  if (interpreterToRemove) {
++    var safeStartError = result.err ? {
++      name: result.err.name,
++      code: result.err.code,
++      syscall: result.err.syscall,
++      category: (result.err.code === 'ENOENT' && result.err.syscall === 'spawn') ||
++        /\bspawn\b[^\n]*\bENOENT\b/i.test(result.err.message || '')
++        ? 'os-spawn-enoent'
++        : (result.err.code === 'ENOENT' || /ENOENT/.test(result.err.message || '')
++          ? 'enoent-outside-spawn'
++          : (/interpreter .* not available in path/i.test(result.err.message || '')
++            ? 'interpreter-validation-before-rpc'
++            : 'other-api-error'))
++    } : null;
++    assert.strictEqual(removedInterpreter, true,
++      'validated interpreter should be removed at prepare RPC; safe diagnosis=' + JSON.stringify({
++        actions: seenActions,
++        prepare: seenPrepare,
++        startError: safeStartError,
++        interpreterStillExists: fs.existsSync(interpreterToRemove)
++      }));
++    assert.strictEqual(safeStartError && safeStartError.category, 'os-spawn-enoent',
++      'removed interpreter must fail specifically in OS spawn: ' + JSON.stringify(safeStartError));
++  }
++  assertSpawnError(result.err, name);
++  await delay(100); // allow the error -> close sequence and daemon state to settle
++  var entries = await entriesFor(name);
++  assertNoOnlinePid(name, entries);
++  assert.deepStrictEqual(appPidFiles(), [], 'failed initial spawns must not write an app pid file');
++  assert.strictEqual(request.callbackCount, 1, 'the RPC start callback must fire exactly once');
++}
++
++async function waitForRestartDelayFailure(name) {
++  if (process.platform === 'win32') return 'skipped (self-removing interpreter is POSIX-only)';
++
++  var wrapper = path.join(home, 'self-removing-interpreter');
++  var node = "'" + process.execPath.replace(/'/g, "'\\''") + "'";
++  fs.writeFileSync(wrapper, '#!/bin/sh\nrm -f "$0"\nexec ' + node + ' "$@"\n', { mode: 0o755 });
++
++  writeFixture('setTimeout(function() { process.exit(0); }, 100);');
++  var name = 'rpc-auto-retry';
++  var retryConfig = makeConfig(name, {
++    interpreter: path.basename(wrapper),
++    autorestart: true,
++    minUptime: 2000,
++    maxRestarts: 2,
++    restartDelay: 700
++  });
++  var launch = call('start', fixture, retryConfig);
++  var launchResult = await launch.result;
++  assert(!launchResult.err || launchResult.err === true, 'initial wrapper process should start');
++
++  var waiting = await waitForEntry(name, function(entry) {
++    return statusOf(entry) === 'waiting restart' || statusOf(entry) === 'errored';
++  }, 5000, 'automatic restart delay');
++  assert.strictEqual(statusOf(waiting), 'waiting restart', 'first quick exit should enter delayed restart');
++  var observedAt = Date.now();
++  assert.strictEqual(waiting.pm2_env.restart_time, 0);
++
++  await delay(150);
++  var stillWaiting = (await entriesFor(name))[0];
++  assert.strictEqual(statusOf(stillWaiting), 'waiting restart', 'retry must respect restart_delay');
++  assert.strictEqual(stillWaiting.pm2_env.restart_time, 0, 'retry count advances only after the delay');
++
++  var errored = await waitForEntry(name, function(entry) {
++    return statusOf(entry) === 'errored';
++  }, 5000, 'restart limit after failed spawn');
++  assert(Date.now() - observedAt >= 500, 'retry should not run before the configured delay');
++  assert.strictEqual(errored.pm2_env.restart_time, 1, 'only one automatic retry should be attempted');
++  assert.strictEqual(Number(pidOf(errored)), 0, 'failed retry must leave no PID');
++  assert.deepStrictEqual(appPidFiles(), [], 'failed automatic retry must not leave an app pid file');
++  return 'passed';
++}
++
++async function waitForSlowSpawnFailureToOverlimit(name) {
++  if (process.platform === 'win32')
++    return 'skipped (self-removing interpreter is POSIX-only)';
++
++  var wrapper = path.join(home, 'slow-self-removing-interpreter');
++  var node = "'" + process.execPath.replace(/'/g, "'\\''") + "'";
++  fs.writeFileSync(wrapper, '#!/bin/sh\nrm -f "$0"\nexec ' + node + ' "$@"\n', { mode: 0o755 });
++  writeFixture('setTimeout(function() { process.exit(0); }, 1200);');
++
++  var start = call('start', fixture, makeConfig(name, {
++    interpreter: path.basename(wrapper),
++    autorestart: true,
++    minUptime: 1000,
++    maxRestarts: 2,
++    restartDelay: 1200
++  }));
++  var startResult = await start.result;
++  assert(!startResult.err || startResult.err === true);
++
++  var waiting = await waitForEntry(name, function(entry) {
++    return statusOf(entry) === 'waiting restart';
++  }, 5000, 'first stable exit before delayed spawn failures');
++  assert.strictEqual(waiting.pm2_env.restart_time, 0);
++
++  var errored = await waitForEntry(name, function(entry) {
++    return statusOf(entry) === 'errored';
++  }, 10000, 'finite limit for delayed spawn failures');
++  assert.strictEqual(errored.pm2_env.restart_time, 2,
++    'spawn failures beyond min_uptime must still consume the configured restart limit');
++  assert.strictEqual(Number(pidOf(errored)), 0);
++  assert.deepStrictEqual(appPidFiles(), [], 'overlimit spawn failures must not leave a pid file');
++  return { status: statusOf(errored), restartTime: errored.pm2_env.restart_time };
++}
++
++async function rescuePendingAutomaticRetry(name) {
++  if (process.platform === 'win32')
++    return 'skipped (RPC named pipe cannot be isolated on Windows)';
++
++  var retryDelay = 2200;
++  var wrapper = path.join(home, name + '-interpreter');
++  var node = "'" + process.execPath.replace(/'/g, "'\\''") + "'";
++  fs.writeFileSync(wrapper, '#!/bin/sh\nrm -f "$0"\nexec ' + node + ' "$@"\n', { mode: 0o755 });
++  writeFixture('setTimeout(function() { process.exit(0); }, 100);');
++
++  var rescuedPid = 0;
++  try {
++    var initial = call('start', fixture, makeConfig(name, {
++      interpreter: path.basename(wrapper),
++      autorestart: true,
++      minUptime: 1000,
++      maxRestarts: 10,
++      restartDelay: retryDelay
++    }));
++    var initialResult = await initial.result;
++    assert(!initialResult.err || initialResult.err === true);
++    assert.strictEqual(initial.callbackCount, 1);
++
++    var waiting = await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'waiting restart' &&
++        entry.pm2_env && entry.pm2_env.restart_time === 1;
++    }, 10000, 'failed automatic spawn with a second retry queued');
++    assert.strictEqual(Number(pidOf(waiting)), 0);
++    assertEntryPidPath(waiting);
++
++    // Repair both executable and application before manually restarting the
++    // same managed entry. Its already-queued retry must not launch another PID.
++    writeFixture('setInterval(function() {}, 1000);');
++    fs.writeFileSync(wrapper, '#!/bin/sh\nexec ' + node + ' "$@"\n', { mode: 0o755 });
++    var manualRestart = call('restart', name);
++    var manualResult = await manualRestart.result;
++    assert.ifError(manualResult.err);
++    assert.strictEqual(manualRestart.callbackCount, 1);
++
++    var healthy = await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++    }, 5000, 'manually recovered process online');
++    assertEntryPidPath(healthy);
++    rescuedPid = Number(pidOf(healthy));
++    var pidFile = healthy.pm2_env.pm_pid_path;
++    assert.strictEqual(fs.readFileSync(pidFile, 'utf8'), String(rescuedPid));
++
++    // Wait beyond the deadline of the retry that was pending at manual restart.
++    await delay(retryDelay + 350);
++    var afterDeadline = await entriesFor(name);
++    assert.strictEqual(afterDeadline.length, 1, 'manual recovery must retain one managed process entry');
++    assert.strictEqual(statusOf(afterDeadline[0]), 'online');
++    assert.strictEqual(Number(pidOf(afterDeadline[0])), rescuedPid,
++      'the old retry must not replace the healthy manual generation');
++    assertEntryPidPath(afterDeadline[0]);
++    assert.strictEqual(fs.readFileSync(pidFile, 'utf8'), String(rescuedPid),
++      'the original PID file must still identify the healthy process');
++    assert.strictEqual(process.kill(rescuedPid, 0), true, 'the manually started child must remain alive');
++
++    var stop = call('stop', name);
++    var stopResult = await stop.result;
++    assert.ifError(stopResult.err);
++    await waitForEntry(name, function(entry) {
++      return statusOf(entry) === 'stopped' && !(Number(pidOf(entry)) > 0);
++    }, 5000, 'manually recovered process stopped');
++    assert.strictEqual(fs.existsSync(pidFile), false);
++    rescuedPid = 0;
++    return { pid: Number(pidOf(healthy)), restartTime: afterDeadline[0].pm2_env.restart_time };
++  } finally {
++    // If an assertion fails, make a best effort to stop the managed child and
++    // reap a prior healthy PID if a stale retry had already replaced it.
++    try {
++      var leftovers = await entriesFor(name);
++      if (leftovers.length) {
++        var cleanupStop = call('stop', name);
++        await cleanupStop.result;
++      }
++    } catch (e) {}
++    if (rescuedPid) {
++      try {
++        process.kill(rescuedPid, 'SIGKILL');
++      } catch (e) {}
++    }
++  }
++}
++
++function writeFixture(source) {
++  fs.writeFileSync(fixture, source);
++}
++
++async function forceStartSameIdentity(name) {
++  writeFixture('setInterval(function() {}, 1000);');
++  var initial = call('start', fixture, makeConfig(name));
++  var initialResult = await initial.result;
++  assert(!initialResult.err || initialResult.err === true);
++  await waitForEntryCount(name, 1, function(entry) {
++    return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++  }, 5000, 'initial force fixture online');
++
++  var forced = call('start', fixture, makeConfig(name, { force: true }));
++  var forcedResult = await forced.result;
++  assert(!forcedResult.err || forcedResult.err === true);
++  await waitForEntryCount(name, 2, function(entry) {
++    return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++  }, 5000, 'forced duplicate identity instances online');
++  await delay(50);
++  assert.strictEqual(initial.callbackCount, 1);
++  assert.strictEqual(forced.callbackCount, 1);
++
++  var stop = call('stop', name);
++  var stopResult = await stop.result;
++  assert.ifError(stopResult.err);
++  await waitForEntryCount(name, 2, function(entry) {
++    return statusOf(entry) === 'stopped' && !(Number(pidOf(entry)) > 0);
++  }, 5000, 'forced duplicate identity instances stopped');
++  assert.deepStrictEqual(appPidFiles(), [], 'stopping both forced instances must remove their pid files');
++  return { retainedInstances: 2, callbacks: [initial.callbackCount, forced.callbackCount] };
++}
++
++async function main() {
++  var connected = false;
++  try {
++    var connect = call('connect');
++    var connectResult = await connect.result;
++    assert.ifError(connectResult.err);
++    connected = true;
++    assert.deepStrictEqual(await list(), [], 'isolated daemon should start with no user processes');
++
++    writeFixture('setInterval(function() {}, 1000);');
++    var disappearingInterpreter = path.join(home, 'disappearing-interpreter');
++    fs.writeFileSync(disappearingInterpreter, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
++    fs.chmodSync(disappearingInterpreter, 0o755);
++    await failedInitialLaunch('rpc-bad-interpreter', makeConfig('rpc-bad-interpreter', {
++      interpreter: disappearingInterpreter
++    }), disappearingInterpreter);
++
++    await failedInitialLaunch('rpc-missing-cwd', makeConfig('rpc-missing-cwd', {
++      cwd: path.join(home, 'missing-working-directory')
++    }));
++
++    writeFixture('setInterval(function() {}, 1000);');
++    var processName = 'rpc-existing-restart';
++    var startConfig = makeConfig(processName);
++    var start = call('start', fixture, startConfig);
++    var startResult = await start.result;
++    assert(!startResult.err || startResult.err === true, 'normal fork start should succeed');
++    var online = await waitForEntry(processName, function(entry) {
++      return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++    }, 5000, 'normal fork online state');
++    assert(Number(pidOf(online)) > 0);
++
++    var badRestart = call('restart', processName, {
++      interpreter: path.join(home, 'missing-restart-interpreter')
++    });
++    var badRestartResult = await badRestart.result;
++    assertSpawnError(badRestartResult.err, 'restart of existing entry');
++    await delay(100);
++    var stoppedAfterError = (await entriesFor(processName))[0];
++    assert(stoppedAfterError, 'failed restart should retain the existing process entry');
++    assert.notStrictEqual(statusOf(stoppedAfterError), 'launching');
++    assert.notStrictEqual(statusOf(stoppedAfterError), 'online');
++    assert(!(Number(pidOf(stoppedAfterError)) > 0), 'failed restart must not retain the previous PID');
++    assert.strictEqual(badRestart.callbackCount, 1);
++    assert.deepStrictEqual(appPidFiles(), [], 'failed restart must not leave an app pid file');
++
++    var recoveredRestart = call('restart', processName, { interpreter: process.execPath });
++    var recoveredResult = await recoveredRestart.result;
++    assert(!recoveredResult.err || recoveredResult.err === true, 'existing entry should recover on valid interpreter');
++    var recovered = await waitForEntry(processName, function(entry) {
++      return statusOf(entry) === 'online' && Number(pidOf(entry)) > 0;
++    }, 5000, 'recovered fork online state');
++
++    var stop = call('stop', processName);
++    var stopResult = await stop.result;
++    assert(!stopResult.err || stopResult.err === true, 'normal fork stop should succeed');
++    var stopped = await waitForEntry(processName, function(entry) {
++      return statusOf(entry) === 'stopped' && !(Number(pidOf(entry)) > 0);
++    }, 5000, 'normal fork stopped state');
++    assert.strictEqual(statusOf(stopped), 'stopped');
++    assert.strictEqual(Number(pidOf(stopped)), 0);
++    assert.deepStrictEqual(appPidFiles(), [], 'stopped fork must remove its app pid file');
++
++    var forceInstances = await forceStartSameIdentity('rpc-force-same-identity');
++
++    var automaticRestarts = [];
++    automaticRestarts.push(await automaticRestartScenario(
++      'rpc-auto-default-fork', 'fork_mode', {}, 2));
++    automaticRestarts.push(await automaticRestartScenario(
++      'rpc-auto-default-cluster', 'cluster_mode', {}, 2));
++    automaticRestarts.push(await automaticRestartScenario(
++      'rpc-auto-zero-delay', 'fork_mode', { restartDelay: 0 }, 2));
++    automaticRestarts.push(await automaticRestartScenario(
++      'rpc-auto-fixed-delay', 'fork_mode', { restartDelay: 250 }, 2));
++    automaticRestarts.push(await automaticRestartScenario(
++      'rpc-auto-exp-backoff', 'fork_mode', { expBackoffRestartDelay: 100 }, 3));
++    var stoppedRetry = await stopPendingAutomaticRetry('rpc-auto-stop-pending');
++
++    var rescuedRetry = await rescuePendingAutomaticRetry('rpc-manual-rescue');
++    var retryResult = await waitForRestartDelayFailure('rpc-auto-retry');
++    var slowRetryResult = await waitForSlowSpawnFailureToOverlimit('rpc-slow-spawn-retry');
++    console.log('RPC_REGRESSION_OK ' + JSON.stringify({
++      failedLaunches: 2,
++      forcedSameIdentity: forceInstances,
++      automaticRestarts: automaticRestarts,
++      stoppedRetry: stoppedRetry,
++      manualRetryRescue: rescuedRetry,
++      existingRestartErrorStatus: statusOf(stoppedAfterError),
++      normalForkPid: Number(pidOf(recovered)),
++      restartDelayAndLimit: retryResult,
++      slowSpawnRetryLimit: slowRetryResult
++    }));
++  } finally {
++    if (connected) {
++      var disconnect = call('disconnect');
++      await disconnect.result;
++    }
++  }
++}
++
++main().then(function() {
++  process.exit(0);
++}, function(err) {
++  console.error(err && err.stack || err);
++  if (pm2.Client && pm2.Client.close) {
++    try { pm2.disconnect(function() { process.exit(1); }); }
++    catch (e) { process.exit(1); }
++    setTimeout(function() { process.exit(1); }, 1000);
++  } else {
++    process.exit(1);
++  }
++});
+--- /dev/null
++++ b/test/programmatic/pm2_update_recovery.mocha.js
+@@ -0,0 +1,179 @@
++/**
++ * Real `pm2 update` recovery regression. The helper runs with a deliberately
++ * small, synthetic environment and a fresh PM2_HOME; it never uses a host
++ * daemon or a globally installed PM2.
++ */
++
++var assert = require('assert');
++var childProcess = require('child_process');
++var fs = require('fs');
++var os = require('os');
++var path = require('path');
++
++var projectRoot = path.resolve(__dirname, '../..');
++var helperPath = path.join(__dirname, 'pm2_update_recovery_helper.js');
++var cliPath = path.join(projectRoot, 'bin/pm2');
++var PATH_OVERRIDE_ENV = [
++  'PM2_CONF_FILE',
++  'PM2_LOG_FILE_PATH',
++  'PM2_PID_FILE_PATH',
++  'PM2_RELOAD_LOCKFILE',
++  'PM2_DEFAULT_PID_PATH',
++  'PM2_DEFAULT_LOG_PATH',
++  'PM2_DEFAULT_MODULE_PATH',
++  'PM2_IO_ACCESS_TOKEN',
++  'PM2_DUMP_FILE_PATH',
++  'PM2_DUMP_BACKUP_FILE_PATH',
++  'PM2_DAEMON_RPC_PORT',
++  'PM2_DAEMON_PUB_PORT',
++  'PM2_INTERACTOR_RPC_PORT',
++  'PM2_INTERACTOR_LOG_FILE_PATH',
++  'PM2_INTERACTOR_PID_PATH',
++  'PM2_INTERACTION_CONF'
++];
++
++function delay(ms) {
++  return new Promise(function(resolve) { setTimeout(resolve, ms); });
++}
++
++function isProcessAlive(pid) {
++  try {
++    process.kill(pid, 0);
++    // PID 1 in minimal Linux containers may leave an exited child as a zombie.
++    try {
++      var stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
++      var stateStart = stat.lastIndexOf(')') + 2;
++      var state = stat.slice(stateStart, stateStart + 1);
++      if (state === 'Z' || state === 'X') return false;
++    } catch (e) {
++      if (e.code === 'ENOENT') return false;
++    }
++    return true;
++  } catch (e) {
++    return e.code === 'EPERM';
++  }
++}
++
++function makeEnvironment(baseDir, home) {
++  var safeHome = path.join(baseDir, 'fake-home');
++  var tempDir = path.join(baseDir, 'tmp');
++  fs.mkdirSync(safeHome, { recursive: true });
++  fs.mkdirSync(tempDir, { recursive: true });
++
++  var env = {
++    HOME: safeHome,
++    TMPDIR: tempDir,
++    PATH: [path.dirname(process.execPath), '/usr/bin', '/bin'].join(path.delimiter),
++    NODE_ENV: 'test',
++    PM2_HOME: home,
++    OVER_HOME: home,
++    PM2_MODULE_CONF_FILE: path.join(home, 'module_conf.json'),
++    PM2_RPC_TEST_HOME: home,
++    PM2_NO_INTERACTION: 'true',
++    PM2_DISCRETE_MODE: 'true'
++  };
++  fs.writeFileSync(env.PM2_MODULE_CONF_FILE, '{}', { mode: 0o600 });
++  return env;
++}
++
++function assertSafeEnvironment(baseDir, home, env) {
++  var expectedKeys = [
++    'HOME', 'TMPDIR', 'PATH', 'NODE_ENV', 'PM2_HOME', 'OVER_HOME',
++    'PM2_MODULE_CONF_FILE', 'PM2_RPC_TEST_HOME', 'PM2_NO_INTERACTION',
++    'PM2_DISCRETE_MODE'
++  ].sort();
++  assert.deepStrictEqual(Object.keys(env).sort(), expectedKeys,
++    'only synthetic environment variables may be passed to PM2');
++  assert.strictEqual(path.resolve(env.PM2_HOME), path.resolve(home));
++  assert.strictEqual(path.resolve(env.OVER_HOME), path.resolve(home));
++  assert.strictEqual(path.resolve(env.PM2_RPC_TEST_HOME), path.resolve(home));
++  assert.strictEqual(path.resolve(env.PM2_MODULE_CONF_FILE), path.join(path.resolve(home), 'module_conf.json'));
++  PATH_OVERRIDE_ENV.forEach(function(key) {
++    assert.strictEqual(env[key], undefined, key + ' must not redirect PM2 paths');
++  });
++  assert(path.resolve(home).startsWith(path.resolve(baseDir) + path.sep));
++  assert(path.resolve(env.HOME).startsWith(path.resolve(baseDir) + path.sep));
++  assert(path.resolve(env.TMPDIR).startsWith(path.resolve(baseDir) + path.sep));
++  assert.notStrictEqual(path.resolve(home), path.resolve(os.homedir(), '.pm2'));
++  assert(fs.existsSync(cliPath), 'the local PM2 CLI must be present in this source tree');
++}
++
++async function cleanupIsolatedHome(baseDir, home, env) {
++  assertSafeEnvironment(baseDir, home, env);
++  var pidFile = path.join(home, 'pm2.pid');
++  var daemonPid = fs.existsSync(pidFile)
++    ? parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10) || 0
++    : 0;
++  var killResult = null;
++
++  if (daemonPid && isProcessAlive(daemonPid)) {
++    killResult = childProcess.spawnSync(process.execPath, [cliPath, 'kill'], {
++      cwd: projectRoot,
++      env: env,
++      encoding: 'utf8',
++      timeout: 15000,
++      maxBuffer: 1024 * 1024
++    });
++    assert.ifError(killResult.error);
++    assert.strictEqual(killResult.status, 0,
++      'isolated pm2 kill must succeed: ' + (killResult.stderr || '').slice(-1000));
++
++    var deadline = Date.now() + 5000;
++    while (isProcessAlive(daemonPid) && Date.now() < deadline)
++      await delay(50);
++    assert.strictEqual(isProcessAlive(daemonPid), false,
++      'isolated PM2 daemon must stop before removing its home');
++  }
++
++  fs.rmSync(baseDir, { recursive: true, force: true });
++  return !!killResult;
++}
++
++describe('real pm2 update recovery in isolated Linux PM2_HOME', function() {
++  this.timeout(120000);
++
++  it('restarts only prior online services and rolls back a failed health check', async function() {
++    if (process.platform !== 'linux')
++      this.skip('requires Linux Unix-domain RPC and /proc process-liveness checks');
++
++    var baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm2-update-recovery-'));
++    var home = path.join(baseDir, 'pm2-home');
++    fs.mkdirSync(home, { recursive: true });
++    var env = makeEnvironment(baseDir, home);
++    assertSafeEnvironment(baseDir, home, env);
++
++    var testSucceeded = false;
++    var failure;
++    try {
++      var result = childProcess.spawnSync(process.execPath, [helperPath], {
++        cwd: projectRoot,
++        env: env,
++        encoding: 'utf8',
++        timeout: 90000,
++        maxBuffer: 4 * 1024 * 1024
++      });
++      assert.ifError(result.error);
++      assert.strictEqual(result.status, 0,
++        'isolated update recovery helper failed:\n' + (result.stdout || '') + (result.stderr || ''));
++      var evidence = (result.stdout || '').split('\n').filter(function(line) {
++        return line.indexOf('UPDATE_RECOVERY_OK ') === 0;
++      })[0];
++      assert(evidence, 'helper must report real update and rollback evidence');
++      console.log(evidence);
++      testSucceeded = true;
++    } catch (e) {
++      failure = e;
++    }
++
++    try {
++      var cleanupInvoked = await cleanupIsolatedHome(baseDir, home, env);
++      if (testSucceeded)
++        assert.strictEqual(cleanupInvoked, true,
++          'successful test must clean up its isolated daemon using local pm2 kill');
++    } catch (cleanupError) {
++      if (!failure) failure = cleanupError;
++      else failure.message += '\nIsolated cleanup also reported: ' + cleanupError.message;
++    }
++    if (failure) throw failure;
++  });
++});
+--- /dev/null
++++ b/test/programmatic/pm2_update_recovery_helper.js
+@@ -0,0 +1,635 @@
++'use strict';
++
++var assert = require('assert');
++var childProcess = require('child_process');
++var fs = require('fs');
++var path = require('path');
++var packageInfo = require('../../package.json');
++
++var expectedEnvKeys = [
++  'HOME', 'TMPDIR', 'PATH', 'NODE_ENV', 'PM2_HOME', 'OVER_HOME',
++  'PM2_MODULE_CONF_FILE', 'PM2_RPC_TEST_HOME', 'PM2_NO_INTERACTION',
++  'PM2_DISCRETE_MODE'
++].sort();
++assert.strictEqual(process.platform, 'linux', 'this regression is Linux-only');
++assert.deepStrictEqual(Object.keys(process.env).sort(), expectedEnvKeys,
++  'helper must receive only explicit synthetic environment values');
++
++var rawHome = process.env.PM2_HOME;
++var rawOverHome = process.env.OVER_HOME;
++var rawTestHome = process.env.PM2_RPC_TEST_HOME;
++var rawModuleConf = process.env.PM2_MODULE_CONF_FILE;
++assert(rawHome && rawOverHome && rawTestHome && rawModuleConf,
++  'refusing to run without explicit PM2 path overrides');
++
++var home = path.resolve(rawHome);
++assert.strictEqual(home, path.resolve(rawOverHome));
++assert.strictEqual(home, path.resolve(rawTestHome));
++assert.strictEqual(path.resolve(rawModuleConf), path.join(home, 'module_conf.json'));
++assert(path.resolve(process.env.HOME).startsWith(path.dirname(home) + path.sep));
++assert(path.resolve(process.env.TMPDIR).startsWith(path.dirname(home) + path.sep));
++assert.strictEqual(packageInfo.version, '7.0.4', 'run against the checked-out PM2 version');
++
++var cst = require('../../constants');
++var PM2 = require('../..');
++var projectRoot = path.resolve(__dirname, '../..');
++var cliPath = path.join(projectRoot, 'bin/pm2');
++var updatePm2 = new PM2.custom({ pm2_home: home });
++var rollbackPm2 = null;
++var baselineDump = null;
++var rollbackAttempted = false;
++
++function assertUnderHome(value, label) {
++  assert(value, label + ' must be configured');
++  var resolved = path.resolve(value);
++  assert(resolved === home || resolved.indexOf(home + path.sep) === 0,
++    label + ' must be inside isolated PM2_HOME');
++}
++
++[
++  [cst.PM2_HOME, 'PM2_HOME'],
++  [cst.PM2_ROOT_PATH, 'PM2_ROOT_PATH'],
++  [cst.PM2_CONF_FILE, 'PM2 config path'],
++  [cst.PM2_MODULE_CONF_FILE, 'PM2 module config path'],
++  [cst.PM2_LOG_FILE_PATH, 'daemon log path'],
++  [cst.PM2_PID_FILE_PATH, 'daemon PID path'],
++  [cst.PM2_RELOAD_LOCKFILE, 'reload lock path'],
++  [cst.DEFAULT_PID_PATH, 'app PID directory'],
++  [cst.DEFAULT_LOG_PATH, 'app log directory'],
++  [cst.DEFAULT_MODULE_PATH, 'module directory'],
++  [cst.PM2_IO_ACCESS_TOKEN, 'I/O token path'],
++  [cst.DUMP_FILE_PATH, 'dump path'],
++  [cst.DUMP_BACKUP_FILE_PATH, 'dump backup path'],
++  [cst.DAEMON_RPC_PORT, 'daemon RPC endpoint'],
++  [cst.DAEMON_PUB_PORT, 'daemon PUB endpoint'],
++  [cst.INTERACTOR_RPC_PORT, 'interactor RPC endpoint'],
++  [cst.INTERACTOR_LOG_FILE_PATH, 'interactor log path'],
++  [cst.INTERACTOR_PID_PATH, 'interactor PID path'],
++  [cst.INTERACTION_CONF, 'interaction config path']
++].forEach(function(pair) { assertUnderHome(pair[0], pair[1]); });
++assert.strictEqual(path.resolve(updatePm2.pm2_home), home);
++assert.strictEqual(updatePm2.Client.rpc_socket_file, cst.DAEMON_RPC_PORT);
++assert.strictEqual(updatePm2.Client.pub_socket_file, cst.DAEMON_PUB_PORT);
++
++var specifications = [
++  { name: 'fake-webhook-service', kind: 'resident', autorestart: true },
++  { name: 'fake-logrotate-service', kind: 'resident', autorestart: true },
++  { name: 'fake-updater-1', kind: 'updater', autorestart: false },
++  { name: 'fake-updater-2', kind: 'updater', autorestart: false },
++  { name: 'fake-updater-3', kind: 'updater', autorestart: false },
++  { name: 'fake-updater-4', kind: 'updater', autorestart: false },
++  { name: 'fake-updater-5', kind: 'updater', autorestart: false }
++];
++
++var fixturesDir = path.join(home, 'fixtures');
++fs.mkdirSync(fixturesDir, { recursive: true });
++specifications.forEach(function(spec) {
++  spec.counterPath = path.join(home, spec.name + '.starts');
++  spec.heartbeatPath = path.join(home, spec.name + '.heartbeat.json');
++  spec.scriptPath = path.join(fixturesDir, spec.name + '.js');
++  fs.writeFileSync(spec.scriptPath, fixtureSource(spec), { mode: 0o600 });
++});
++
++function fixtureSource(spec) {
++  var counterPath = path.join(home, spec.name + '.starts');
++  var heartbeatPath = path.join(home, spec.name + '.heartbeat.json');
++  return [
++    "'use strict';",
++    "var fs = require('fs');",
++    'var counterPath = ' + JSON.stringify(counterPath) + ';',
++    'var heartbeatPath = ' + JSON.stringify(heartbeatPath) + ';',
++    'var current = fs.existsSync(counterPath) ? parseInt(fs.readFileSync(counterPath, \'utf8\'), 10) || 0 : 0;',
++    'fs.writeFileSync(counterPath, String(current + 1), { mode: 0o600 });',
++    'function heartbeat() {',
++    '  fs.writeFileSync(heartbeatPath, JSON.stringify({ pid: process.pid, at: Date.now() }));',
++    '}',
++    'heartbeat();',
++    'setInterval(heartbeat, 100);'
++  ].join('\n');
++}
++
++function delay(ms) {
++  return new Promise(function(resolve) { setTimeout(resolve, ms); });
++}
++
++function call(pm2, method) {
++  var args = Array.prototype.slice.call(arguments, 2);
++  return new Promise(function(resolve, reject) {
++    args.push(function(err, data) {
++      if (err && err !== true) return reject(err);
++      return resolve({ err: err, data: data });
++    });
++    try {
++      pm2[method].apply(pm2, args);
++    } catch (e) {
++      reject(e);
++    }
++  });
++}
++
++function entriesFor(pm2, name) {
++  return call(pm2, 'list').then(function(result) {
++    assert(Array.isArray(result.data), 'PM2 list must return a process array');
++    return result.data.filter(function(entry) { return nameOf(entry) === name; });
++  });
++}
++
++function allEntries(pm2) {
++  return call(pm2, 'list').then(function(result) {
++    assert(Array.isArray(result.data), 'PM2 list must return a process array');
++    return result.data;
++  });
++}
++
++function nameOf(entry) {
++  return entry.name || (entry.pm2_env && entry.pm2_env.name);
++}
++
++function statusOf(entry) {
++  return entry.pm2_env && entry.pm2_env.status || entry.status;
++}
++
++function pidOf(entry) {
++  return Number(entry.pid || (entry.pm2_env && entry.pm2_env.pid)) || 0;
++}
++
++function snapshot(entries) {
++  return entries.map(function(entry) {
++    return { name: nameOf(entry), status: statusOf(entry), pid: pidOf(entry) };
++  }).sort(function(a, b) { return a.name.localeCompare(b.name); });
++}
++
++function processIsAlive(pid) {
++  if (!(pid > 0)) return false;
++  try {
++    process.kill(pid, 0);
++    try {
++      var stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
++      var stateStart = stat.lastIndexOf(')') + 2;
++      var state = stat.slice(stateStart, stateStart + 1);
++      if (state === 'Z' || state === 'X') return false;
++    } catch (e) {
++      if (e.code === 'ENOENT') return false;
++    }
++    return true;
++  } catch (e) {
++    return e.code === 'EPERM';
++  }
++}
++
++function counterOf(spec) {
++  if (!fs.existsSync(spec.counterPath)) return 0;
++  return parseInt(fs.readFileSync(spec.counterPath, 'utf8'), 10) || 0;
++}
++
++function readHeartbeat(spec) {
++  if (!fs.existsSync(spec.heartbeatPath)) return null;
++  try {
++    return JSON.parse(fs.readFileSync(spec.heartbeatPath, 'utf8'));
++  } catch (e) {
++    return null;
++  }
++}
++
++async function waitForFixtureEvidence(spec, expectedPid, expectedCount, timeout) {
++  var deadline = Date.now() + timeout;
++  while (Date.now() < deadline) {
++    var heartbeat = readHeartbeat(spec);
++    if (counterOf(spec) === expectedCount && heartbeat &&
++        heartbeat.pid === expectedPid && Date.now() - heartbeat.at <= 3000) {
++      return heartbeat;
++    }
++    await delay(25);
++  }
++  throw new Error(spec.name + ' did not publish expected start-counter and heartbeat evidence');
++}
++
++function waitForEntry(pm2, name, predicate, timeout, description) {
++  var deadline = Date.now() + timeout;
++  async function poll() {
++    var entries = await entriesFor(pm2, name);
++    var entry = entries[0];
++    if (entry && predicate(entry)) return entry;
++    if (Date.now() >= deadline) {
++      throw new Error('Timed out waiting for ' + description + ': ' + JSON.stringify(snapshot(entries)));
++    }
++    await delay(50);
++    return poll();
++  }
++  return poll();
++}
++
++async function waitForStableUpdateState(pm2, timeout) {
++  var deadline = Date.now() + timeout;
++  var latest = [];
++  while (Date.now() < deadline) {
++    latest = await allEntries(pm2);
++    if (latest.length === specifications.length && latest.every(function(entry) {
++      return statusOf(entry) === 'online' || statusOf(entry) === 'stopped';
++    })) {
++      return latest;
++    }
++    await delay(100);
++  }
++  throw new Error('PM2 process list did not settle after update: ' + JSON.stringify(snapshot(latest)));
++}
++
++function runLocalCli(args, timeout) {
++  return childProcess.spawnSync(process.execPath, [cliPath].concat(args), {
++    cwd: projectRoot,
++    env: process.env,
++    encoding: 'utf8',
++    timeout: timeout || 30000,
++    maxBuffer: 2 * 1024 * 1024
++  });
++}
++
++function expectedStatus(spec) {
++  return spec.kind === 'resident' ? 'online' : 'stopped';
++}
++
++function recoveryProblems(updateResult, entries, counters, before, options) {
++  options = options || {};
++  var problems = [];
++  var updateExitCode = updateResult && updateResult.exitCode !== undefined
++    ? updateResult.exitCode
++    : updateResult && updateResult.status;
++  if (updateExitCode !== 0)
++    problems.push('real pm2 update exit status was not zero');
++
++  var byName = Object.create(null);
++  entries.forEach(function(entry) {
++    var name = nameOf(entry);
++    if (byName[name]) problems.push(name + ' appeared more than once');
++    byName[name] = entry;
++  });
++
++  var expectedNames = specifications.map(function(spec) { return spec.name; }).sort();
++  var actualNames = Object.keys(byName).sort();
++  if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames))
++    problems.push('process name set differs from the seven fixture processes');
++
++  var beforeByName = Object.create(null);
++  before.forEach(function(entry) { beforeByName[entry.name] = entry; });
++
++  var onlineNames = [];
++  specifications.forEach(function(spec) {
++    var entry = byName[spec.name];
++    if (!entry) {
++      problems.push(spec.name + ' is missing from PM2 list');
++      return;
++    }
++
++    var status = statusOf(entry);
++    var pid = pidOf(entry);
++    var expected = expectedStatus(spec);
++    if (status !== expected)
++      problems.push(spec.name + ' status=' + status + ' expected=' + expected);
++    if (status === 'online') onlineNames.push(spec.name);
++
++    var env = entry.pm2_env || entry;
++    if (env.autorestart !== spec.autorestart)
++      problems.push(spec.name + ' autorestart configuration changed');
++
++    if (spec.kind === 'resident') {
++      if (!(pid > 0)) problems.push(spec.name + ' has no live PID');
++      if (options.checkLive !== false && pid > 0 && !processIsAlive(pid))
++        problems.push(spec.name + ' PID is not live');
++      if (beforeByName[spec.name] && pid === beforeByName[spec.name].pid)
++        problems.push(spec.name + ' PID did not change across daemon update');
++      if (counters[spec.name] !== 2)
++        problems.push(spec.name + ' startup counter=' + counters[spec.name] + ' expected=2');
++      var heartbeat = readHeartbeat(spec);
++      if (!heartbeat || heartbeat.pid !== pid || Date.now() - heartbeat.at > 3000)
++        problems.push(spec.name + ' heartbeat does not prove the listed PID is healthy');
++    } else {
++      if (pid !== 0) problems.push(spec.name + ' stopped process retained PID=' + pid);
++      if (counters[spec.name] !== 1)
++        problems.push(spec.name + ' startup counter=' + counters[spec.name] + ' expected=1');
++    }
++  });
++
++  var expectedOnline = specifications.filter(function(spec) {
++    return spec.kind === 'resident';
++  }).map(function(spec) { return spec.name; }).sort();
++  onlineNames.sort();
++  if (JSON.stringify(onlineNames) !== JSON.stringify(expectedOnline))
++    problems.push('online process set differs from the original resident services');
++
++  return problems;
++}
++
++function baselineProblems(entries) {
++  var problems = [];
++  var byName = Object.create(null);
++  entries.forEach(function(entry) { byName[nameOf(entry)] = entry; });
++  if (entries.length !== specifications.length)
++    problems.push('rollback process count differs from seven');
++  specifications.forEach(function(spec) {
++    var entry = byName[spec.name];
++    if (!entry) {
++      problems.push(spec.name + ' missing after rollback');
++      return;
++    }
++    var expected = expectedStatus(spec);
++    var status = statusOf(entry);
++    var pid = pidOf(entry);
++    if (status !== expected)
++      problems.push(spec.name + ' rollback status=' + status + ' expected=' + expected);
++    if (spec.kind === 'resident') {
++      if (!(pid > 0) || !processIsAlive(pid))
++        problems.push(spec.name + ' rollback has no live process');
++      var heartbeat = readHeartbeat(spec);
++      if (!heartbeat || heartbeat.pid !== pid || Date.now() - heartbeat.at > 3000)
++        problems.push(spec.name + ' rollback heartbeat is not fresh for its live PID');
++    } else if (pid !== 0) {
++      problems.push(spec.name + ' rollback stopped process retained a PID');
++    }
++  });
++  return problems;
++}
++
++function countersByName() {
++  var counters = Object.create(null);
++  specifications.forEach(function(spec) { counters[spec.name] = counterOf(spec); });
++  return counters;
++}
++
++async function connectClient() {
++  var pm2 = new PM2.custom({ pm2_home: home });
++  await call(pm2, 'connect');
++  assert.strictEqual(path.resolve(pm2.pm2_home), home);
++  assert.strictEqual(pm2.Client.rpc_socket_file, cst.DAEMON_RPC_PORT);
++  assert.strictEqual(pm2.Client.pub_socket_file, cst.DAEMON_PUB_PORT);
++  return pm2;
++}
++
++async function rollbackFromBaseline() {
++  assert.strictEqual(rollbackAttempted, false, 'run baseline recovery rollback at most once');
++  rollbackAttempted = true;
++  var countersBeforeRollback = countersByName();
++
++  if (rollbackPm2) {
++    try { await call(rollbackPm2, 'disconnect'); } catch (e) {}
++    rollbackPm2 = null;
++  }
++
++  assert(baselineDump, 'rollback requires a pre-update dump snapshot');
++  fs.writeFileSync(cst.DUMP_FILE_PATH, baselineDump, { mode: 0o600 });
++  var killResult = runLocalCli(['kill'], 20000);
++  if (killResult.error) throw new Error('isolated pm2 kill failed during rollback: ' + killResult.error.code);
++  if (killResult.status !== 0)
++    throw new Error('isolated pm2 kill returned nonzero during rollback: ' + killResult.status);
++
++  // `pm2 kill` leaves the dump alone; rewrite the exact pre-update snapshot in
++  // case the update path modified it before failing.
++  fs.writeFileSync(cst.DUMP_FILE_PATH, baselineDump, { mode: 0o600 });
++  var resurrectResult = runLocalCli(['resurrect'], 30000);
++  if (resurrectResult.error)
++    throw new Error('isolated pm2 resurrect failed during rollback: ' + resurrectResult.error.code);
++  if (resurrectResult.status !== 0)
++    throw new Error('isolated pm2 resurrect returned nonzero during rollback: ' + resurrectResult.status);
++
++  rollbackPm2 = await connectClient();
++  var restored = await waitForStableUpdateState(rollbackPm2, 10000);
++  for (var i = 0; i < specifications.length; i++) {
++    var spec = specifications[i];
++    if (spec.kind === 'resident') {
++      var entry = restored.filter(function(candidate) { return nameOf(candidate) === spec.name; })[0];
++      if (entry && pidOf(entry) > 0)
++        await waitForFixtureEvidence(spec, pidOf(entry), countersBeforeRollback[spec.name] + 1, 5000);
++    }
++  }
++  var problems = baselineProblems(restored);
++  if (problems.length)
++    throw new Error('isolated rollback did not restore baseline: ' + JSON.stringify(problems));
++  var countersAfterRollback = countersByName();
++  specifications.forEach(function(spec) {
++    var expected = spec.kind === 'resident'
++      ? countersBeforeRollback[spec.name] + 1
++      : countersBeforeRollback[spec.name];
++    if (countersAfterRollback[spec.name] !== expected)
++      throw new Error(spec.name + ' rollback launch counter=' + countersAfterRollback[spec.name] +
++        ' expected=' + expected);
++  });
++  return {
++    statuses: snapshot(restored),
++    counters: countersAfterRollback,
++    killExitCode: killResult.status,
++    resurrectExitCode: resurrectResult.status
++  };
++}
++
++async function main() {
++  assert.strictEqual(fs.readFileSync(process.env.PM2_MODULE_CONF_FILE, 'utf8'), '{}');
++  assert.strictEqual(fs.existsSync(cliPath), true);
++
++  await call(updatePm2, 'connect');
++  var initialList = await allEntries(updatePm2);
++  assert.deepStrictEqual(snapshot(initialList), [], 'isolated daemon must start empty');
++
++  for (var i = 0; i < specifications.length; i++) {
++    var spec = specifications[i];
++    var startResult = await call(updatePm2, 'start', {
++      script: spec.scriptPath,
++      name: spec.name,
++      cwd: home,
++      exec_mode: 'fork_mode',
++      interpreter: process.execPath,
++      autorestart: spec.autorestart,
++      instances: 1,
++      watch: false,
++      env: {
++        PM2_UPDATE_RECOVERY_FIXTURE: spec.name,
++        PM2_UPDATE_RECOVERY_KIND: spec.kind,
++        PM2_UPDATE_RECOVERY_MARKER: 'synthetic-only'
++      }
++    });
++    assert(!startResult.err || startResult.err === true,
++      spec.name + ' synthetic process start should be accepted');
++    var initiallyOnline = await waitForEntry(updatePm2, spec.name, function(entry) {
++      return statusOf(entry) === 'online' && pidOf(entry) > 0;
++    }, 8000, spec.name + ' initial online state');
++    await waitForFixtureEvidence(spec, pidOf(initiallyOnline), 1, 5000);
++    assert.strictEqual(counterOf(spec), 1, spec.name + ' must have one initial launch');
++    if (spec.kind === 'updater') {
++      var stopResult = await call(updatePm2, 'stop', spec.name);
++      assert(!stopResult.err || stopResult.err === true,
++        spec.name + ' synthetic stop should succeed');
++      await waitForEntry(updatePm2, spec.name, function(entry) {
++        return statusOf(entry) === 'stopped' && pidOf(entry) === 0;
++      }, 8000, spec.name + ' stopped state before update');
++      assert.strictEqual(counterOf(spec), 1,
++        spec.name + ' stop must not trigger another updater launch');
++    }
++  }
++
++  var beforeEntries = await allEntries(updatePm2);
++  var before = snapshot(beforeEntries);
++  var beforeNames = specifications.map(function(spec) { return spec.name; }).sort();
++  assert.deepStrictEqual(before.map(function(entry) { return entry.name; }).sort(), beforeNames);
++  specifications.forEach(function(spec) {
++    var entry = before.filter(function(item) { return item.name === spec.name; })[0];
++    assert(entry, spec.name + ' must be present in recovery baseline');
++    assert.strictEqual(entry.status, expectedStatus(spec));
++    if (spec.kind === 'resident') {
++      assert(entry.pid > 0 && processIsAlive(entry.pid), spec.name + ' baseline PID must be live');
++      var heartbeat = readHeartbeat(spec);
++      assert(heartbeat && heartbeat.pid === entry.pid, spec.name + ' baseline heartbeat must match PID');
++    } else {
++      assert.strictEqual(entry.pid, 0, spec.name + ' baseline stopped PID must be zero');
++      assert.strictEqual(spec.autorestart, false);
++    }
++  });
++  var beforeCounters = countersByName();
++  specifications.forEach(function(spec) {
++    assert.strictEqual(beforeCounters[spec.name], 1,
++      spec.name + ' independent start counter must be exactly one before update');
++  });
++
++  var dumpResult = await call(updatePm2, 'dump');
++  assert(!dumpResult.err || dumpResult.err === true, 'baseline PM2 dump should succeed');
++  assert(fs.existsSync(cst.DUMP_FILE_PATH), 'pre-update dump must exist inside isolated PM2_HOME');
++  baselineDump = fs.readFileSync(cst.DUMP_FILE_PATH);
++  fs.writeFileSync(path.join(home, 'regression-baseline.dump.pm2'), baselineDump, { mode: 0o600 });
++  var dumpedApps = JSON.parse(baselineDump.toString('utf8'));
++  assert.strictEqual(dumpedApps.length, specifications.length,
++    'baseline dump must contain all two resident and five stopped test apps');
++  specifications.forEach(function(spec) {
++    var dumpEntry = dumpedApps.filter(function(app) { return app.name === spec.name; })[0];
++    assert(dumpEntry, spec.name + ' must be present in baseline dump');
++    var dumpedEnv = dumpEntry.pm2_env || dumpEntry;
++    assert.strictEqual(dumpedEnv.status, expectedStatus(spec),
++      spec.name + ' dump status must reflect pre-update state');
++    assert.strictEqual(dumpedEnv.autorestart, spec.autorestart);
++  });
++
++  var daemonPidFile = cst.PM2_PID_FILE_PATH;
++  var daemonPidBeforeUpdate = fs.existsSync(daemonPidFile)
++    ? parseInt(fs.readFileSync(daemonPidFile, 'utf8').trim(), 10) || 0
++    : 0;
++  assert(daemonPidBeforeUpdate > 0 && processIsAlive(daemonPidBeforeUpdate),
++    'isolated PM2 daemon must be live before update');
++
++  await call(updatePm2, 'disconnect');
++  var updateResult = runLocalCli(['update'], 45000);
++  var daemonPidAfterUpdate = fs.existsSync(daemonPidFile)
++    ? parseInt(fs.readFileSync(daemonPidFile, 'utf8').trim(), 10) || 0
++    : 0;
++  var updateEvidence = {
++    exitCode: updateResult.status,
++    signal: updateResult.signal || null,
++    spawnErrorCode: updateResult.error && updateResult.error.code || null,
++    daemonPidBefore: daemonPidBeforeUpdate,
++    daemonPidAfter: daemonPidAfterUpdate
++  };
++
++  try {
++    assert.ifError(updateResult.error);
++    assert.strictEqual(updateResult.signal, null, 'real pm2 update must not be signaled');
++    assert.strictEqual(updateResult.status, 0,
++      'real local pm2 update command must return exit code zero');
++    assert(daemonPidAfterUpdate > 0 && daemonPidAfterUpdate !== daemonPidBeforeUpdate,
++      'real update must replace the isolated daemon PID');
++
++    rollbackPm2 = await connectClient();
++    var afterEntries = await waitForStableUpdateState(rollbackPm2, 15000);
++    await delay(500);
++    afterEntries = await allEntries(rollbackPm2);
++    var after = snapshot(afterEntries);
++    var afterCounters = countersByName();
++    var actualProblems = recoveryProblems(updateEvidence, afterEntries, afterCounters, before);
++    assert.deepStrictEqual(actualProblems, [],
++      'real pm2 update must preserve stopped state, restart only original online entries, and pass live health checks');
++
++    // A zero exit code and apparently correct status are insufficient if an
++    // updater was actually launched. Verify that a deliberately false health
++    // record is rejected by the independent counter invariant.
++    var fakeCounterValues = Object.assign({}, afterCounters);
++    fakeCounterValues['fake-updater-1']++;
++    var fakeCounterProblems = recoveryProblems(updateEvidence, afterEntries,
++      fakeCounterValues, before);
++    assert(fakeCounterProblems.some(function(message) {
++      return message.indexOf('fake-updater-1 startup counter=2 expected=1') >= 0;
++    }), 'fake healthy status with an unexpected launch count must be rejected');
++
++    var fakeStatusEntries = afterEntries.map(function(entry) {
++      var copy = JSON.parse(JSON.stringify(entry));
++      if (nameOf(copy) === 'fake-updater-2') {
++        var liveResident = afterEntries.filter(function(candidate) {
++          return nameOf(candidate) === 'fake-webhook-service';
++        })[0];
++        var livePid = pidOf(liveResident);
++        copy.pid = livePid;
++        copy.pm2_env.pid = livePid;
++        copy.pm2_env.status = 'online';
++      }
++      return copy;
++    });
++    var fakeStatusProblems = recoveryProblems(updateEvidence, fakeStatusEntries,
++      afterCounters, before);
++    assert(fakeStatusProblems.some(function(message) {
++      return message.indexOf('fake-updater-2 status=online expected=stopped') >= 0;
++    }), 'fake online status for a stopped updater must be rejected');
++
++    // Treat the deliberately false health records as a failed validation and
++    // restore the real daemon from the pre-update dump. This exercises the
++    // rollback path without changing production code or using non-test apps.
++    var rollbackEvidence = await rollbackFromBaseline();
++    assert.strictEqual(rollbackEvidence.killExitCode, 0);
++    assert.strictEqual(rollbackEvidence.resurrectExitCode, 0);
++    specifications.forEach(function(spec) {
++      var expected = spec.kind === 'resident' ? 3 : 1;
++      assert.strictEqual(rollbackEvidence.counters[spec.name], expected,
++        spec.name + ' rollback must preserve the expected independent launch count');
++    });
++
++    console.log('UPDATE_RECOVERY_OK ' + JSON.stringify({
++      pm2Version: packageInfo.version,
++      updateExitCode: updateEvidence.exitCode,
++      updateSignal: updateEvidence.signal,
++      daemonPidBeforeUpdate: updateEvidence.daemonPidBefore,
++      daemonPidAfterUpdate: updateEvidence.daemonPidAfter,
++      before: before,
++      afterUpdate: after,
++      afterUpdateCounters: afterCounters,
++      fakeHealthRejectedByCounter: fakeCounterProblems.some(function(message) {
++        return message.indexOf('fake-updater-1 startup counter=2 expected=1') >= 0;
++      }),
++      fakeHealthRejectedByStatus: fakeStatusProblems.some(function(message) {
++        return message.indexOf('fake-updater-2 status=online expected=stopped') >= 0;
++      }),
++      rollback: rollbackEvidence
++    }));
++  } catch (e) {
++    var rollbackSummary = null;
++    if (!rollbackAttempted) {
++      try {
++        rollbackSummary = await rollbackFromBaseline();
++      } catch (rollbackError) {
++        rollbackSummary = { error: rollbackError.message };
++      }
++    } else {
++      rollbackSummary = { error: 'baseline rollback was already attempted once' };
++    }
++    e.message += '\nSanitized update evidence=' + JSON.stringify({
++      update: updateEvidence,
++      before: before,
++      counters: countersByName(),
++      rollback: rollbackSummary
++    });
++    throw e;
++  }
++}
++
++main().then(function() {
++  if (rollbackPm2) {
++    return call(rollbackPm2, 'disconnect').then(function() { process.exit(0); });
++  }
++  process.exit(0);
++}, function(err) {
++  console.error(err && err.stack || err);
++  var disconnected = rollbackPm2 ? call(rollbackPm2, 'disconnect').catch(function() {}) : Promise.resolve();
++  disconnected.then(function() { process.exit(1); });
++  setTimeout(function() { process.exit(1); }, 1500);
++});

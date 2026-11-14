@@ -1,0 +1,400 @@
+diff --git a/lib/God.js b/lib/God.js
+index d04ee1a..46a06dc 100644
+--- a/lib/God.js
++++ b/lib/God.js
+@@ -347,15 +347,142 @@ God.executeApp = function executeApp(env, cb) {
+     /**
+      * Fork mode logic
+      */
++    var previousProc = God.clusters_db[env_copy.pm_id];
++    var forkAttempt = {};
++    if (previousProc)
++      previousProc._pm2_fork_attempt = forkAttempt;
++
++    function discardStaleFork(clu) {
++      if (!clu) return;
++
++      var pidFile = clu.pm2_env && clu.pm2_env.pm_pid_path;
++      if (pidFile && clu.pid) {
++        try {
++          if (fs.readFileSync(pidFile, 'utf8').trim() === String(clu.pid))
++            fs.unlinkSync(pidFile);
++        } catch (e) {}
++      }
++
++      if (typeof clu.kill !== 'function') return;
++      if (clu.exitCode != null || clu.signalCode != null) return;
++
++      function clearKillTimeout() {
++        if (killTimeout) {
++          clearTimeout(killTimeout);
++          killTimeout = null;
++        }
++      }
++
++      function forceKill() {
++        if (clu.exitCode != null || clu.signalCode != null) return;
++        try {
++          clu.kill('SIGKILL');
++        } catch (e) {
++          debug('Unable to force-kill stale fork pid %s: %s', clu.pid, e.message);
++        }
++      }
++
++      var killTimeout = setTimeout(forceKill,
++        (clu.pm2_env && clu.pm2_env.kill_timeout) || cst.KILL_TIMEOUT);
++      if (killTimeout.unref) killTimeout.unref();
++      clu.once('exit', clearKillTimeout);
++      // A failed signal can emit an asynchronous ChildProcess error. Consume it
++      // here because this child was never registered with the regular handlers.
++      clu.once('error', function(err) {
++        debug('Error while terminating stale fork pid %s: %s', clu.pid, err.message);
++      });
++
++      try {
++        // A false return can mean signaling failed while the process remains
++        // alive; only the exit event proves the timeout is no longer needed.
++        clu.kill(cst.KILL_SIGNAL);
++      } catch (e) {
++        debug('Unable to terminate stale fork pid %s: %s', clu.pid, e.message);
++        forceKill();
++      }
++    }
++
+     God.forkMode(env_copy, function forkMode(err, clu) {
+       if (cb && err) return cb(err);
+-      if (err) return false;
++      if (err) {
++        // Automatic restarts do not have a caller callback. If the OS could
++        // not spawn the replacement, finalize that failed attempt through the
++        // normal exit state machine instead of leaving the previous PID/state
++        // behind. Do not affect a newer or still-running generation.
++        var failed = God.clusters_db[env_copy.pm_id];
++        if (failed && failed === previousProc &&
++            previousProc._pm2_fork_attempt === forkAttempt &&
++            failed._pm2_stop_requested)
++          return false;
++
++        if (failed && failed === previousProc && failed.pm2_env &&
++            previousProc._pm2_fork_attempt === forkAttempt &&
++            failed.pm2_env.status !== cst.ONLINE_STATUS &&
++            failed.pm2_env.status !== cst.LAUNCHING_STATUS) {
++          failed.process = failed.process || {};
++          failed.process.pid = 0;
++          // A stopped process which fails to spawn on an automatic retry is
++          // still eligible for the existing restart policy when no explicit
++          // stop was requested, so mark the failed attempt as launching before
++          // handing it back to that state machine.
++          if (failed.pm2_env.status === cst.STOPPED_STATUS ||
++              failed.pm2_env.status === cst.WAITING_RESTART)
++            failed.pm2_env.status = cst.LAUNCHING_STATUS;
++
++          // This failed spawn is the current attempt but has no child exit
++          // event to refresh its lifecycle timestamps. Reset both timestamps
++          // to this attempt: a previously healthy process may have exceeded
++          // min_uptime before its delayed retry failed, but that must not make
++          // this failed launch stable. Consecutive spawn failures therefore
++          // count toward max_restarts even when restart_delay > min_uptime.
++          failed.pm2_env.created_at = env_copy.pm_uptime;
++          failed.pm2_env.pm_uptime = env_copy.pm_uptime;
++          return God.handleExit(failed, cst.ERROR_EXIT);
++        }
++        return false;
++      }
++
++      var currentProc = God.clusters_db[env_copy.pm_id];
++      var staleAttempt = currentProc !== previousProc ||
++        (previousProc && previousProc._pm2_fork_attempt !== forkAttempt) ||
++        (previousProc && previousProc._pm2_stop_requested);
++      if (staleAttempt) {
++        discardStaleFork(clu);
++        if (cb && !cb_called) {
++          cb_called = true;
++          var canceled = new Error('Fork start was superseded by a stop or newer process generation');
++          canceled.code = 'ECANCELED';
++          return cb(canceled);
++        }
++        return false;
++      }
++
++      try {
++        if (typeof clu.pid !== 'undefined' && clu.pm2_env.pm_pid_path)
++          fs.writeFileSync(clu.pm2_env.pm_pid_path, clu.pid.toString());
++      } catch (e) {
++        console.error(e.stack || e);
++      }
+ 
+       var old_env = God.clusters_db[clu.pm2_env.pm_id];
+       if (old_env) old_env = null;
+ 
+       God.clusters_db[env_copy.pm_id] = clu;
+ 
++      var ready_timeout = null;
++      var listener = null;
++
++      function clearReadyWait() {
++        if (ready_timeout) {
++          clearTimeout(ready_timeout);
++          ready_timeout = null;
++        }
++        if (listener) {
++          God.bus.removeListener('process:msg', listener);
++          listener = null;
++        }
++      }
++
+       clu.once('error', function cluError(err) {
+         console.error(err.stack || err);
+         try {
+@@ -370,6 +497,8 @@ God.executeApp = function executeApp(env, cb) {
+       clu.once('exit', function cluClose(code, signal) {
+         //God.writeExitSeparator(clu.pm2_env, code, signal)
+ 
++        clearReadyWait();
++
+         if (clu.connected === true)
+           clu.disconnect && clu.disconnect();
+         clu._reloadLogs = null;
+@@ -385,17 +514,18 @@ God.executeApp = function executeApp(env, cb) {
+         return readyCb(clu);
+ 
+       // Timeout if the ready message has not been sent before listen_timeout
+-      var ready_timeout = setTimeout(function() {
+-        God.bus.removeListener('process:msg', listener)
++      ready_timeout = setTimeout(function() {
++        ready_timeout = null;
++        if (listener) God.bus.removeListener('process:msg', listener);
++        listener = null;
+         return readyCb(clu)
+       }, clu.pm2_env.listen_timeout || cst.GRACEFUL_LISTEN_TIMEOUT);
+ 
+-      var listener = function (packet) {
++      listener = function (packet) {
+         if (packet.raw === 'ready' &&
+             packet.process.name === clu.pm2_env.name &&
+             packet.process.pm_id === clu.pm2_env.pm_id) {
+-          clearTimeout(ready_timeout);
+-          God.bus.removeListener('process:msg', listener)
++          clearReadyWait();
+           return readyCb(clu)
+         }
+       }
+@@ -511,13 +641,15 @@ God.handleExit = function handleExit(clu, exit_code, kill_signal) {
+ 
+   if (proc.pm2_env.restart_delay !== undefined &&
+       !isNaN(parseInt(proc.pm2_env.restart_delay))) {
+-    proc.pm2_env.status = cst.WAITING_RESTART;
++    if (!overlimit)
++      proc.pm2_env.status = cst.WAITING_RESTART;
+     restart_delay = parseInt(proc.pm2_env.restart_delay);
+   }
+ 
+   if (proc.pm2_env.exp_backoff_restart_delay !== undefined &&
+       !isNaN(parseInt(proc.pm2_env.exp_backoff_restart_delay))) {
+-    proc.pm2_env.status = cst.WAITING_RESTART;
++    if (!overlimit)
++      proc.pm2_env.status = cst.WAITING_RESTART;
+     if (!proc.pm2_env.prev_restart_delay) {
+       proc.pm2_env.prev_restart_delay = proc.pm2_env.exp_backoff_restart_delay
+       restart_delay = proc.pm2_env.exp_backoff_restart_delay
+@@ -526,16 +658,37 @@ God.handleExit = function handleExit(clu, exit_code, kill_signal) {
+       proc.pm2_env.prev_restart_delay = Math.floor(Math.min(15000, proc.pm2_env.prev_restart_delay * 1.5))
+       restart_delay = proc.pm2_env.prev_restart_delay
+     }
+-    console.log(`App [${clu.pm2_env.name}:${clu.pm2_env.pm_id}] will restart in ${restart_delay}ms`)
++    if (!overlimit)
++      console.log(`App [${clu.pm2_env.name}:${clu.pm2_env.pm_id}] will restart in ${restart_delay}ms`)
+   }
+ 
+   if (!stopping && !overlimit) {
+     //make this property unenumerable
+     Object.defineProperty(proc.pm2_env, 'restart_task', {configurable: true, writable: true});
+-    proc.pm2_env.restart_task = setTimeout(function() {
+-      proc.pm2_env.restart_time += 1;
+-      God.executeApp(proc.pm2_env);
++    var restartProc = proc;
++    var restartId = proc.pm2_env.pm_id;
++    var restartGeneration = proc._pm2_fork_attempt;
++    var restartTask;
++    restartTask = setTimeout(function() {
++      // A manual start/restart, stop, or newer process generation supersedes
++      // this retry. In particular, never restart from a stale process object
++      // after its replacement has become the current occupant of this pm_id.
++      if (God.clusters_db[restartId] !== restartProc ||
++          restartProc._pm2_stop_requested ||
++          restartProc._pm2_fork_attempt !== restartGeneration ||
++          restartProc.pm2_env.restart_task !== restartTask ||
++          (restartProc.pm2_env.status !== cst.WAITING_RESTART &&
++           restartProc.pm2_env.status !== cst.STOPPED_STATUS)) {
++        if (restartProc.pm2_env.restart_task === restartTask)
++          restartProc.pm2_env.restart_task = null;
++        return false;
++      }
++
++      restartProc.pm2_env.restart_task = null;
++      restartProc.pm2_env.restart_time += 1;
++      God.executeApp(restartProc.pm2_env);
+     }, restart_delay);
++    proc.pm2_env.restart_task = restartTask;
+   }
+ 
+   return false;
+diff --git a/lib/God/ActionMethods.js b/lib/God/ActionMethods.js
+index 65b50c6..0263879 100644
+--- a/lib/God/ActionMethods.js
++++ b/lib/God/ActionMethods.js
+@@ -268,6 +268,15 @@ module.exports = function(God) {
+     if (proc.process && proc.process.pid)
+       return cb(God.logAndGenerateError('Process with pid ' + proc.process.pid + ' already exists'), {});
+ 
++    // An explicit start supersedes any automatic retry already queued for
++    // this entry. Clear it before executeApp advances the fork generation.
++    clearTimeout(proc.pm2_env.restart_task);
++    delete proc.pm2_env.restart_task;
++
++    // A new explicit start supersedes the stop request for this stored entry.
++    // executeApp assigns a fresh attempt token so older callbacks stay stale.
++    delete proc._pm2_stop_requested;
++
+     return God.executeApp(God.clusters_db[id].pm2_env, function(err, proc) {
+       return cb(err, Utility.clone(proc));
+     });
+@@ -290,6 +299,11 @@ module.exports = function(God) {
+ 
+     var proc     = God.clusters_db[id];
+ 
++    // Remember explicit stop intent even when the process is already stopped
++    // or waiting on an asynchronous fork restart. Its late spawn callback must
++    // not interpret STOPPED as a natural exit and schedule another restart.
++    proc._pm2_stop_requested = true;
++
+     //clear time-out restart task
+     clearTimeout(proc.pm2_env.restart_task);
+ 
+diff --git a/lib/God/ForkMode.js b/lib/God/ForkMode.js
+index 9d97a16..d4f5189 100644
+--- a/lib/God/ForkMode.js
++++ b/lib/God/ForkMode.js
+@@ -35,12 +35,12 @@ module.exports = function ForkMode(God) {
+   God.forkMode = function forkMode(pm2_env, cb) {
+     var command = '';
+     var args    = [];
++    var startCallbackCalled = false;
+ 
+     console.log(`App [${pm2_env.name}:${pm2_env.pm_id}] starting in -fork mode-`)
+     var spawn = require('child_process').spawn;
+ 
+     var interpreter = pm2_env.exec_interpreter || process.execPath;
+-    var pidFile     = pm2_env.pm_pid_path;
+ 
+     if (interpreter !== 'none') {
+       command = interpreter;
+@@ -85,10 +85,32 @@ module.exports = function ForkMode(God) {
+ 
+     log("stds: %j", stds);
+ 
++    function finishStart(err, proc) {
++      if (startCallbackCalled) return false;
++      startCallbackCalled = true;
++      return cb(err, proc);
++    }
++
++    var logsClosed = false;
++
++    function closeLogs() {
++      if (logsClosed) return;
++      logsClosed = true;
++      try {
++        for (var k in stds){
++          if (stds[k] && stds[k].destroy) stds[k].destroy();
++          else if (stds[k] && stds[k].end) stds[k].end();
++          else if (stds[k] && stds[k].close) stds[k].close();
++          stds[k] = stds[k] && stds[k]._file;
++        }
++      } catch(e) { God.logAndGenerateError(e); }
++    }
++
+     Utility.startLogging(stds, function(err, result) {
+       if (err) {
+         God.logAndGenerateError(err);
+-        return cb(err);
++        closeLogs();
++        return finishStart(err);
+       };
+ 
+       try {
+@@ -122,17 +144,18 @@ module.exports = function ForkMode(God) {
+         var cspr = spawn(command, args, options);
+       } catch(e) {
+         God.logAndGenerateError(e);
+-        return cb(e);
++        closeLogs();
++        return finishStart(e);
+       }
+ 
+       if (!cspr || !cspr.stderr || !cspr.stdout) {
+         var fatalError = new Error('Process could not be forked properly, check your system health')
+         God.logAndGenerateError(fatalError);
+-        return cb(fatalError);
++        closeLogs();
++        return finishStart(fatalError);
+       }
+ 
+       cspr.process = {};
+-      cspr.process.pid = cspr.pid;
+       cspr.pm2_env = pm2_env;
+ 
+       function transformLogToJson(pm2_env, type, data) {
+@@ -261,24 +284,7 @@ module.exports = function ForkMode(God) {
+         }
+       });
+ 
+-      try {
+-        var pid = cspr.pid
+-        if (typeof(pid) !== 'undefined')
+-          fs.writeFileSync(pidFile, pid.toString());
+-      } catch (e) {
+-        console.error(e.stack || e);
+-      }
+-
+-      cspr.once('exit', function forkClose(status) {
+-        try {
+-          for(var k in stds){
+-            if (stds[k] && stds[k].destroy) stds[k].destroy();
+-            else if (stds[k] && stds[k].end) stds[k].end();
+-            else if (stds[k] && stds[k].close) stds[k].close();
+-            stds[k] = stds[k]._file;
+-          }
+-        } catch(e) { God.logAndGenerateError(e);}
+-      });
++      cspr.once('close', closeLogs);
+ 
+       cspr._reloadLogs = function(cb) {
+         try {
+@@ -295,7 +301,25 @@ module.exports = function ForkMode(God) {
+ 
+       cspr.unref();
+ 
+-      return cb(null, cspr);
++      // child_process.spawn() reports OS-level launch failures asynchronously.
++      // Do not let God treat the returned ChildProcess as online until Node has
++      // confirmed that the process was actually created.
++      function onSpawn() {
++        cspr.removeListener('error', onSpawnError);
++        cspr.process.pid = cspr.pid;
++        return finishStart(null, cspr);
++      }
++
++      function onSpawnError(err) {
++        cspr.removeListener('spawn', onSpawn);
++        closeLogs();
++        // A spawn error has no child process to kill. The close event follows
++        // the error and remains responsible for completing ChildProcess cleanup.
++        return finishStart(err);
++      }
++
++      cspr.once('spawn', onSpawn);
++      cspr.once('error', onSpawnError);
+     });
+ 
+   };
