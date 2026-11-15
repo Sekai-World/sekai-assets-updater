@@ -27,9 +27,11 @@ The accompanying [regression test patch](PM2_7.0.4_REGRESSION_TESTS.patch)
 (SHA-256 `c8ff4036f9a43de2f8b151b1e16414412c0255e9237fd10cde4d7b1699b49433`)
 preserves the five new test files and their npm script entries; both patches
 apply to the 7.0.4 base in a separate development checkout. They do not apply
-to a different release without review. The local development worktree is
-`.slim/worktrees/pm2-async-spawn` in this repository; the ignored, machine-local
-workspace itself is **not a durable backup**.
+to a different release without review. The former machine-local development
+worktree `.slim/worktrees/pm2-async-spawn` was removed after its three source
+files, package metadata and five test files were reproduced byte-for-byte
+from these patches. Recreate a separate checkout when needed; the ignored
+dependency clone itself is read-only.
 The read-only dependency clone under `.slim/clonedeps/repos/Unitech__pm2/`
 is for inspection only.
 
