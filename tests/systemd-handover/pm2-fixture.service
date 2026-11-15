@@ -1,0 +1,21 @@
+[Unit]
+Description=Isolated PM2 systemd handover fixture
+After=network.target
+
+[Service]
+Type=forking
+Environment=HOME=/var/lib/handover
+Environment=PM2_HOME=/var/lib/handover/.pm2
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/opt/handover-test
+PIDFile=/var/lib/handover/.pm2/pm2.pid
+ExecStart=/usr/local/bin/pm2 resurrect
+ExecStop=/usr/local/bin/pm2 kill
+Restart=on-failure
+RestartSec=2
+KillMode=control-group
+TimeoutStartSec=45
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

@@ -92,8 +92,9 @@ membership rather than trusting `active` alone.
    systemd unit and its module. Never point tests at a production daemon.
 4. Exercise the intended systemd stop/start and rollback in an isolated
    environment, including stopped updater start counters. The
-   `tests/systemd-handover/` fixture in this working tree was used for a
-   synthetic systemd test; check it has been preserved before relying on it.
+   `tests/systemd-handover/` fixture was used for a synthetic systemd test;
+   its manual-adoption checks intentionally report failure when the daemon is
+   outside the service cgroup. Review its isolation requirements before use.
 5. Build a versioned, reviewable patch/package and record both baseline and
    patched file hashes. Reinstalling or upgrading the global npm package can
    silently remove this patch. Do not assume the webhook defense is a
