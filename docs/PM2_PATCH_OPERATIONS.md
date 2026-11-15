@@ -86,10 +86,9 @@ membership rather than trusting `active` alone.
    conclusively diagnosed, so passing this reproduction does not prove its
    historical cause.
 3. Run the new regression tests and the official PM2 unit suite in a disposable
-   Linux environment with its own `HOME`, `PM2_HOME` and RPC sockets. The local
-   worktree currently has `npm run test:fork-async-spawn` and
-   `npm run test:pm2-update-recovery`; their source is also preserved in the
-   regression test patch.
+   Linux environment with its own `HOME`, `PM2_HOME` and RPC sockets. The
+   regression test patch provides `npm run test:fork-async-spawn` and
+   `npm run test:pm2-update-recovery`.
    The latter's fake services are not a replacement for testing the real
    systemd unit and its module. Never point tests at a production daemon.
 4. Exercise the intended systemd stop/start and rollback in an isolated
