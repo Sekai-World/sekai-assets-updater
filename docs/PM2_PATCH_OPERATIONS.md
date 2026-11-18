@@ -89,14 +89,9 @@ membership rather than trusting `active` alone.
    Linux environment with its own `HOME`, `PM2_HOME` and RPC sockets. The
    regression test patch provides `npm run test:fork-async-spawn` and
    `npm run test:pm2-update-recovery`.
-   The latter's fake services are not a replacement for testing the real
-   systemd unit and its module. Never point tests at a production daemon.
-4. Exercise the intended systemd stop/start and rollback in an isolated
-   environment, including stopped updater start counters. The
-   `tests/systemd-handover/` fixture was used for a synthetic systemd test;
-   its manual-adoption checks intentionally report failure when the daemon is
-   outside the service cgroup. Review its isolation requirements before use.
-5. Build a versioned, reviewable patch/package and record both baseline and
+   The latter's fake services do not validate the real systemd unit or its
+   module. Never point tests at a production daemon.
+ 4. Build a versioned, reviewable patch/package and record both baseline and
    patched file hashes. Reinstalling or upgrading the global npm package can
    silently remove this patch. Do not assume the webhook defense is a
    replacement for reviewing PM2.
