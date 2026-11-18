@@ -91,7 +91,7 @@ membership rather than trusting `active` alone.
    `npm run test:pm2-update-recovery`.
    The latter's fake services do not validate the real systemd unit or its
    module. Never point tests at a production daemon.
- 4. Build a versioned, reviewable patch/package and record both baseline and
+4. Build a versioned, reviewable patch/package and record both baseline and
    patched file hashes. Reinstalling or upgrading the global npm package can
    silently remove this patch. Do not assume the webhook defense is a
    replacement for reviewing PM2.
