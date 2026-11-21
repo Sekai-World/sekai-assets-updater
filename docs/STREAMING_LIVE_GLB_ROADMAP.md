@@ -501,6 +501,11 @@ controlled GLB writer/converter implementation.
 
 **Dependencies:** Phase 4 root-scoped GLB and object mappings.
 
+**Real-input status (2026-10-27):** executed, but full acceptance is blocked by
+the native serialized-externals API gap and incomplete real animation binding
+coverage. See [real-model acceptance evidence](GLB_PHASE5_REAL_MODEL_ACCEPTANCE.md).
+Passing unit tests or diagnostic GLBs do not establish publication readiness.
+
 **Work:**
 
 1. Resolve and deduplicate Material, Texture2D/Sprite/TextureArray, and Shader
@@ -534,6 +539,19 @@ controlled GLB writer/converter implementation.
 
 **Dependencies:** Phases 1–5, plus Timeline object fixtures and media metadata.
 
+**Current implementation limitation:** Composite manifests are local-only
+diagnostic unions. Namespace-safe artifact routing and a dedicated composite
+publisher are not implemented, so the builder always marks composites
+`publishable=false`; no composite publication acceptance is claimed.
+
+**Publisher trust boundary:** `publish_package` checks payload/manifest
+consistency only. Operational callers must pass artifacts produced by the
+trusted extraction workflow; manifest claims and matching SHA-256 hashes do
+not establish authenticity or provenance. Version-1 animation cache entries
+whose `animation_unsupported_binding` diagnostics predate the `severity` field
+remain readable and are interpreted as warnings; newly produced entries record
+severity explicitly.
+
 **Work:**
 
 1. Resolve Timeline roots and supported tracks, including
@@ -548,9 +566,10 @@ controlled GLB writer/converter implementation.
 4. Validate the manifest as a complete output contract, including relative URL
    safety, unique IDs, referential integrity, artifact hashes, and package
    completeness status.
-5. Add `composite` publication that unions artifacts but preserves purpose and
-   root boundaries. Browser handlers for effects, lighting, monitors, media,
-   mobs, and stage switching are explicitly out of scope here.
+5. Keep `composite` unions non-publishable until namespace-safe artifact routing
+   and a dedicated publisher are implemented. Browser handlers for effects,
+   lighting, monitors, media, mobs, and stage switching are explicitly out of
+   scope here.
 
 **Acceptance criteria:**
 
@@ -560,8 +579,8 @@ controlled GLB writer/converter implementation.
 - Every manifest artifact URL exists, is contained within the package output,
   and matches its recorded hash; no package marked `publishable=false` reaches
   remote storage.
-- A composite package can refer to the same character, texture, and animation
-  artifact from multiple tracks without duplicate physical files.
+- Future composite publication must refer to shared character, texture, and
+  animation artifacts without duplicate physical files; this is not implemented.
 - An independent offline schema/reference validator can reject a deliberately
   corrupted manifest and accept a complete fixture package.
 

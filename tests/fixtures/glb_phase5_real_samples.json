@@ -1,0 +1,333 @@
+{
+  "schema_version": 1,
+  "purpose": "Sanitized provenance for opt-in Phase 5 real-model acceptance; no bundle payloads or credentials.",
+  "source": {
+    "region": "JP",
+    "os": "ios",
+    "asset_bundle_info_version": "6.8.0.50",
+    "metadata_sha256": "3581a3973d71b88e47aec482c3075345639d9d3dadf38c92c184ef4c8c355afe",
+    "configured_unity_version": "2022.3.21f1",
+    "unity_rs_version": "0.6.1"
+  },
+  "samples": [
+    {
+      "kind": "stage",
+      "root_bundle": "streaming_live/model/stage/base_007_sp_live",
+      "root_node_name": "svl_mdl_stage_007_sp_live_kyoutu_stage",
+      "dependency_closure": [
+        "live_pv/model/camera_decoration/0068",
+        "shader/live",
+        "shader/rp_common",
+        "streaming_live/model/stage/base",
+        "streaming_live/model/stage/base_000_joint_live_lon_vbs",
+        "streaming_live/model/stage/base_002_colabo_es_live",
+        "streaming_live/model/stage/base_006_joint_mmj_wnd",
+        "streaming_live/model/stage/base_007_sp_live",
+        "streaming_live/model/stage_object/beam_light_02",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/flare_light_02",
+        "streaming_live/model/stage_object/keep_out_01",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "metadata_bytes": 22109664
+    },
+    {
+      "kind": "character",
+      "root_bundle": "live_pv/model/characterv2/body/99/0042/boys",
+      "root_node_name": "mdl_bdy_COM_41",
+      "dependency_closure": [
+        "live_pv/model/characterv2/body/99/0042/boys",
+        "shader/live"
+      ],
+      "metadata_bytes": 760973
+    },
+    {
+      "kind": "animation",
+      "root_bundle": "model3d/motion/result/36",
+      "root_node_name": null,
+      "dependency_closure": [
+        "model3d/motion/result/36"
+      ],
+      "metadata_bytes": 36489
+    }
+  ],
+  "bundles": [
+    {
+      "name": "live_pv/model/camera_decoration/0068",
+      "hash": "d89359e8baa48f2365e01344ac80f9dc",
+      "crc": "2071990129",
+      "fileSize": 88744,
+      "dependencies": [
+        "shader/live"
+      ],
+      "cacheDirectoryName": "8606",
+      "cacheFileName": "98be0a783ce2c59e81db52c8b58d1a36",
+      "decoded_bytes": 88744,
+      "decoded_sha256": "f04ecbb094b0dacc6a9800585cc5e7a25439e42afd12a8098706be846357d56f"
+    },
+    {
+      "name": "live_pv/model/characterv2/body/99/0042/boys",
+      "hash": "9b1dbf099cd1acbdcce9d1f20cdda9d0",
+      "crc": "2574807184",
+      "fileSize": 379135,
+      "dependencies": [
+        "shader/live"
+      ],
+      "cacheDirectoryName": "5979",
+      "cacheFileName": "748d4b865be2a3ab159c2dfde2a377cb",
+      "decoded_bytes": 379135,
+      "decoded_sha256": "7e6de75a27d4c0ee30bab045c7f474b19860c4a7aa0bf280a59e9451bb3f0bdf"
+    },
+    {
+      "name": "model3d/motion/result/36",
+      "hash": "dd9baacfaa772b3f7f5bc875f658128c",
+      "crc": "1179652542",
+      "fileSize": 36489,
+      "dependencies": [],
+      "cacheDirectoryName": "32da",
+      "cacheFileName": "d3613988545cf04ae1876aa645de05ae",
+      "decoded_bytes": 36489,
+      "decoded_sha256": "9d8a8c1590c58521530244b4c16e99009908c9f67176dd129468597aa5b0216d"
+    },
+    {
+      "name": "shader/live",
+      "hash": "2ec65f911f4f62d296f3e330d743ab5d",
+      "crc": "940895314",
+      "fileSize": 381838,
+      "dependencies": [],
+      "cacheDirectoryName": "842e",
+      "cacheFileName": "73641cbe4002c54e603bbc9084d771fa",
+      "decoded_bytes": 381837,
+      "decoded_sha256": "8d771d3bab6fe516ccce98326c35884b600fc8606ad4afea8079032531eb6843"
+    },
+    {
+      "name": "shader/rp_common",
+      "hash": "793e6bb07918c7e8cffdb396dea97398",
+      "crc": "4237421300",
+      "fileSize": 134384,
+      "dependencies": [],
+      "cacheDirectoryName": "842e",
+      "cacheFileName": "d8f77f6ab9a3084f5cb516684d37e37c",
+      "decoded_bytes": 134383,
+      "decoded_sha256": "f96840756d7a6a485225b91faca020d334d88ad6fdfacdf016a4ca30746270d7"
+    },
+    {
+      "name": "streaming_live/model/stage/base",
+      "hash": "57f7effa08fb311a520db126e4a2b222",
+      "crc": "951456159",
+      "fileSize": 1358211,
+      "dependencies": [
+        "shader/rp_common",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/keep_out_01",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "cacheDirectoryName": "1ef1",
+      "cacheFileName": "4d9d8e38219275b65e502423577bfa41",
+      "decoded_bytes": 1358211,
+      "decoded_sha256": "aa90bec8fece3047ad6cb15bd93fef8edc041731f9b3a0a24bd48d863ba96110"
+    },
+    {
+      "name": "streaming_live/model/stage/base_000_joint_live_lon_vbs",
+      "hash": "7c288f70be8ef1cbce6c485b7eb7ec3a",
+      "crc": "2622465128",
+      "fileSize": 5297939,
+      "dependencies": [
+        "shader/rp_common",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/flare_light_02",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "cacheDirectoryName": "1ef1",
+      "cacheFileName": "9021b5abd7e5f7246c6f1635e79ec2d6",
+      "decoded_bytes": 5298389,
+      "decoded_sha256": "0a6803d6397f0e43ea4a6373ada758be4d2c1b68e33ac3db50cb52adc90b9cbd"
+    },
+    {
+      "name": "streaming_live/model/stage/base_002_colabo_es_live",
+      "hash": "7fd0b34818bc1f6aa6bd7135d46a11c1",
+      "crc": "3126421469",
+      "fileSize": 3340285,
+      "dependencies": [
+        "shader/rp_common",
+        "streaming_live/model/stage/base",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/flare_light_02",
+        "streaming_live/model/stage_object/keep_out_01",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "cacheDirectoryName": "1ef1",
+      "cacheFileName": "3b0c1e2d7ebaeb883c4dc06514ca507b",
+      "decoded_bytes": 3340388,
+      "decoded_sha256": "e1a227c18c983d59fa114dc516df392f65f656426bd44ca3ec74dc3b3ac6db06"
+    },
+    {
+      "name": "streaming_live/model/stage/base_006_joint_mmj_wnd",
+      "hash": "98214957a733bc23d8518759ae4529f3",
+      "crc": "3943394302",
+      "fileSize": 5121885,
+      "dependencies": [
+        "shader/rp_common",
+        "streaming_live/model/stage/base",
+        "streaming_live/model/stage/base_000_joint_live_lon_vbs",
+        "streaming_live/model/stage/base_002_colabo_es_live",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/flare_light_02",
+        "streaming_live/model/stage_object/keep_out_01",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "cacheDirectoryName": "1ef1",
+      "cacheFileName": "5d312310f74d3a1b89b2f73546638d24",
+      "decoded_bytes": 5121885,
+      "decoded_sha256": "e637619b34cb23c8cbaf9fb8e7e7728235f77614f9e4c32abe29d8646ad12fce"
+    },
+    {
+      "name": "streaming_live/model/stage/base_007_sp_live",
+      "hash": "c987bd97b07e941bf35b9f9bf9b1fb47",
+      "crc": "4169018080",
+      "fileSize": 6165210,
+      "dependencies": [
+        "live_pv/model/camera_decoration/0068",
+        "shader/live",
+        "shader/rp_common",
+        "streaming_live/model/stage/base",
+        "streaming_live/model/stage/base_000_joint_live_lon_vbs",
+        "streaming_live/model/stage/base_002_colabo_es_live",
+        "streaming_live/model/stage/base_006_joint_mmj_wnd",
+        "streaming_live/model/stage_object/beam_light_02",
+        "streaming_live/model/stage_object/flare_light_01",
+        "streaming_live/model/stage_object/flare_light_02",
+        "streaming_live/model/stage_object/keep_out_01",
+        "streaming_live/model/stage_object/light_01",
+        "streaming_live/model/stage_object/spot_light",
+        "streaming_live/model/stage_object/spot_light_01",
+        "streaming_live/model/stage_object/spot_light_base"
+      ],
+      "cacheDirectoryName": "1ef1",
+      "cacheFileName": "35f622860c7e6c10a88b78d0049d9182",
+      "decoded_bytes": 6165210,
+      "decoded_sha256": "8a1703e2219e31afa49903af13169b31bf4282e8719dc67bf1b79c2d5ddc96cc"
+    },
+    {
+      "name": "streaming_live/model/stage_object/beam_light_02",
+      "hash": "7ebc16162dd88107332064cea81e46b3",
+      "crc": "31725231",
+      "fileSize": 34658,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "a99ca5b1ef048752dec3647b6738c0bb",
+      "decoded_bytes": 34658,
+      "decoded_sha256": "0f5d89ff0860624d718b2e1b647e12bebea51efc8a21175f9a1c3437cc2fff18"
+    },
+    {
+      "name": "streaming_live/model/stage_object/flare_light_01",
+      "hash": "fb4bb6123d3521ca00fe67c33dbed622",
+      "crc": "882206183",
+      "fileSize": 24742,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "c2897fd328a74181b1c1570b8f2b210a",
+      "decoded_bytes": 24742,
+      "decoded_sha256": "5f5b81869b6551de2014990d3edc2f1dbbb7ac4ea05547f67771f0270dc4d481"
+    },
+    {
+      "name": "streaming_live/model/stage_object/flare_light_02",
+      "hash": "49a757ec24fa8fbd6c37efd6c90d8163",
+      "crc": "3489710187",
+      "fileSize": 29485,
+      "dependencies": [
+        "shader/rp_common",
+        "streaming_live/model/stage_object/flare_light_01"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "431ddf05dfba69fcb717e571b6100177",
+      "decoded_bytes": 29485,
+      "decoded_sha256": "cb48ac93fd92061e6d2105907fd4cf88319a9b3d555e615416ffc294382e9622"
+    },
+    {
+      "name": "streaming_live/model/stage_object/keep_out_01",
+      "hash": "5b90f60d7c9a92586e314e3e9b2ff27f",
+      "crc": "440951491",
+      "fileSize": 34583,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "489094c572d7cac69e5aee078fde9ee9",
+      "decoded_bytes": 34583,
+      "decoded_sha256": "6eccf5dc30490e9f1a1a86db85fb4f931c93ff9aa54430b34ffeb1181c100426"
+    },
+    {
+      "name": "streaming_live/model/stage_object/light_01",
+      "hash": "aaabbf86db3729080762aa3b9c20862e",
+      "crc": "1663383516",
+      "fileSize": 19979,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "fe297a910f944d7c182d89f05e69042c",
+      "decoded_bytes": 19979,
+      "decoded_sha256": "2a46303c5ef5bc51ffdc676547ecc197014099a648bbf6612dc6e70256359097"
+    },
+    {
+      "name": "streaming_live/model/stage_object/spot_light",
+      "hash": "d4900fa71c24437659d8f2e97fce5e9b",
+      "crc": "3159300811",
+      "fileSize": 21015,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "ff3d505a006b26554a57f33b0d8748e1",
+      "decoded_bytes": 21015,
+      "decoded_sha256": "215542811d5c79e460284804736e14f01f5ad667a0d5fd499d78cc11e56362b1"
+    },
+    {
+      "name": "streaming_live/model/stage_object/spot_light_01",
+      "hash": "acc49ce42d137fe52223e652f463a8e5",
+      "crc": "1657872750",
+      "fileSize": 34827,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "efafa4a79cfa71173561edcd4707e3c7",
+      "decoded_bytes": 34827,
+      "decoded_sha256": "55072f9a55f62be6be60bc58bea78a44c5a49113e527071a3ad1bcf38d47129f"
+    },
+    {
+      "name": "streaming_live/model/stage_object/spot_light_base",
+      "hash": "b31b1f627dd04bdaa5befd2f9a997d2a",
+      "crc": "627031588",
+      "fileSize": 21879,
+      "dependencies": [
+        "shader/rp_common"
+      ],
+      "cacheDirectoryName": "3db9",
+      "cacheFileName": "2c19029e2aff6f742f9e2544f97418d3",
+      "decoded_bytes": 21879,
+      "decoded_sha256": "f60860c6aca94f4e991648f10aa1d4c39b70971b4a6422632811a383236ff130"
+    }
+  ],
+  "integrity_note": "Metadata hash/CRC are recorded as provenance, not asserted as downloaded-byte digests. decoded_sha256 and decoded_bytes describe the locally downloaded, deobfuscated UnityFS payloads."
+}

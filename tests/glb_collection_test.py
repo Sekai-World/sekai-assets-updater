@@ -221,7 +221,13 @@ def _environment(include_shader_pack: bool = True):
 
 
 def _table(environment):
-    return unity_rs_adapter.build_collection_file_table(environment)
+    return unity_rs_adapter.build_collection_file_table(
+        environment, serialized_externals={0: (SHADER_BUNDLE,)}
+    )
+
+
+def _patch_fake_external_metadata(monkeypatch, collection_module) -> None:
+    monkeypatch.setattr(collection_module, "build_collection_file_table", _table)
 
 
 def test_iter_pptr_locations_walks_nested_trees_deterministically() -> None:
@@ -259,6 +265,21 @@ def test_collection_file_table_builds_portable_identities_and_externals() -> Non
     unknown = table.resolve_file_id(1, 1)
     assert unknown.kind == "unknown_external"
     assert unknown.dependency_name is None
+
+
+def test_missing_serialized_externals_stay_unknown_and_block_reachability() -> None:
+    environment = _environment()
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    external = table.resolve_file_id(0, 1)
+    report = validate_collection_reachability(environment, table, _plan().roots)
+
+    assert external.kind == "unknown_external"
+    assert external.dependency_name is None
+    assert not report.publishable
+    finding = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert finding.dependency_name is None
+    assert finding.severity == "error"
 
 
 def test_resolve_pptr_covers_same_file_null_and_external_cases() -> None:
@@ -346,6 +367,67 @@ def test_optional_unresolved_external_is_structured_warning() -> None:
     external = [f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL]
     assert [f.severity for f in external] == ["warning"]
     assert report.publishable
+
+
+def _native_external_reachability_environment(*, fail_read: bool = False):
+    studio = _studio(include_shader_pack=False)
+
+    def file_external_page(file_index: int, *, offset: int = 0, limit: int = 4096):
+        if fail_read and file_index == 0:
+            raise RuntimeError("native external metadata unavailable")
+        rows = (
+            [
+                SimpleNamespace(
+                    file_id=1,
+                    path=SHADER_BUNDLE,
+                    guid=None,
+                    kind=None,
+                    prefix=None,
+                )
+            ]
+            if file_index == 0
+            else []
+        )
+        return rows[offset : offset + limit]
+
+    studio.file_external_page = file_external_page
+    return unity_rs_adapter.UnityRsEnvironment(studio)
+
+
+def test_native_optional_named_path_remains_error_and_unpublishable() -> None:
+    environment = _native_external_reachability_environment()
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    report = validate_collection_reachability(
+        environment,
+        table,
+        _plan().roots,
+        optional_dependencies=frozenset({SHADER_BUNDLE}),
+    )
+
+    assert table.externals_of(0) == (SHADER_BUNDLE,)
+    external = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert external.dependency_name is None
+    assert external.severity == "error"
+    assert not report.publishable
+
+
+def test_failed_native_external_read_does_not_weaken_optional_reachability() -> None:
+    environment = _native_external_reachability_environment(fail_read=True)
+    table = unity_rs_adapter.build_collection_file_table(environment)
+
+    report = validate_collection_reachability(
+        environment,
+        table,
+        _plan().roots,
+        optional_dependencies=frozenset({SHADER_BUNDLE}),
+    )
+
+    assert table.externals_of(0) == ()
+    external = next(f for f in report.findings if f.code == DIAG_UNRESOLVED_EXTERNAL)
+    assert external.dependency_name is None
+    assert external.severity == "error"
+    assert not report.publishable
 
 
 def test_expected_class_map_reports_type_mismatch() -> None:
@@ -515,6 +597,7 @@ def test_extract_collection_sync_publishes_manifest(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=True),
     )
+    _patch_fake_external_metadata(monkeypatch, glb_collection)
 
     result = extract_collection_sync(plan, payloads, "2022.3.21f1", str(manifest_path))
 
@@ -537,6 +620,7 @@ def test_extract_collection_sync_refuses_non_publishable_package(
         "load_collection",
         lambda _payloads, _version: _environment(include_shader_pack=False),
     )
+    _patch_fake_external_metadata(monkeypatch, glb_collection)
 
     with pytest.raises(PackageNotPublishable) as exc_info:
         extract_collection_sync(plan, payloads, "2022.3.21f1", str(manifest_path))
